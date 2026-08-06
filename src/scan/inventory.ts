@@ -103,13 +103,26 @@ async function listFiles(root: string): Promise<string[]> {
 		});
 		stdout = res.stdout;
 	} catch (err) {
-		const e = err as NodeJS.ErrnoException & { stdout?: string };
-		// rg exits 1 when it matches nothing, which is a real (empty) answer.
+		// execFile sets `code` to the spawn error string (ENOENT) or, when the
+		// process ran and failed, to its numeric exit status.
+		const e = err as { code?: string | number; stdout?: string; stderr?: string };
 		if (e.code === "ENOENT") {
 			throw new Error("ripgrep (rg) not found on PATH — opensec needs it for inventory.");
 		}
-		if (typeof e.stdout !== "string") throw err;
-		stdout = e.stdout;
+		// Exit 1 means "no matches", which is a real (empty) answer. Every other
+		// non-zero exit means rg gave up partway — typically an unreadable
+		// directory, where it prints what it could reach and exits 2. Accepting
+		// that truncated list would silently shrink the denominator every coverage
+		// number is computed against, so the scan would claim high coverage of a
+		// repo it never finished enumerating.
+		if (e.code !== 1) {
+			throw new Error(
+				`ripgrep failed to enumerate the repository (exit ${String(e.code)}): ` +
+					`${(e.stderr ?? "").trim() || "no stderr"}. ` +
+					`The file list would be incomplete, and every coverage number derives from it.`,
+			);
+		}
+		stdout = typeof e.stdout === "string" ? e.stdout : "";
 	}
 	return stdout
 		.split("\n")

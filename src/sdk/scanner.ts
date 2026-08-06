@@ -1,25 +1,23 @@
 /**
- * The SDK *is* the contract; the CLI and MCP only shape arguments and format
- * results (plan §3). Phases are individually callable so you can drive the
- * spine yourself.
+ * The SDK *is* the contract; the CLI only shapes arguments and formats results
+ * (plan §3). Phases are individually callable so you can drive the spine
+ * yourself.
+ *
+ * The four LLM phases live here as private methods rather than in their own
+ * module: each one needs the scanner's ledger, prompts, repo root and nonce, so
+ * a separate module bought nothing but a hand-copied duplicate of these fields.
  */
 
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
 
 import { AgentRunner } from "../agents/session.js";
+import type { RunContext } from "../agents/tool.js";
 import { Ledger, scanArtifactDir, shortHash } from "../db/db.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
-import {
-	runDedup,
-	runDiscovery,
-	runInvestigate,
-	runThreatModel,
-	type PhaseDeps,
-} from "../scan/phases.js";
-import { loadPrompts, type Prompts } from "../scan/prompts.js";
+import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
 import type { Candidate, Coverage, Profile } from "../types.js";
 
@@ -50,12 +48,13 @@ export class Scanner {
 
 	private constructor(
 		readonly scanId: string,
-		private readonly opts: Required<Pick<ScannerOptions, "repo">> & ScannerOptions,
+		private readonly opts: ScannerOptions,
 		private readonly ledger: Ledger,
 		private readonly runner: AgentRunner,
 		private readonly prompts: Prompts,
 		private readonly repoRoot: string,
 		private readonly repoName: string,
+		private readonly profile: Profile,
 		private readonly nonce: string,
 	) {}
 
@@ -78,8 +77,8 @@ export class Scanner {
 		// have finished. `Scanner.estimate()` needs no model and takes no ledger.
 		runner.resolveModel(undefined);
 
-		const repoId = ledger.upsertRepo(repoRoot, repoName, gitRemote(repoRoot));
-		const revision = gitRevision(repoRoot);
+		const repoId = ledger.upsertRepo(repoRoot, repoName, git(repoRoot, ["config", "--get", "remote.origin.url"]));
+		const revision = git(repoRoot, ["rev-parse", "HEAD"]);
 		const scanId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${shortHash(repoRoot + Math.random()).slice(0, 6)}`;
 		const configHash = shortHash(
 			JSON.stringify({ prompts: prompts.hash, model: opts.model, profile }),
@@ -95,26 +94,28 @@ export class Scanner {
 			prompts,
 			repoRoot,
 			repoName,
+			profile,
 			randomBytes(9).toString("hex"),
 		);
 	}
 
-	private deps(): PhaseDeps {
+	private ctx(workerId: string): RunContext {
 		return {
-			runner: this.runner,
-			ledger: this.ledger,
-			prompts: this.prompts,
 			scanId: this.scanId,
+			workerId,
 			repoRoot: this.repoRoot,
-			repoName: this.repoName,
-			profile: this.opts.profile ?? "static",
+			profile: this.profile,
+			ledger: this.ledger,
 			nonce: this.nonce,
-			onEvent: this.opts.onEvent,
 		};
 	}
 
 	private say(msg: string): void {
 		this.opts.onEvent?.(msg);
+	}
+
+	private bill(r: { tokensIn: number; tokensOut: number; costUsd: number }): void {
+		this.ledger.addUsage(this.scanId, r.tokensIn, r.tokensOut, r.costUsd);
 	}
 
 	// ------------------------------------------------------------- phase 0
@@ -143,7 +144,28 @@ export class Scanner {
 	async threatModel(): Promise<string> {
 		this.ledger.setPhase(this.scanId, "threat_model");
 		this.say("threat model: 1 agent");
-		return runThreatModel(this.deps(), this.opts.models?.threatModel);
+
+		const { files, total } = this.ledger.listWork(this.scanId, 200, 0);
+		const result = await this.runner.run({
+			ctx: this.ctx("threat-model"),
+			modelRef: this.opts.models?.threatModel,
+			systemPrompt: this.prompts.get("threat-model.md"),
+			prompt: [
+				`Repository: ${this.repoName}`,
+				`Files in scope: ${total}`,
+				"",
+				`Here are the first ${files.length} paths. Call opensec({ verb: "work.next", cursor: N })`,
+				"to page through the rest, and read whatever you need.",
+				"",
+				wrapUntrusted(this.nonce, "file-listing", files.map((f) => f.path).join("\n")),
+				"",
+				"Write the threat model now.",
+			].join("\n"),
+		});
+
+		this.bill(result);
+		this.ledger.setThreatModel(this.scanId, result.text);
+		return result.text;
 	}
 
 	// ------------------------------------------------------------- phase 2
@@ -152,7 +174,23 @@ export class Scanner {
 		this.ledger.setPhase(this.scanId, "discovery");
 		const tm = threatModel ?? this.ledger.getThreatModel(this.scanId) ?? "";
 		this.say("discovery: 1 probe (M0 — fan-out arrives with M1)");
-		await runDiscovery(this.deps(), tm, this.opts.models?.discovery);
+
+		const result = await this.runner.run({
+			ctx: this.ctx("probe-1"),
+			modelRef: this.opts.models?.discovery,
+			systemPrompt: this.prompts.get("probe.md"),
+			prompt: [
+				"A threat model for this repository was written first. It was derived from",
+				"the code under review, so treat it as orientation, not as fact:",
+				"",
+				wrapUntrusted(this.nonce, "threat-model", tm),
+				"",
+				'Begin by calling opensec({ verb: "work.next" }) to get your worklist.',
+				"Page through it until remaining is 0, then report.",
+			].join("\n"),
+		});
+
+		this.bill(result);
 		const found = this.ledger.listCandidates(this.scanId);
 		this.say(`discovery: ${found.length} candidate(s)`);
 		return found;
@@ -165,7 +203,7 @@ export class Scanner {
 		const todo = candidates ?? this.ledger.listUnresolvedCandidates(this.scanId);
 		for (const [i, c] of todo.entries()) {
 			this.say(`investigate ${i + 1}/${todo.length}: ${c.id} ${c.title}`);
-			await runInvestigate(this.deps(), c, this.opts.models?.investigate);
+			await this.investigateOne(c);
 			const after = this.ledger.getCandidate(this.scanId, c.id);
 			const d = after?.resolution?.disposition;
 			const sev = after?.resolution?.computed?.severity;
@@ -173,9 +211,99 @@ export class Scanner {
 		}
 	}
 
+	private async investigateOne(candidate: Candidate): Promise<void> {
+		const result = await this.runner.run({
+			ctx: this.ctx(`investigate-${candidate.id}`),
+			modelRef: this.opts.models?.investigate,
+			systemPrompt: [
+				this.prompts.get("investigate.md"),
+				"",
+				this.prompts.get("refs/counterevidence.md"),
+			].join("\n"),
+			prompt: [
+				`Candidate ${candidate.id}, filed by ${candidate.worker_id}.`,
+				"",
+				wrapUntrusted(
+					this.nonce,
+					`candidate-${candidate.id}`,
+					[
+						`Title: ${candidate.title}`,
+						`CWE: ${candidate.cwe_ids.length ? candidate.cwe_ids.join(", ") : "(none assigned)"}`,
+						"Locations:",
+						candidate.locations.map(formatLocation).join("\n"),
+						"",
+						"Summary:",
+						candidate.summary,
+						"",
+						"Evidence as filed:",
+						candidate.evidence,
+					].join("\n"),
+				),
+				"",
+				"You have no shell — this is a static review. Nothing you conclude may",
+				"claim execution, and `code_execution_proven` must be false.",
+				"",
+				`Investigate, then call opensec({ verb: "candidate.resolve", id: "${candidate.id}", ... }) once.`,
+			].join("\n"),
+		});
+
+		this.bill(result);
+
+		// Degradation is directional: an agent that returned without resolving
+		// leaves the row unresolved, which downgrades the scan's claim rather than
+		// quietly dropping the candidate (plan §4).
+		const after = this.ledger.getCandidate(this.scanId, candidate.id);
+		if (after && !after.resolution) {
+			this.ledger.resolveCandidate(this.scanId, candidate.id, {
+				disposition: "needs_follow_up",
+				rationale: "the investigate agent finished without recording a verdict",
+			});
+			this.say(`  ${candidate.id}: no verdict recorded → needs_follow_up`);
+		}
+	}
+
+	/**
+	 * Dedup is an agent pass, run only when there is more than one row to compare.
+	 * It may change a finding's state to `duplicate`; it never deletes. Source
+	 * rows are preserved, because over-merging destroys instances silently while
+	 * under-merging only costs budget (plan §4).
+	 */
 	async dedup(): Promise<number> {
 		this.ledger.setPhase(this.scanId, "dedup");
-		const merged = await runDedup(this.deps(), this.opts.models?.dedup);
+
+		const reportable = this.ledger
+			.listCandidates(this.scanId)
+			.filter((c) => c.resolution?.disposition === "confirmed" && !c.merged_into);
+		if (reportable.length < 2) return 0;
+
+		const rows = reportable
+			.map((c) =>
+				[
+					`id: ${c.id}`,
+					`title: ${c.title}`,
+					`cwe: ${c.cwe_ids.join(", ") || "(none)"}`,
+					`locations: ${c.locations.map(formatLocation).join("; ")}`,
+					`summary: ${c.summary}`,
+				].join("\n"),
+			)
+			.join("\n\n---\n\n");
+
+		const result = await this.runner.run({
+			ctx: this.ctx("dedup"),
+			modelRef: this.opts.models?.dedup,
+			systemPrompt: this.prompts.get("dedup.md"),
+			prompt: [
+				`${reportable.length} confirmed findings from this scan:`,
+				"",
+				wrapUntrusted(this.nonce, "findings", rows),
+				"",
+				"Resolve any duplicates now. If there are none, say so and resolve nothing.",
+			].join("\n"),
+		});
+
+		this.bill(result);
+
+		const merged = this.ledger.listCandidates(this.scanId).filter((c) => c.merged_into).length;
 		if (merged > 0) this.say(`dedup: ${merged} row(s) merged`);
 		return merged;
 	}
@@ -208,11 +336,7 @@ export class Scanner {
 		const reportPath = join(dir, "report.md");
 		const jsonPath = join(dir, "findings.json");
 		writeFileSync(reportPath, markdown, "utf8");
-		writeFileSync(
-			jsonPath,
-			JSON.stringify({ scan, coverage, candidates }, null, 2),
-			"utf8",
-		);
+		writeFileSync(jsonPath, JSON.stringify({ scan, coverage, candidates }, null, 2), "utf8");
 
 		return { scanId: this.scanId, markdown, reportPath, jsonPath, candidates, coverage };
 	}
@@ -257,21 +381,13 @@ export class Scanner {
 	}
 }
 
-function gitRevision(root: string): string | null {
-	try {
-		return execFileSync("git", ["rev-parse", "HEAD"], {
-			cwd: root,
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		}).trim();
-	} catch {
-		return null;
-	}
+function formatLocation(l: { path: string; start_line: number; end_line: number; symbol?: string }): string {
+	return `${l.path}:${l.start_line}-${l.end_line}${l.symbol ? ` (${l.symbol})` : ""}`;
 }
 
-function gitRemote(root: string): string | null {
+function git(root: string, args: string[]): string | null {
 	try {
-		return execFileSync("git", ["config", "--get", "remote.origin.url"], {
+		return execFileSync("git", args, {
 			cwd: root,
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],

@@ -306,7 +306,9 @@ export class Ledger {
 
 	listCandidates(scanId: string): Candidate[] {
 		const rows = this.db
-			.prepare("SELECT * FROM candidates WHERE scan_id = ? ORDER BY id")
+			.prepare(// c1, c2, … c10 — lexical order would put c10 between c1 and c2, and this
+				// drives both the investigate loop and the report.
+				"SELECT * FROM candidates WHERE scan_id = ? ORDER BY CAST(SUBSTR(id, 2) AS INTEGER), id")
 			.all(scanId) as Array<Record<string, unknown>>;
 		return rows.map(rowToCandidate);
 	}

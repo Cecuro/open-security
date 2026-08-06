@@ -1,9 +1,9 @@
 /**
  * Severity is computed, never accepted from the model (plan §6).
  *
- * This module is the single source of truth: the matrix below is a data table
- * that `help.ts` renders, `severity.ts` evaluates and the MCP schema describes,
- * so drift is impossible rather than tested for.
+ * This module is the single source of truth: the matrix below is one data table,
+ * evaluated here and rendered by `opensec help severity` and the report appendix,
+ * so the published policy cannot drift from the one being applied.
  *
  * The order matters. Reportability is a gate BEFORE the matrix, because the
  * matrix is not a delete key — low impact downgrades, it never discards.
@@ -39,6 +39,9 @@ const MATRIX: Record<Impact, Record<Likelihood, Severity>> = {
 	low: { high: "medium", medium: "low", low: "low" },
 	none: { high: "low", medium: "low", low: "info" },
 };
+
+/** Methods that actually demonstrate execution, as opposed to reasoning about it. */
+const EXECUTION_METHODS = new Set<Method>(["reproduced_poc", "asan", "debugger"]);
 
 /** Confidence is bound to method numerically, so a static trace cannot report 0.9. */
 export const CONFIDENCE_BY_METHOD: Record<Method, number> = {
@@ -84,10 +87,7 @@ export function computeSeverity(
 
 	let confidence = CONFIDENCE_BY_METHOD[inputs.method];
 	if (
-		(inputs.method === "reproduced_poc" ||
-			inputs.method === "asan" ||
-			inputs.method === "debugger") &&
-		profile !== "container"
+		EXECUTION_METHODS.has(inputs.method) && profile !== "container"
 	) {
 		// Same reasoning: an execution-derived method is not available statically.
 		confidence = CONFIDENCE_BY_METHOD.code_reading;
@@ -144,8 +144,14 @@ export function computeSeverity(
 		}
 	}
 
-	if (!executionProven && severity === "critical" && !proof_gap) {
+	// A `critical` with no proof gap is the strongest claim this tool makes, so
+	// it must rest on an execution-derived method — not on a model setting
+	// `code_execution_proven: true` while reporting `method: "code_reading"`.
+	if (severity === "critical" && !proof_gap && !EXECUTION_METHODS.has(inputs.method)) {
 		proof_gap = "no_execution";
+		rationale.push(
+			`execution was claimed but method is '${inputs.method}', which does not demonstrate it`,
+		);
 	}
 
 	return { severity, likelihood, confidence, reportable: true, proof_gap, rationale };

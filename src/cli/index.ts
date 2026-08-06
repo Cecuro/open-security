@@ -7,6 +7,7 @@
  */
 
 import { Scanner } from "../sdk/scanner.js";
+import { stripControlChars } from "../text.js";
 import { renderMatrix } from "../scan/severity.js";
 import type { Profile } from "../types.js";
 
@@ -44,7 +45,29 @@ async function main(argv: string[]): Promise<number> {
 
 	const opts = parseFlags(rest);
 	const target = opts.positional[0] ?? ".";
-	const maxFiles = opts.flags["max-files"] ? Number(opts.flags["max-files"]) : undefined;
+
+	// A flag that is silently ignored, or a profile that is silently accepted and
+	// then printed in the report header, is a wrong claim about what ran.
+	const PROFILES: Profile[] = ["static", "container"];
+	const profileFlag = opts.flags.profile;
+	if (profileFlag !== undefined && !PROFILES.includes(profileFlag as Profile)) {
+		process.stderr.write(`opensec: unknown profile '${profileFlag}'. Use: ${PROFILES.join(" | ")}\n`);
+		return 2;
+	}
+	let maxFiles: number | undefined;
+	if (opts.flags["max-files"] !== undefined) {
+		maxFiles = Number(opts.flags["max-files"]);
+		if (!Number.isFinite(maxFiles) || maxFiles < 1) {
+			process.stderr.write(`opensec: --max-files needs a positive number\n`);
+			return 2;
+		}
+	}
+	const known = new Set(["estimate", "json"]);
+	const unknown = Object.keys(opts.bools).find((b) => !known.has(b));
+	if (unknown) {
+		process.stderr.write(`opensec: unknown flag '--${unknown}'\n\n${USAGE}`);
+		return 2;
+	}
 
 	// Estimating spends nothing, writes nothing, and needs no model.
 	if (opts.bools.estimate) {
@@ -61,7 +84,7 @@ async function main(argv: string[]): Promise<number> {
 		repo: target,
 		model: opts.flags.model,
 		db: opts.flags.db,
-		profile: (opts.flags.profile as Profile | undefined) ?? "static",
+		profile: (profileFlag as Profile | undefined) ?? "static",
 		promptsDir: opts.flags.prompts,
 		maxFiles,
 		onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
@@ -115,10 +138,7 @@ function parseFlags(argv: string[]): Parsed {
 }
 
 /** Strip ESC and other C0 controls before anything reaches a terminal. */
-function safe(s: string): string {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-	return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
-}
+const safe = stripControlChars;
 
 main(process.argv.slice(2))
 	.then((code) => process.exit(code))

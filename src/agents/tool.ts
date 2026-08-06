@@ -15,6 +15,7 @@ import { Type } from "typebox";
 
 import type { Ledger } from "../db/db.js";
 import { computeSeverity } from "../scan/severity.js";
+import { redactSecrets, stripControlChars } from "../text.js";
 import type {
 	AuthRequired,
 	Disposition,
@@ -28,8 +29,8 @@ import type {
 } from "../types.js";
 
 /**
- * Bound to (scan_id, worker_id). Every adapter carries one; without it the
- * adapters resolve ambient state three different ways (plan §3).
+ * Bound to (scan_id, worker_id): everything a tool call needs to know about
+ * who is writing and what they are allowed to write about.
  */
 export interface RunContext {
 	scanId: string;
@@ -279,6 +280,16 @@ function candidateResolve(ctx: RunContext, p: Params): string {
 		if (!target || dup === id) {
 			disposition = "needs_follow_up";
 			notes.push(`duplicate_of '${dup}' does not resolve; kept as needs_follow_up`);
+		} else if (target.merged_into) {
+			// Every duplicate must point at a row that survives. Without this, a
+			// mutual merge (c1→c2, c2→c1) removes BOTH rows from the report — the
+			// silent instance destruction plan §4 calls unacceptable. dedup.md tells
+			// the model not to chain, but a prompt is not an enforcement mechanism.
+			disposition = "needs_follow_up";
+			notes.push(
+				`duplicate_of '${dup}' is itself merged into '${target.merged_into}'; ` +
+					`point every duplicate at the surviving row. Kept as needs_follow_up.`,
+			);
 		} else {
 			ctx.ledger.resolveCandidate(ctx.scanId, id, {
 				disposition: "duplicate",
@@ -292,7 +303,7 @@ function candidateResolve(ctx: RunContext, p: Params): string {
 	const resolution: Resolution = { disposition, rationale };
 
 	if (disposition === "confirmed" || disposition === "suppressed") {
-		const inputs = readSeverityInputs(p, notes);
+		const inputs = readSeverityInputs(ctx, p, notes);
 		if (!inputs) {
 			resolution.disposition = "needs_follow_up";
 			notes.push("severity inputs incomplete; kept as needs_follow_up");
@@ -330,12 +341,24 @@ function leadRecord(ctx: RunContext, p: Params): string {
 	return JSON.stringify({ status: "recorded" });
 }
 
-function readSeverityInputs(p: Params, notes: string[]): SeverityInputs | null {
+function readSeverityInputs(
+	ctx: RunContext,
+	p: Params,
+	notes: string[],
+): SeverityInputs | null {
 	const impact = p.impact as Impact | undefined;
 	const vector = p.vector as Vector | undefined;
 	const method = p.method as Method | undefined;
 	if (!impact || !method) return null;
 	if (!vector) notes.push("no vector given; treated as unknown, which caps likelihood at low");
+
+	// suppression.evidence is agent prose like every other free-text field, and
+	// it reaches the report through computed.rationale.
+	const suppression = p.suppression as SeverityInputs["suppression"];
+	if (suppression?.evidence) {
+		suppression.evidence = sanitize(ctx, suppression.evidence);
+	}
+
 	return {
 		impact,
 		vector: vector ?? "unknown",
@@ -345,7 +368,7 @@ function readSeverityInputs(p: Params, notes: string[]): SeverityInputs | null {
 		code_execution_proven: p.code_execution_proven === true,
 		traced_path_no_control: p.traced_path_no_control === true,
 		method,
-		suppression: p.suppression as SeverityInputs["suppression"],
+		suppression,
 	};
 }
 
@@ -364,21 +387,38 @@ function validateLocation(ctx: RunContext, loc: Location): Location {
 
 	const root = realpathSync(ctx.repoRoot);
 	const abs = resolve(root, loc.path);
-	const rel = relative(root, abs);
-	if (rel.startsWith("..") || isAbsolute(rel)) {
+
+	// Three checks, in this order, so each failure reports its real cause.
+	//
+	// 1. Lexical containment catches `../etc/passwd` before touching the disk.
+	if (outsideRoot(root, abs)) {
 		throw new Error(`location '${loc.path}' resolves outside the repo`);
 	}
 
-	let st: ReturnType<typeof lstatSync>;
+	// 2. A symlinked leaf is rejected outright rather than silently rewritten to
+	//    its target: an agent citing a link has cited the wrong file.
+	let leaf: ReturnType<typeof lstatSync>;
 	try {
-		st = lstatSync(abs);
+		leaf = lstatSync(abs);
 	} catch {
 		throw new Error(`no such file: ${loc.path}`);
 	}
-	if (st.isSymbolicLink()) throw new Error(`location '${loc.path}' is a symlink`);
-	if (!st.isFile()) throw new Error(`location '${loc.path}' is not a regular file`);
+	if (leaf.isSymbolicLink()) throw new Error(`location '${loc.path}' is a symlink`);
+	if (!leaf.isFile()) throw new Error(`location '${loc.path}' is not a regular file`);
 
-	const lineCount = readFileSync(abs, "utf8").split("\n").length;
+	// 3. Lexical containment is not enough on its own: `lstat` declines to follow
+	//    only the FINAL component, so `docs/passwd` where `docs` is a symlink to
+	//    /tmp/outside passes step 1 and reads a file outside the repo entirely.
+	//    Containment must also hold for the fully resolved path.
+	const real = realpathSync(abs);
+	if (outsideRoot(root, real)) {
+		throw new Error(
+			`location '${loc.path}' resolves outside the repo through a symlinked directory`,
+		);
+	}
+	const rel = relative(root, real);
+
+	const lineCount = countLines(readFileSync(real, "utf8"));
 	const start = Number(loc.start_line);
 	const end = Number(loc.end_line ?? loc.start_line);
 	if (!Number.isInteger(start) || start < 1 || start > lineCount) {
@@ -394,8 +434,27 @@ function validateLocation(ctx: RunContext, loc: Location): Location {
 		path: rel,
 		start_line: start,
 		end_line: end,
-		...(loc.symbol ? { symbol: String(loc.symbol).slice(0, 200) } : {}),
+		// symbol is agent prose like any other field and gets the same treatment.
+		...(loc.symbol ? { symbol: sanitize(ctx, String(loc.symbol)).slice(0, 200) } : {}),
 	};
+}
+
+function outsideRoot(root: string, abs: string): boolean {
+	const rel = relative(root, abs);
+	return rel.length === 0 || rel.startsWith("..") || isAbsolute(rel);
+}
+
+/**
+ * Lines in a file, not elements produced by splitting on "\n". A trailing
+ * newline yields a final empty element that is not a line — counting it accepts
+ * line N+1 on almost every real file, which is the single most likely
+ * hallucination this check exists to catch.
+ */
+function countLines(content: string): number {
+	if (content.length === 0) return 0;
+	const parts = content.split("\n");
+	if (parts.at(-1) === "") parts.pop();
+	return parts.length;
 }
 
 function normalizeCwe(cwe: string[] | undefined): string[] {
@@ -420,12 +479,8 @@ function requireText(v: unknown, field: string): string {
  * cannot forge a trust boundary, and strip control characters so findings
  * cannot rewrite a terminal on the way out.
  */
-function sanitize(ctx: RunContext, text: string): string {
-	return text
-		.replaceAll(ctx.nonce, "[nonce-stripped]")
-		// Keep tab/newline/CR; drop every other C0 control, plus DEL. ESC in
-		// particular: OSC 52 writes the clipboard and OSC 8 forges links.
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-		.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
-		.slice(0, 20000);
+export function sanitize(ctx: Pick<RunContext, "nonce">, text: string): string {
+	return redactSecrets(
+		stripControlChars(text.replaceAll(ctx.nonce, "[nonce-stripped]")),
+	).slice(0, 20000);
 }

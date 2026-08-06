@@ -4,17 +4,29 @@
  * (the `opensec` tool silently vanishes), traces are lost, and budget and abort
  * don't propagate (plan §3).
  *
- * Two things here are load-bearing beyond "call the model":
+ * Three things here are load-bearing beyond "call the model":
  *
- * 1. `noContextFiles` — the scanned repo's AGENTS.md/CLAUDE.md must never become
- *    instructions. Scope comes from the human, never from the repo (plan §5).
- * 2. read/grep are wrapped so coverage is derived from what actually happened.
+ * 1. **pi's "project" is never the scanned repo.** A repo under review is
+ *    attacker-authored. If pi treats it as the current project it will read
+ *    `<repo>/.pi/settings.json` (trusted by default) and act on it — including
+ *    `npmCommand`, which is spawned to install `packages`. That is host command
+ *    execution from a file in the scanned repo, under the profile that promises
+ *    to execute nothing. It will also pick up `<repo>/.pi/APPEND_SYSTEM.md` and
+ *    splice it into the system prompt, above our instructions and outside any
+ *    nonce. So settings are in-memory and untrusted, resources are loaded from a
+ *    directory we own, and the repo path is passed ONLY to the file tools.
+ * 2. Tool reads are confined to the repo root. Without that, one injected
+ *    instruction reads ~/.ssh or the opensec ledger into a finding.
+ * 3. read/grep are wrapped so coverage is derived from what actually happened.
  *    There is no self-report verb (plan §6).
  */
 
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
+
 import {
 	createAgentSession,
-	createBashToolDefinition,
 	createFindToolDefinition,
 	createGrepToolDefinition,
 	createLsToolDefinition,
@@ -29,7 +41,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 
-import type { Ledger } from "../db/db.js";
 import { createOpensecTool, type RunContext } from "./tool.js";
 
 export interface AgentRunResult {
@@ -45,10 +56,15 @@ export interface RunArgs {
 	systemPrompt: string;
 	/** The turn itself. */
 	prompt: string;
-	/** Only investigate gets bash, and only under the container profile. */
-	allowBash?: boolean;
 	/** Per-phase model override; falls back to the runner's default. */
 	modelRef?: string;
+}
+
+/** A directory opensec owns, used as pi's "project" so the repo never is. */
+function agentWorkDir(): string {
+	const dir = join(homedir(), ".opensec", "agent");
+	mkdirSync(dir, { recursive: true });
+	return dir;
 }
 
 export class AgentRunner {
@@ -58,10 +74,7 @@ export class AgentRunner {
 		private readonly repoRoot: string,
 	) {}
 
-	static async create(opts: {
-		repoRoot: string;
-		modelRef?: string;
-	}): Promise<AgentRunner> {
+	static async create(opts: { repoRoot: string; modelRef?: string }): Promise<AgentRunner> {
 		const runtime = await ModelRuntime.create();
 		return new AgentRunner(runtime, opts.modelRef, opts.repoRoot);
 	}
@@ -83,42 +96,43 @@ export class AgentRunner {
 	async run(args: RunArgs): Promise<AgentRunResult> {
 		const { ctx } = args;
 		const resolved = this.resolveModel(args.modelRef);
+		const workDir = agentWorkDir();
 
-		const settingsManager = SettingsManager.create(this.repoRoot, getAgentDir());
+		// No file I/O and explicitly untrusted: nothing in any repo can reach
+		// npmCommand, packages, or any other setting pi would act on.
+		const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
 		const resourceLoader = new DefaultResourceLoader({
-			cwd: this.repoRoot,
+			cwd: workDir,
 			agentDir: getAgentDir(),
 			settingsManager,
-			// The repo under review is attacker-authored. None of it is instruction.
 			noContextFiles: true,
 			noExtensions: true,
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
 			systemPrompt: args.systemPrompt,
+			// Explicit: without this, pi discovers .pi/APPEND_SYSTEM.md from cwd and
+			// appends it to the system prompt.
+			appendSystemPrompt: [],
 		});
 		await resourceLoader.reload();
 
 		const tools: AnyToolDef[] = [
-			instrumentRead(createReadToolDefinition(this.repoRoot) as AnyToolDef, ctx),
-			instrumentGrep(createGrepToolDefinition(this.repoRoot) as AnyToolDef, ctx),
-			createFindToolDefinition(this.repoRoot) as AnyToolDef,
-			createLsToolDefinition(this.repoRoot) as AnyToolDef,
+			instrumentRead(confine(createReadToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
+			instrumentGrep(confine(createGrepToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
+			confine(createFindToolDefinition(this.repoRoot) as AnyToolDef, ctx),
+			confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx),
 			createOpensecTool(ctx) as AnyToolDef,
 		];
-		if (args.allowBash) tools.push(createBashToolDefinition(this.repoRoot) as AnyToolDef);
 
 		const { session } = await createAgentSession({
-			cwd: this.repoRoot,
+			cwd: workDir,
 			model: resolved.model,
 			thinkingLevel: resolved.thinkingLevel,
 			modelRuntime: this.runtime,
 			resourceLoader,
 			settingsManager,
-			// In-memory: writing pi session files into the scanned repo would be a
-			// side effect on code we are only supposed to read.
 			sessionManager: SessionManager.inMemory(),
-			// Our instrumented copies replace the built-ins wholesale.
 			noTools: "builtin",
 			customTools: tools,
 		});
@@ -126,17 +140,15 @@ export class AgentRunner {
 		// The agent loop converts a failed turn into an assistant message carrying
 		// `errorMessage` and lets prompt() resolve normally. Left alone, a 404 from
 		// the provider reads as "the probe found nothing" and the scan completes
-		// clean. A scan must never claim evidence it does not have, so failures are
-		// collected here and rethrown.
+		// clean. A scan must never claim evidence it does not have.
+		//
+		// Only terminal failures count: pi emits the errored message *before*
+		// deciding to retry, and flags the retry on agent_end. Treating a
+		// recovered-from blip as fatal would throw away a scan that succeeded.
 		const failures: string[] = [];
 		const unsubscribe = session.subscribe((event) => {
-			const message =
-				event.type === "agent_end"
-					? event.messages.at(-1)
-					: event.type === "message_end"
-						? event.message
-						: undefined;
-			const err = (message as { errorMessage?: string } | undefined)?.errorMessage;
+			if (event.type !== "agent_end" || event.willRetry) return;
+			const err = (event.messages.at(-1) as { errorMessage?: string } | undefined)?.errorMessage;
 			if (err) failures.push(err);
 		});
 
@@ -144,22 +156,13 @@ export class AgentRunner {
 			await session.prompt(args.prompt, { expandPromptTemplates: false });
 			await session.waitForIdle();
 
-			const stats = session.getSessionStats();
-			const text = session.getLastAssistantText() ?? "";
-
-			if (failures.length > 0 && text.length === 0) {
+			if (failures.length > 0) {
 				throw new Error(`agent run failed: ${failures[0]}`);
 			}
-			if (failures.length > 0) {
-				// It produced something despite an error somewhere — surface it rather
-				// than letting a partial run pass as a whole one.
-				throw new Error(
-					`agent run reported ${failures.length} error(s), first: ${failures[0]}`,
-				);
-			}
 
+			const stats = session.getSessionStats();
 			return {
-				text,
+				text: session.getLastAssistantText() ?? "",
 				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
 				tokensOut: stats.tokens.output,
 				costUsd: stats.cost,
@@ -172,6 +175,33 @@ export class AgentRunner {
 }
 
 type AnyToolDef = ToolDefinition<TSchema, unknown, unknown>;
+
+/**
+ * pi's file tools take the repo root only as a base for relative paths — the
+ * schemas accept absolute paths and resolve them anywhere on the host. Plan §5
+ * says reads are confined to the repo root, so confine them.
+ */
+function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
+	const inner = def.execute.bind(def);
+	return {
+		...def,
+		async execute(id, params, signal, onUpdate, extCtx) {
+			const path = (params as { path?: unknown } | undefined)?.path;
+			if (typeof path === "string" && path.length > 0 && !withinRepo(ctx.repoRoot, path)) {
+				throw new Error(
+					`'${path}' is outside the repository under review. ` +
+						`This scan may only read inside ${ctx.repoRoot}.`,
+				);
+			}
+			return inner(id, params, signal, onUpdate, extCtx);
+		},
+	} as AnyToolDef;
+}
+
+function withinRepo(root: string, p: string): boolean {
+	const rel = relative(resolve(root), resolve(root, p));
+	return !rel.startsWith("..") && !isAbsolute(rel);
+}
 
 /** Tool results are content blocks; coverage cares about the text in them. */
 function resultText(result: { content?: Array<{ type: string; text?: string }> }): string {
@@ -235,20 +265,6 @@ function parseGrepPaths(output: string): Set<string> {
 }
 
 function toRepoRelative(root: string, p: string): string | null {
-	const norm = p.startsWith(root) ? p.slice(root.length) : p;
-	const rel = norm.replace(/^\/+/, "");
-	return rel.length > 0 && !rel.startsWith("..") ? rel : null;
-}
-
-
-/** Convenience for building a RunContext for a given worker. */
-export function runContext(args: {
-	scanId: string;
-	workerId: string;
-	repoRoot: string;
-	profile: RunContext["profile"];
-	ledger: Ledger;
-	nonce: string;
-}): RunContext {
-	return args;
+	const rel = relative(resolve(root), resolve(root, p));
+	return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel) ? rel : null;
 }

