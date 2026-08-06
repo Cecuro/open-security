@@ -65,10 +65,13 @@ instance-splitting rules are kept near-verbatim (Apache-2.0, with `NOTICE`).
 
 | | codex-security | opensec |
 |---|---|---|
-| Agent tool surface | 59 MCP tools | 1 (4 verbs) |
-| SQLite tables | 15 | 8 |
-| Python | 32 scripts, ~15k LOC | none |
-| Prompt | ~3,000 lines | ~350 |
+| Agent tool surface | 46 `workbench_cli` subcommands | 5 (4 verbs + delegate) |
+| SQLite tables | 19 | 6 |
+| Python | 34 scripts, 19k LOC | none |
+| Prompt | 4,465 lines | 360 |
+
+Those figures are counted, not recalled — see [comparison](comparison.md), which
+also lists what they have and we do not.
 
 - **Any model, per phase**, and nothing gated.
 - **Partitioned accountability, not partitioned reading.** Their subagents get
