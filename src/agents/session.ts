@@ -21,7 +21,7 @@
  *    There is no self-report verb (plan §6).
  */
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -248,9 +248,27 @@ function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 	} as AnyToolDef;
 }
 
+/**
+ * Lexical containment is not enough, for the same reason it wasn't in
+ * `validateLocation`: a symlinked *directory* inside the repo resolves out of
+ * it while every string check still passes. Resolve first, then compare.
+ */
 function withinRepo(root: string, p: string): boolean {
-	const rel = relative(resolve(root), resolve(root, p));
-	return !rel.startsWith("..") && !isAbsolute(rel);
+	const abs = resolve(root, p);
+	if (outside(root, abs)) return false;
+	// A path that doesn't exist yet can't be a symlink; let the tool report it.
+	let real: string;
+	try {
+		real = realpathSync(abs);
+	} catch {
+		return true;
+	}
+	return !outside(realpathSync(root), real);
+}
+
+function outside(root: string, abs: string): boolean {
+	const rel = relative(root, abs);
+	return rel.startsWith("..") || isAbsolute(rel);
 }
 
 /** Tool results are content blocks; coverage cares about the text in them. */

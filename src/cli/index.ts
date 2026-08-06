@@ -26,6 +26,8 @@ Options
   --max-files <n>      refuse rather than run away on a monorepo
   --max-cost <usd>     spend ceiling, or "none" (default). Refuses to start if
                        the model has no price, since that budget is unenforceable.
+  --concurrency <n>    agents in flight at once (default 4)
+  --partition-max-files <n>  files per probe before the worklist splits again
   --json               print the findings JSON path only
 `;
 
@@ -122,6 +124,8 @@ async function main(argv: string[]): Promise<number> {
 		promptsDir: opts.flags.prompts,
 		maxFiles,
 		maxCostUsd,
+		concurrency: numFlag(opts.flags.concurrency),
+		partitionMaxFiles: numFlag(opts.flags["partition-max-files"]),
 		onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
 	});
 
@@ -154,7 +158,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "partition-max-files"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
@@ -170,6 +174,12 @@ function parseFlags(argv: string[]): Parsed {
 		}
 	}
 	return { flags, bools, positional };
+}
+
+function numFlag(v: string | undefined): number | undefined {
+	if (v === undefined) return undefined;
+	const n = Number(v);
+	return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 /** Strip ESC and other C0 controls before anything reaches a terminal. */

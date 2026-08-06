@@ -8,7 +8,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { createOpensecTool, type RunContext } from "../src/agents/tool.js";
+import {
+	createOpensecTool,
+	INVESTIGATE_VERBS,
+	PROBE_VERBS,
+	type RunContext,
+} from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { renderMarkdown } from "../src/scan/render.js";
 import { computeSeverity } from "../src/scan/severity.js";
@@ -260,5 +265,46 @@ describe("text helpers", () => {
 	it("leaves ordinary prose alone", () => {
 		const s = "The id at db.js:9 is interpolated into a SELECT.";
 		expect(redactSecrets(s)).toBe(s);
+	});
+});
+
+describe("parallel workers cannot reach into each other", () => {
+	it("stops a probe from resolving a candidate — that is investigate's job", async () => {
+		const env = setup();
+		await env.call(env.candidate());
+		const probe: RunContext = { ...env.ctx, workerId: "probe-2", verbs: PROBE_VERBS };
+		const tool = createOpensecTool(probe);
+		await expect(
+			tool.execute(
+				"t",
+				{ verb: "candidate.resolve", id: "c1", disposition: "not_applicable", rationale: "x" } as never,
+				undefined,
+				undefined,
+				{} as never,
+			),
+		).rejects.toThrow(/not available to probe-2/);
+	});
+
+	it("stops an investigate agent from disposing of a row it was never given", async () => {
+		const env = setup();
+		await env.call(env.candidate({ title: "mine" }));
+		await env.call(env.candidate({ title: "someone else's" }));
+		const inv: RunContext = {
+			...env.ctx,
+			workerId: "investigate-c1",
+			verbs: INVESTIGATE_VERBS,
+			resolvableIds: ["c1"],
+		};
+		const tool = createOpensecTool(inv);
+		const resolve = (id: string) =>
+			tool.execute(
+				"t",
+				{ verb: "candidate.resolve", id, disposition: "not_applicable", rationale: "x" } as never,
+				undefined,
+				undefined,
+				{} as never,
+			);
+		await expect(resolve("c2")).rejects.toThrow(/may not resolve 'c2'/);
+		await expect(resolve("c1")).resolves.toBeDefined();
 	});
 });

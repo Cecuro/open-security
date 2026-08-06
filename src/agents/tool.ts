@@ -50,17 +50,40 @@ export interface RunContext {
 	verbs?: Verb[];
 	/** How many subagents deep this worker is. 0 is a phase agent. */
 	depth?: number;
+	/**
+	 * Which partition this worker owns. Undefined means the whole scan, which is
+	 * what the threat-model, investigate and dedup phases get — only probes are
+	 * partitioned.
+	 */
+	partitionId?: number;
+	/**
+	 * Which candidates this worker may resolve. Undefined means any — which only
+	 * dedup needs. Investigate is handed exactly the row it was asked about, so
+	 * it cannot dispose of one it never read.
+	 */
+	resolvableIds?: string[];
 }
 
 export type Verb = "work.next" | "candidate.create" | "candidate.resolve" | "lead.record";
 
-/** Phase agents write findings. Subagents investigate and report back. */
+/**
+ * Verbs by role, not one set for everyone.
+ *
+ * A scan of opensec by opensec found the reason: with probes running in
+ * parallel, every phase holding all four verbs meant one probe could resolve
+ * another probe's candidate — ids are predictable `c1`, `c2` — and quietly
+ * suppress a finding it never saw. Probes file; investigate disposes; dedup
+ * merges. Nobody needs the whole set.
+ */
 export const PHASE_VERBS: Verb[] = [
 	"work.next",
 	"candidate.create",
 	"candidate.resolve",
 	"lead.record",
 ];
+export const PROBE_VERBS: Verb[] = ["work.next", "candidate.create", "lead.record"];
+export const INVESTIGATE_VERBS: Verb[] = ["work.next", "candidate.resolve", "lead.record"];
+export const DEDUP_VERBS: Verb[] = ["candidate.resolve"];
 export const SUBAGENT_VERBS: Verb[] = ["work.next", "lead.record"];
 
 const LocationSchema = Type.Object(
@@ -242,7 +265,7 @@ function run(ctx: RunContext, p: Params): string {
 function workNext(ctx: RunContext, p: Params): string {
 	const limit = (p.limit as number | undefined) ?? 40;
 	const cursor = (p.cursor as number | undefined) ?? 0;
-	const { files, total } = ctx.ledger.listWork(ctx.scanId, limit, cursor);
+	const { files, total } = ctx.ledger.listWork(ctx.scanId, limit, cursor, ctx.partitionId);
 	const next = cursor + files.length;
 	const lines = files.map((f) => `${f.path} (${f.bytes_total} bytes)`);
 	return JSON.stringify(
@@ -275,7 +298,7 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 
 	// Ties every finding to an owner. With one probe this is just "in scope",
 	// but it is the same check that carries into per-worker partitions.
-	if (!locations.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path))) {
+	if (!locations.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path, ctx.partitionId))) {
 		throw new Error(
 			`no location is in your worklist — cite at least one file from work.next. ` +
 				`Got: ${locations.map((l) => l.path).join(", ")}`,
@@ -299,6 +322,12 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 
 function candidateResolve(ctx: RunContext, p: Params): string {
 	const id = requireText(p.id, "id");
+	if (ctx.resolvableIds && !ctx.resolvableIds.includes(id)) {
+		throw new Error(
+			`${ctx.workerId} may not resolve '${id}'. You were asked about: ` +
+				`${ctx.resolvableIds.join(", ")}.`,
+		);
+	}
 	const candidate = ctx.ledger.getCandidate(ctx.scanId, id);
 	if (!candidate) throw new Error(`no candidate ${id} in this scan`);
 

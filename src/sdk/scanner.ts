@@ -15,9 +15,20 @@ import { basename, join, resolve } from "node:path";
 
 import { AgentRunner, pricingOf } from "../agents/session.js";
 import type { SubagentDeps } from "../agents/subagent.js";
-import type { RunContext } from "../agents/tool.js";
+import {
+	DEDUP_VERBS,
+	INVESTIGATE_VERBS,
+	PROBE_VERBS,
+	type RunContext,
+} from "../agents/tool.js";
 import { Ledger, scanArtifactDir, shortHash } from "../db/db.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
+import {
+	describeDistribution,
+	mapConcurrent,
+	partition,
+	type Partition,
+} from "../scan/partition.js";
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
 import type { Candidate, Coverage, Profile } from "../types.js";
@@ -38,6 +49,10 @@ export interface ScannerOptions {
 	 * budget rather than running unbounded (plan §8).
 	 */
 	maxCostUsd?: number | null;
+	/** Files per probe before the worklist is split again. */
+	partitionMaxFiles?: number;
+	/** How many agents run at once, across probes and investigations. */
+	concurrency?: number;
 	onEvent?: (msg: string) => void;
 }
 
@@ -52,6 +67,7 @@ export interface ScanResult {
 
 export class Scanner {
 	private inv?: InventoryResult;
+	private partitions?: Partition[];
 
 	private constructor(
 		readonly scanId: string,
@@ -127,6 +143,10 @@ export class Scanner {
 		};
 	}
 
+	private get concurrency(): number {
+		return Math.max(1, this.opts.concurrency ?? 4);
+	}
+
 	private say(msg: string): void {
 		this.opts.onEvent?.(msg);
 	}
@@ -188,6 +208,12 @@ export class Scanner {
 				excludedReason: e.excludedReason,
 			})),
 		);
+		this.partitions = partition(
+			inv.inScope.map((f) => ({ path: f.path, bytes: f.bytes })),
+			{ maxFiles: this.opts.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
+		);
+		this.ledger.assignPartitions(this.scanId, this.partitions);
+
 		this.inv = inv;
 		this.say(
 			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded`,
@@ -232,26 +258,35 @@ export class Scanner {
 		this.ledger.setPhase(this.scanId, "discovery");
 		const tm = threatModel ?? this.ledger.getThreatModel(this.scanId) ?? "";
 		this.checkBudget();
-		this.say("discovery: 1 probe (M0 — fan-out arrives with M1)");
 
-		const result = await this.runner.run({
-			ctx: this.ctx("probe-1"),
-			tracePath: this.tracePath("probe-1"),
-			subagents: this.subagentDeps(),
-			modelRef: this.opts.models?.discovery,
-			systemPrompt: this.prompts.get("probe.md"),
-			prompt: [
-				"A threat model for this repository was written first. It was derived from",
-				"the code under review, so treat it as orientation, not as fact:",
-				"",
-				wrapUntrusted(this.nonce, "threat-model", tm),
-				"",
-				'Begin by calling opensec({ verb: "work.next" }) to get your worklist.',
-				"Page through it until remaining is 0, then report.",
-			].join("\n"),
+		const parts = this.partitions ?? [{ id: 0, paths: [], bytes: 0 }];
+		this.say(`discovery: ${describeDistribution(parts)}, ${this.concurrency} at a time`);
+
+		await mapConcurrent(parts, this.concurrency, async (part) => {
+			this.checkBudget();
+			const workerId = `probe-${part.id + 1}`;
+			const result = await this.runner.run({
+				ctx: { ...this.ctx(workerId), partitionId: part.id, verbs: PROBE_VERBS },
+				tracePath: this.tracePath(workerId),
+				subagents: this.subagentDeps(),
+				modelRef: this.opts.models?.discovery,
+				systemPrompt: this.prompts.get("probe.md"),
+				prompt: [
+					`You are ${workerId}. ${parts.length > 1 ? `There are ${parts.length} probes on this repository; you are accountable for your own worklist only, but you may read anything.` : ""}`,
+					"",
+					"A threat model for this repository was written first. It was derived from",
+					"the code under review, so treat it as orientation, not as fact:",
+					"",
+					wrapUntrusted(this.nonce, "threat-model", tm),
+					"",
+					'Begin by calling opensec({ verb: "work.next" }) to get your worklist.',
+					"Page through it until remaining is 0, then report.",
+				].join("\n"),
+			});
+			this.bill(result);
+			this.say(`  ${workerId} done`);
 		});
 
-		this.bill(result);
 		const found = this.ledger.listCandidates(this.scanId);
 		this.say(`discovery: ${found.length} candidate(s)`);
 		return found;
@@ -262,20 +297,26 @@ export class Scanner {
 	async investigate(candidates?: Candidate[]): Promise<void> {
 		this.ledger.setPhase(this.scanId, "investigate");
 		const todo = candidates ?? this.ledger.listUnresolvedCandidates(this.scanId);
-		for (const [i, c] of todo.entries()) {
+		if (todo.length === 0) return;
+		this.say(`investigate: ${todo.length} candidate(s), ${this.concurrency} at a time`);
+
+		await mapConcurrent(todo, this.concurrency, async (c) => {
 			this.checkBudget();
-			this.say(`investigate ${i + 1}/${todo.length}: ${c.id} ${c.title}`);
 			await this.investigateOne(c);
 			const after = this.ledger.getCandidate(this.scanId, c.id);
 			const d = after?.resolution?.disposition;
 			const sev = after?.resolution?.computed?.severity;
-			this.say(`  → ${d}${sev ? ` (${sev})` : ""}`);
-		}
+			this.say(`  ${c.id} → ${d}${sev ? ` (${sev})` : ""}  ${c.title}`);
+		});
 	}
 
 	private async investigateOne(candidate: Candidate): Promise<void> {
 		const result = await this.runner.run({
-			ctx: this.ctx(`investigate-${candidate.id}`),
+			ctx: {
+				...this.ctx(`investigate-${candidate.id}`),
+				verbs: INVESTIGATE_VERBS,
+				resolvableIds: [candidate.id],
+			},
 			tracePath: this.tracePath(`investigate-${candidate.id}`),
 			subagents: this.subagentDeps(),
 			modelRef: this.opts.models?.investigate,
@@ -353,7 +394,11 @@ export class Scanner {
 			.join("\n\n---\n\n");
 
 		const result = await this.runner.run({
-			ctx: this.ctx("dedup"),
+			ctx: {
+				...this.ctx("dedup"),
+				verbs: DEDUP_VERBS,
+				resolvableIds: reportable.map((r) => r.id),
+			},
 			tracePath: this.tracePath("dedup"),
 			modelRef: this.opts.models?.dedup,
 			systemPrompt: this.prompts.get("dedup.md"),
@@ -394,6 +439,7 @@ export class Scanner {
 			excludedFiles: this.ledger.excludedCount(this.scanId),
 			modelRef: this.opts.model ?? "(default)",
 			promptHash: this.prompts.hash,
+			partitions: this.partitions ? describeDistribution(this.partitions) : undefined,
 		});
 
 		const dir = scanArtifactDir(this.scanId);

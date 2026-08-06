@@ -44,10 +44,14 @@ CREATE TABLE IF NOT EXISTS files (
   bytes_read       INTEGER NOT NULL DEFAULT 0,
   excluded_reason  TEXT,
   first_touched_at TEXT,
+  -- Which probe is ACCOUNTABLE for this file. Not which probe may read it:
+  -- reads are repo-wide, because real bugs cross files (plan §4).
+  partition_id     INTEGER,
   PRIMARY KEY (scan_id, path)
 );
 
 CREATE INDEX IF NOT EXISTS files_scan_scope ON files(scan_id, excluded_reason);
+CREATE INDEX IF NOT EXISTS files_partition ON files(scan_id, partition_id);
 
 CREATE TABLE IF NOT EXISTS candidates (
   id              TEXT NOT NULL,

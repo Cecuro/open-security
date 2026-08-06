@@ -176,31 +176,63 @@ export class Ledger {
 		tx();
 	}
 
-	/** The worklist query behind `work.next`. Excluded files never appear. */
-	listWork(scanId: string, limit: number, cursor: number): { files: ScanFile[]; total: number } {
+	assignPartitions(scanId: string, partitions: Array<{ id: number; paths: string[] }>): void {
+		const stmt = this.db.prepare(
+			"UPDATE files SET partition_id = ? WHERE scan_id = ? AND path = ?",
+		);
+		const tx = this.db.transaction(() => {
+			for (const p of partitions) for (const path of p.paths) stmt.run(p.id, scanId, path);
+		});
+		tx();
+	}
+
+	/**
+	 * The worklist query behind `work.next`. Excluded files never appear. With a
+	 * partition, a probe sees only the files it is accountable for — which is the
+	 * whole point of the denominator it reports progress against.
+	 */
+	listWork(
+		scanId: string,
+		limit: number,
+		cursor: number,
+		partitionId?: number,
+	): { files: ScanFile[]; total: number } {
+		const scope =
+			partitionId === undefined
+				? { clause: "", args: [] as unknown[] }
+				: { clause: " AND partition_id = ?", args: [partitionId] };
+
 		const total = (
 			this.db
 				.prepare(
-					"SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND excluded_reason IS NULL",
+					`SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND excluded_reason IS NULL${scope.clause}`,
 				)
-				.get(scanId) as { n: number }
+				.get(scanId, ...scope.args) as { n: number }
 		).n;
 		const rows = this.db
 			.prepare(
 				`SELECT path, sha, bytes_total, bytes_read, excluded_reason, first_touched_at
-				 FROM files WHERE scan_id = ? AND excluded_reason IS NULL
+				 FROM files WHERE scan_id = ? AND excluded_reason IS NULL${scope.clause}
 				 ORDER BY path LIMIT ? OFFSET ?`,
 			)
-			.all(scanId, limit, cursor) as ScanFile[];
+			.all(scanId, ...scope.args, limit, cursor) as ScanFile[];
 		return { files: rows, total };
 	}
 
-	fileInScope(scanId: string, path: string): boolean {
+	/**
+	 * Ownership, not readability. A finding must cite at least one file the
+	 * worker is accountable for; it may cite any number of others.
+	 */
+	fileInScope(scanId: string, path: string, partitionId?: number): boolean {
 		const row = this.db
 			.prepare(
-				"SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL",
+				`SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL${
+					partitionId === undefined ? "" : " AND partition_id = ?"
+				}`,
 			)
-			.get(scanId, path) as { ok: number } | undefined;
+			.get(...(partitionId === undefined ? [scanId, path] : [scanId, path, partitionId])) as
+			| { ok: number }
+			| undefined;
 		return row !== undefined;
 	}
 
