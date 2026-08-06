@@ -123,17 +123,49 @@ export class AgentRunner {
 			customTools: tools,
 		});
 
+		// The agent loop converts a failed turn into an assistant message carrying
+		// `errorMessage` and lets prompt() resolve normally. Left alone, a 404 from
+		// the provider reads as "the probe found nothing" and the scan completes
+		// clean. A scan must never claim evidence it does not have, so failures are
+		// collected here and rethrown.
+		const failures: string[] = [];
+		const unsubscribe = session.subscribe((event) => {
+			const message =
+				event.type === "agent_end"
+					? event.messages.at(-1)
+					: event.type === "message_end"
+						? event.message
+						: undefined;
+			const err = (message as { errorMessage?: string } | undefined)?.errorMessage;
+			if (err) failures.push(err);
+		});
+
 		try {
 			await session.prompt(args.prompt, { expandPromptTemplates: false });
 			await session.waitForIdle();
+
 			const stats = session.getSessionStats();
+			const text = session.getLastAssistantText() ?? "";
+
+			if (failures.length > 0 && text.length === 0) {
+				throw new Error(`agent run failed: ${failures[0]}`);
+			}
+			if (failures.length > 0) {
+				// It produced something despite an error somewhere — surface it rather
+				// than letting a partial run pass as a whole one.
+				throw new Error(
+					`agent run reported ${failures.length} error(s), first: ${failures[0]}`,
+				);
+			}
+
 			return {
-				text: session.getLastAssistantText() ?? "",
+				text,
 				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
 				tokensOut: stats.tokens.output,
 				costUsd: stats.cost,
 			};
 		} finally {
+			unsubscribe();
 			session.dispose();
 		}
 	}

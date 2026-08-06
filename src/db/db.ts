@@ -114,10 +114,20 @@ export class Ledger {
 		return row?.threat_model ?? null;
 	}
 
+	/**
+	 * A failed scan keeps the phase it died in — overwriting it with 'report'
+	 * would erase the one field that says where it stopped.
+	 */
 	finishScan(scanId: string, status: ScanStatus): void {
-		this.db
-			.prepare("UPDATE scans SET status = ?, phase = 'report', completed_at = ? WHERE id = ?")
-			.run(status, now(), scanId);
+		if (status === "completed") {
+			this.db
+				.prepare("UPDATE scans SET status = ?, phase = 'report', completed_at = ? WHERE id = ?")
+				.run(status, now(), scanId);
+		} else {
+			this.db
+				.prepare("UPDATE scans SET status = ?, completed_at = ? WHERE id = ?")
+				.run(status, now(), scanId);
+		}
 	}
 
 	addUsage(scanId: string, tokensIn: number, tokensOut: number, costUsd: number): void {
