@@ -23,7 +23,7 @@
 
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
 	createAgentSession,
@@ -58,6 +58,34 @@ export interface RunArgs {
 	prompt: string;
 	/** Per-phase model override; falls back to the runner's default. */
 	modelRef?: string;
+	/**
+	 * Where to write this run's session transcript. Sessions are in-memory, so
+	 * without this a failed scan leaves nothing to debug — and the transcript is
+	 * the only record of what the agent actually did.
+	 */
+	tracePath?: string;
+}
+
+/**
+ * A resolution that definitely produced a model. Spelled via `ReturnType` so the
+ * emitted declarations don't have to name pi's internal model types, which live
+ * in a transitive package we don't depend on directly.
+ */
+type CliModelResult = ReturnType<typeof resolveCliModel>;
+export type ResolvedModel = Omit<CliModelResult, "model"> & {
+	model: NonNullable<CliModelResult["model"]>;
+};
+
+/** Per-million-token rates. A model with no pricing cannot be budgeted. */
+export interface ModelPricing {
+	input: number;
+	output: number;
+}
+
+export function pricingOf(model: { cost?: ModelPricing }): ModelPricing | null {
+	const c = model.cost;
+	if (!c || (c.input === 0 && c.output === 0)) return null;
+	return c;
 }
 
 /** A directory opensec owns, used as pi's "project" so the repo never is. */
@@ -80,7 +108,7 @@ export class AgentRunner {
 	}
 
 	/** Resolve a model reference, failing loudly rather than silently picking one. */
-	resolveModel(ref: string | undefined) {
+	resolveModel(ref: string | undefined): ResolvedModel {
 		const wanted = ref ?? this.defaultModelRef;
 		const res = resolveCliModel({ cliModel: wanted, modelRuntime: this.runtime });
 		if (res.error || !res.model) {
@@ -90,7 +118,8 @@ export class AgentRunner {
 						`Set --model provider/model, e.g. --model azure-openai-responses/gpt-5.4`,
 			);
 		}
-		return res;
+		// Narrowed: callers get a model, or this threw.
+		return { ...res, model: res.model };
 	}
 
 	async run(args: RunArgs): Promise<AgentRunResult> {
@@ -168,6 +197,15 @@ export class AgentRunner {
 				costUsd: stats.cost,
 			};
 		} finally {
+			if (args.tracePath) {
+				// Best effort: losing a transcript must not fail a scan that worked.
+				try {
+					mkdirSync(dirname(args.tracePath), { recursive: true });
+					session.exportToJsonl(args.tracePath);
+				} catch {
+					/* ignore */
+				}
+			}
 			unsubscribe();
 			session.dispose();
 		}

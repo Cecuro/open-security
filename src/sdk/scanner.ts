@@ -13,7 +13,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
-import { AgentRunner } from "../agents/session.js";
+import { AgentRunner, pricingOf } from "../agents/session.js";
 import type { RunContext } from "../agents/tool.js";
 import { Ledger, scanArtifactDir, shortHash } from "../db/db.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
@@ -31,6 +31,12 @@ export interface ScannerOptions {
 	profile?: Profile;
 	promptsDir?: string;
 	maxFiles?: number;
+	/**
+	 * Spend ceiling in USD. `null` is the explicit opt-out; omitted means the
+	 * same for now. A model with no pricing entry refuses to start under a
+	 * budget rather than running unbounded (plan §8).
+	 */
+	maxCostUsd?: number | null;
 	onEvent?: (msg: string) => void;
 }
 
@@ -75,7 +81,17 @@ export class Scanner {
 		const runner = await AgentRunner.create({ repoRoot, modelRef: opts.model });
 		// Fail on an unresolvable model before writing a scan row that could never
 		// have finished. `Scanner.estimate()` needs no model and takes no ledger.
-		runner.resolveModel(undefined);
+		const model = runner.resolveModel(undefined).model;
+
+		// A budget you cannot price is not a budget (plan §8). Refusing to start
+		// is the honest failure; running unbounded while printing a limit is not.
+		if (typeof opts.maxCostUsd === "number" && !pricingOf(model)) {
+			throw new Error(
+				`--max-cost was given but '${model.provider}/${model.id}' has no pricing entry, ` +
+					`so spend cannot be measured. Use --max-cost none to run without a ceiling, ` +
+					`or add a price for this model.`,
+			);
+		}
 
 		const repoId = ledger.upsertRepo(repoRoot, repoName, git(repoRoot, ["config", "--get", "remote.origin.url"]));
 		const revision = git(repoRoot, ["rev-parse", "HEAD"]);
@@ -118,6 +134,29 @@ export class Scanner {
 		this.ledger.addUsage(this.scanId, r.tokensIn, r.tokensOut, r.costUsd);
 	}
 
+	/** Where this run's agent transcripts go. In-memory sessions leave nothing otherwise. */
+	private tracePath(workerId: string): string {
+		return join(scanArtifactDir(this.scanId), "traces", `${workerId}.jsonl`);
+	}
+
+	/**
+	 * Checked between phases and between candidates, not mid-stream. That means
+	 * the ceiling can be overshot by one agent run, so it is reported as "spent X
+	 * of Y" rather than presented as a hard cap.
+	 */
+	private checkBudget(): void {
+		const max = this.opts.maxCostUsd;
+		if (typeof max !== "number") return;
+		const spent = this.ledger.getScan(this.scanId)?.cost_usd ?? 0;
+		if (spent >= max) {
+			throw new Error(
+				`budget exhausted: spent $${spent.toFixed(4)} of $${max} at phase ` +
+					`'${this.ledger.getScan(this.scanId)?.phase}'. Findings recorded so far are ` +
+					`in the ledger; raise --max-cost to continue.`,
+			);
+		}
+	}
+
 	// ------------------------------------------------------------- phase 0
 
 	async inventory(): Promise<InventoryResult> {
@@ -143,11 +182,13 @@ export class Scanner {
 
 	async threatModel(): Promise<string> {
 		this.ledger.setPhase(this.scanId, "threat_model");
+		this.checkBudget();
 		this.say("threat model: 1 agent");
 
 		const { files, total } = this.ledger.listWork(this.scanId, 200, 0);
 		const result = await this.runner.run({
 			ctx: this.ctx("threat-model"),
+			tracePath: this.tracePath("threat-model"),
 			modelRef: this.opts.models?.threatModel,
 			systemPrompt: this.prompts.get("threat-model.md"),
 			prompt: [
@@ -173,10 +214,12 @@ export class Scanner {
 	async discover(threatModel?: string): Promise<Candidate[]> {
 		this.ledger.setPhase(this.scanId, "discovery");
 		const tm = threatModel ?? this.ledger.getThreatModel(this.scanId) ?? "";
+		this.checkBudget();
 		this.say("discovery: 1 probe (M0 — fan-out arrives with M1)");
 
 		const result = await this.runner.run({
 			ctx: this.ctx("probe-1"),
+			tracePath: this.tracePath("probe-1"),
 			modelRef: this.opts.models?.discovery,
 			systemPrompt: this.prompts.get("probe.md"),
 			prompt: [
@@ -202,6 +245,7 @@ export class Scanner {
 		this.ledger.setPhase(this.scanId, "investigate");
 		const todo = candidates ?? this.ledger.listUnresolvedCandidates(this.scanId);
 		for (const [i, c] of todo.entries()) {
+			this.checkBudget();
 			this.say(`investigate ${i + 1}/${todo.length}: ${c.id} ${c.title}`);
 			await this.investigateOne(c);
 			const after = this.ledger.getCandidate(this.scanId, c.id);
@@ -214,6 +258,7 @@ export class Scanner {
 	private async investigateOne(candidate: Candidate): Promise<void> {
 		const result = await this.runner.run({
 			ctx: this.ctx(`investigate-${candidate.id}`),
+			tracePath: this.tracePath(`investigate-${candidate.id}`),
 			modelRef: this.opts.models?.investigate,
 			systemPrompt: [
 				this.prompts.get("investigate.md"),
@@ -290,6 +335,7 @@ export class Scanner {
 
 		const result = await this.runner.run({
 			ctx: this.ctx("dedup"),
+			tracePath: this.tracePath("dedup"),
 			modelRef: this.opts.models?.dedup,
 			systemPrompt: this.prompts.get("dedup.md"),
 			prompt: [

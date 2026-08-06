@@ -174,6 +174,13 @@ export function createOpensecTool(ctx: RunContext) {
 		description: DESCRIPTION,
 		parameters: ParamsSchema,
 		promptSnippet: "opensec - record worklist progress, candidates, resolutions and leads",
+		promptGuidelines: [
+			"Call opensec work.next before reviewing anything — it is the list you are accountable for.",
+			"Record dead ends with lead.record. Silence is indistinguishable from never having looked.",
+		],
+		// The single writer to the ledger. Serialising it keeps two calls in one
+		// tool batch from interleaving a create and a resolve.
+		executionMode: "sequential",
 		async execute(_id, params) {
 			// Validation failures throw. The agent loop catches per tool call and
 			// hands the message back to the model, so a hallucinated line number is

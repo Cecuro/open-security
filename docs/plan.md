@@ -15,10 +15,14 @@ run yourself.
 
 TypeScript, no Python · SDK is the core · one SQLite DB · Apache-2.0.
 
-Scope of this document: **M0 and M1**. Later-milestone mechanics are researched and
-parked in [deferred mechanics](research/deferred-mechanics.md). Background:
-[teardown](research/codex-security-teardown.md) ·
-[Ozone patterns](research/ozone-patterns.md) · [review](research/plan-review.md).
+Scope of this document: **M0 and M1**.
+
+> **Missing background.** Earlier drafts linked four research documents —
+> deferred mechanics, a codex-security teardown, Ozone patterns, and a plan
+> review. None of them are in this repository, and the links have been removed
+> rather than left dangling. Everything M0 and M1 need is in this file; the
+> places that previously deferred detail to "deferred mechanics" now say what is
+> actually undecided. M5–M7 will need that thinking redone before they start.
 
 ---
 
@@ -287,8 +291,8 @@ reportable → `checked`; either phase deferred → `needs_follow_up` + a deferr
 `not_applicable` → `not_applicable`; suppressed → `rejected`; missing record →
 unresolved, which blocks `coverage: complete`.
 
-`findings`/`occurrences`/`triage`/fingerprints arrive with `compare` — see
-[deferred mechanics](research/deferred-mechanics.md).
+`findings`/`occurrences`/`triage`/fingerprints arrive with `compare` (M6). Their
+schema is not designed yet.
 
 ### Severity is computed
 
@@ -455,8 +459,8 @@ would constrain the single-writer design).
 **v1 = M0–M4.** One rule behind the ordering: nothing claims evidence it doesn't
 have. The benchmark precedes deep mode and presets, because "repeat until saturated"
 is a 20× spend multiplier and "use Qwen for discovery" is a recommendation — neither
-worth making without measurement. M5–M7 mechanics are in
-[deferred mechanics](research/deferred-mechanics.md); read it when you get there.
+worth making without measurement. M5–M7 mechanics are undesigned — the research
+that once backed them is not in this repository, so budget for redoing it.
 
 **Benchmark note.** Known-CVE precision/recall cannot produce a defensible number:
 recall over a denominator of one, contamination that *differs per model* (biasing the

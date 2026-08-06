@@ -15,6 +15,7 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
 
   opensec scan <path> [options]
   opensec scan <path> --estimate      files and tokens; spends nothing
+  opensec models                      models with a price, so budgets are enforceable
   opensec help severity               how severity is computed
 
 Options
@@ -23,6 +24,8 @@ Options
   --db <path>          ledger location (default ~/.opensec/opensec.db)
   --prompts <dir>      override the prompt pack
   --max-files <n>      refuse rather than run away on a monorepo
+  --max-cost <usd>     spend ceiling, or "none" (default). Refuses to start if
+                       the model has no price, since that budget is unenforceable.
   --json               print the findings JSON path only
 `;
 
@@ -35,6 +38,25 @@ async function main(argv: string[]): Promise<number> {
 			return 0;
 		}
 		process.stdout.write(USAGE);
+		return 0;
+	}
+
+	if (command === "models") {
+		const models = await listPricedModels();
+		if (models.length === 0) {
+			process.stdout.write(
+				"No models are available. Set a provider API key, e.g. AZURE_OPENAI_API_KEY.\n",
+			);
+			return 1;
+		}
+		process.stdout.write(
+			`${models.length} model(s) available. A price is what makes --max-cost enforceable.\n\n`,
+		);
+		for (const m of models) {
+			process.stdout.write(
+				`  ${m.ref.padEnd(48)} ${m.priced ? `$${m.input}/$${m.output} per Mtok` : "no price — --max-cost will refuse"}\n`,
+			);
+		}
 		return 0;
 	}
 
@@ -62,6 +84,18 @@ async function main(argv: string[]): Promise<number> {
 			return 2;
 		}
 	}
+	// `none` is the explicit opt-out, so an unpriced model is a deliberate choice
+	// rather than an accident.
+	let maxCostUsd: number | null = null;
+	const costFlag = opts.flags["max-cost"];
+	if (costFlag !== undefined && costFlag !== "none") {
+		maxCostUsd = Number(costFlag);
+		if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) {
+			process.stderr.write(`opensec: --max-cost needs a positive number, or 'none'\n`);
+			return 2;
+		}
+	}
+
 	const known = new Set(["estimate", "json"]);
 	const unknown = Object.keys(opts.bools).find((b) => !known.has(b));
 	if (unknown) {
@@ -87,6 +121,7 @@ async function main(argv: string[]): Promise<number> {
 		profile: (profileFlag as Profile | undefined) ?? "static",
 		promptsDir: opts.flags.prompts,
 		maxFiles,
+		maxCostUsd,
 		onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
 	});
 
@@ -119,7 +154,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
@@ -139,6 +174,27 @@ function parseFlags(argv: string[]): Parsed {
 
 /** Strip ESC and other C0 controls before anything reaches a terminal. */
 const safe = stripControlChars;
+
+/** Only models whose provider is actually authenticated — the ones you can run. */
+async function listPricedModels(): Promise<
+	Array<{ ref: string; priced: boolean; input: number; output: number }>
+> {
+	const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+	const runtime = await ModelRuntime.create();
+	const available = await runtime.getAvailable();
+	return available
+		.map((m) => {
+			const cost = (m as { cost?: { input: number; output: number } }).cost;
+			const priced = cost !== undefined && (cost.input > 0 || cost.output > 0);
+			return {
+				ref: `${m.provider}/${m.id}`,
+				priced,
+				input: cost?.input ?? 0,
+				output: cost?.output ?? 0,
+			};
+		})
+		.sort((a, b) => a.ref.localeCompare(b.ref));
+}
 
 main(process.argv.slice(2))
 	.then((code) => process.exit(code))
