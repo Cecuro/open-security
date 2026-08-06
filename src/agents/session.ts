@@ -41,6 +41,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 
+import { createSubagentTool, type SubagentDeps } from "./subagent.js";
 import { createOpensecTool, type RunContext } from "./tool.js";
 
 export interface AgentRunResult {
@@ -64,6 +65,12 @@ export interface RunArgs {
 	 * the only record of what the agent actually did.
 	 */
 	tracePath?: string;
+	/**
+	 * When set, this agent may delegate focused questions to subagents. Absent
+	 * for subagents themselves, so the tool is missing rather than present and
+	 * always failing.
+	 */
+	subagents?: SubagentDeps;
 }
 
 /**
@@ -153,6 +160,11 @@ export class AgentRunner {
 			confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx),
 			createOpensecTool(ctx) as AnyToolDef,
 		];
+
+		if (args.subagents) {
+			const delegate = createSubagentTool(ctx, args.subagents);
+			if (delegate) tools.push(delegate as AnyToolDef);
+		}
 
 		const { session } = await createAgentSession({
 			cwd: workDir,

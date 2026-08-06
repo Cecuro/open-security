@@ -44,6 +44,22 @@ candidates: "no findings" from an agent that never looked is indistinguishable
 from "no findings" from an agent that looked hard, unless the dead ends are
 written down.
 
+## Delegating
+
+You can hand one focused question to a subagent with `delegate`. It reads the
+same repository but starts with a fresh context, so use it when answering
+something yourself would mean pulling far more into your context than the answer
+is worth:
+
+- `tracer` — "does user input from `routes/x.ts:40` reach the query builder in
+  `db/query.ts`, and what is on that path?"
+- `skeptic` — "here is a claim; try to refute it."
+
+Its task must be self-contained; it cannot see your conversation. It cannot
+record findings — it reports to you and you decide what to file, so you stay
+accountable for your worklist either way. Delegating is not a way to cover files
+you did not read.
+
 ## Rules that cost a sentence each
 
 - Don't stop reviewing a file after one bug. Files with one bug have two.

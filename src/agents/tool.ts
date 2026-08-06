@@ -40,7 +40,28 @@ export interface RunContext {
 	ledger: Ledger;
 	/** Per-run delimiter wrapping repo-derived text. Stripped from agent prose. */
 	nonce: string;
+	/**
+	 * Which verbs this worker may call. Every phase used to get all four, so a
+	 * dedup agent could resolve anything and a subagent could file findings its
+	 * parent never saw. Subagents get a read-only subset (plan §4's ownership
+	 * rule only means something if writes are attributable to an accountable
+	 * worker).
+	 */
+	verbs?: Verb[];
+	/** How many subagents deep this worker is. 0 is a phase agent. */
+	depth?: number;
 }
+
+export type Verb = "work.next" | "candidate.create" | "candidate.resolve" | "lead.record";
+
+/** Phase agents write findings. Subagents investigate and report back. */
+export const PHASE_VERBS: Verb[] = [
+	"work.next",
+	"candidate.create",
+	"candidate.resolve",
+	"lead.record",
+];
+export const SUBAGENT_VERBS: Verb[] = ["work.next", "lead.record"];
 
 const LocationSchema = Type.Object(
 	{
@@ -197,6 +218,13 @@ type Params = {
 };
 
 function run(ctx: RunContext, p: Params): string {
+	const allowed = ctx.verbs ?? PHASE_VERBS;
+	if (!allowed.includes(p.verb)) {
+		throw new Error(
+			`'${p.verb}' is not available to ${ctx.workerId}. You may call: ${allowed.join(", ")}. ` +
+				`Report what you found in your final message instead — whoever delegated to you records it.`,
+		);
+	}
 	switch (p.verb) {
 		case "work.next":
 			return workNext(ctx, p);

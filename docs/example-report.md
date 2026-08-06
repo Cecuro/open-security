@@ -3,13 +3,13 @@
 | | |
 |---|---|
 | repository | `/Users/gustavhartz/Projects/open-security/.claude/worktrees/security-tool-implementation-b7e028/test/fixtures/vuln-app` |
-| revision | `dcdea2f8e520e883df8ed81f718a68fb53451abc` |
+| revision | `382ed06b4bda7d3664bd34f935566b75554d6d22` |
 | profile | **static** — nothing was executed |
 | model | `azure-openai-responses/gpt-5.6-luna` |
-| prompts | `0ce6e0100e50cf89` |
-| started | 2026-08-06T16:26:44.455Z |
-| tokens | 123,472 in / 9,988 out |
-| cost | $0.0224 |
+| prompts | `70f8685e384e1d3c` |
+| started | 2026-08-06T16:48:41.291Z |
+| tokens | 214,619 in / 12,461 out |
+| cost | $0.0306 |
 
 ## Coverage
 
@@ -27,14 +27,13 @@ Extensions in scope: `.js`.
 
 | # | severity | confidence | finding | location |
 |---|---|---|---|---|
-| c1 | critical (unproven) | 0.3 | User-controlled host is interpolated into a shell command | `server.js:15` |
-| c2 | critical (unproven) | 0.3 | Download route permits path traversal outside uploads | `server.js:23` |
-| c4 | critical (unproven) | 0.3 | User-record endpoint has no meaningful authentication or object authorization | `server.js:32` |
-| c5 | critical (unproven) | 0.3 | Hardcoded admin token protects destructive session reset | `server.js:10` |
-| c6 | critical (unproven) | 0.3 | Ping endpoint allows server-side requests to attacker-selected hosts | `server.js:15` |
-| c3 | medium | 0.3 | User ID is concatenated into a SQL query | `db.js:6` |
+| c1 | critical (unproven) | 0.3 | Attacker-controlled host is interpolated into a shell command | `server.js:14` |
+| c2 | critical (unproven) | 0.3 | Download endpoint allows path traversal outside uploads | `server.js:22` |
+| c4 | critical (unproven) | 0.3 | User endpoint accepts any Authorization header and lacks object authorization | `server.js:30` |
+| c5 | critical (unproven) | 0.3 | Hardcoded administrator token authorizes global session deletion | `server.js:10` |
+| c3 | medium | 0.3 | User lookup is vulnerable to SQL injection | `db.js:5` |
 
-### c1 — User-controlled host is interpolated into a shell command
+### c1 — Attacker-controlled host is interpolated into a shell command
 
 **critical (unproven)** · confidence 0.3 · CWE-78
 
@@ -42,19 +41,19 @@ Extensions in scope: `.js`.
 
 **Locations**
 
-- `server.js:15-19` — `GET /api/ping handler`
+- `server.js:14-16` — `GET /api/ping`
 
 **What an attacker gets**
 
-A remote caller can place shell metacharacters in the host query parameter and execute arbitrary commands in the Node process context.
+A remote caller can place shell metacharacters in the host query parameter and cause the server process to execute arbitrary additional commands through exec().
 
 **Evidence**
 
-> The handler assigns req.query.host at line 16 and interpolates it into exec(`ping -c 1 ${host}`) at line 17. exec invokes a shell, so input such as a command separator is interpreted by the operating system rather than treated solely as a hostname.
+> server.js:15 assigns req.query.host without validation, and server.js:16 interpolates it into `ping -c 1 ${host}` passed to child_process.exec, which invokes a shell. The route then returns command output or errors to the caller at lines 17-18.
 
 **Investigation**
 
-The actual handler reads req.query.host without validation at server.js:16 and interpolates it into exec(`ping -c 1 ${host}`) at server.js:17. Node's child_process.exec executes the supplied string through a shell, so shell metacharacters from the query value remain active; for example, a host value containing a command separator can append a second command. The callback only handles the command result and provides no input control. server.js exports this Express app, and no upstream caller or validation is present in the reviewed call path.
+The path completes without a control: GET /api/ping is registered at server.js:15; server.js:16 copies req.query.host directly, and server.js:17 interpolates it into a command string passed to child_process.exec. exec invokes a shell, so shell metacharacters in host are interpreted as additional commands. The only preceding middleware is express.json() at server.js:9, which does not validate query parameters. The callback at server.js:18-19 returns command output or errors, but does not prevent execution. server.js:50 exports the app and no repository code makes the route unreachable. An unauthenticated remote caller can therefore obtain arbitrary command execution in the server process, subject to the process OS permissions.
 
 **Severity inputs**
 
@@ -64,7 +63,7 @@ The actual handler reads req.query.host without validation at server.js:16 and i
 - matrix: impact=high × likelihood=high → high
 - critical (unproven): unauthenticated, network-reachable, traced path with no intervening control, but nothing was executed
 
-### c2 — Download route permits path traversal outside uploads
+### c2 — Download endpoint allows path traversal outside uploads
 
 **critical (unproven)** · confidence 0.3 · CWE-22
 
@@ -72,19 +71,19 @@ The actual handler reads req.query.host without validation at server.js:16 and i
 
 **Locations**
 
-- `server.js:23-29` — `GET /api/download handler`
+- `server.js:22-26` — `GET /api/download`
 
 **What an attacker gets**
 
-A remote caller can use traversal segments in name to read arbitrary files accessible to the process, not just files under uploads.
+A remote caller can supply traversal segments in name and read arbitrary files accessible to the Node process, including the SQLite database or application source.
 
 **Evidence**
 
-> Line 25 takes req.query.name and line 26 passes it to path.join(__dirname, "uploads", name). No canonicalized containment check is performed before fs.readFile at line 27, so traversal can escape the intended directory.
+> server.js:23 takes req.query.name directly; line 24 joins it with __dirname/uploads without resolving and checking that the result remains under uploads; line 25 reads the result and line 26 sends its bytes to the requester.
 
 **Investigation**
 
-The unauthenticated GET /api/download route assigns req.query.name directly to `name` at server.js:24, then constructs `path.join(__dirname, "uploads", name)` at server.js:25 and passes that path to fs.readFile at server.js:26. Node's path.join normalizes `..` segments; a value such as `../../etc/passwd` therefore escapes the uploads directory (assuming the target file is readable by the process), and the success branch sends the bytes in the HTTP response at server.js:28. There is no validation, canonicalized containment check, or authorization in this call path. The only failure control is fs.readFile's error response, which does not prevent reads of accessible files.
+The actual unauthenticated GET handler takes req.query.name with no type, allowlist, traversal, or containment validation (server.js:24-26), then passes path.join(__dirname, "uploads", name) directly to fs.readFile (server.js:26-27). Node path.join normalizes '..' segments, so names such as ../server.js resolve outside uploads; successful reads are returned with res.send(data) (server.js:27-29). The only shown middleware is express.json(), which does not constrain GET query values, and no auth check exists on this route. There is no upstream caller control in this repository. The route is exported by the app module, and missing deployment/listen wiring is not a control that stops the handler.
 
 **Severity inputs**
 
@@ -94,7 +93,7 @@ The unauthenticated GET /api/download route assigns req.query.name directly to `
 - matrix: impact=medium × likelihood=high → high
 - critical (unproven): unauthenticated, network-reachable, traced path with no intervening control, but nothing was executed
 
-### c4 — User-record endpoint has no meaningful authentication or object authorization
+### c4 — User endpoint accepts any Authorization header and lacks object authorization
 
 **critical (unproven)** · confidence 0.3 · CWE-862
 
@@ -102,19 +101,19 @@ The unauthenticated GET /api/download route assigns req.query.name directly to `
 
 **Locations**
 
-- `server.js:32-38` — `GET /api/users/:id handler`
+- `server.js:30-34` — `GET /api/users/:id`
 
 **What an attacker gets**
 
-Any client able to send a nonempty Authorization header can request an arbitrary user ID and receive that user's email and role; the header is neither validated nor tied to the requested subject.
+A remote caller can send any nonempty Authorization header and request another user's id, receiving that user's email and role without identity, ownership, or role checks.
 
 **Evidence**
 
-> The handler only checks header presence at line 33, then passes attacker-selected req.params.id to db.getUser at line 34 and returns the row at lines 35-38. There is no token verification, identity extraction, ownership check, or missing-row authorization handling.
+> server.js:31 treats header presence alone as authentication. It passes the attacker-selected req.params.id to db.getUser at line 32 and returns the selected row via res.json at line 34; no token validation or comparison between the caller and requested id is present.
 
 **Investigation**
 
-The route's only gate is a truthiness check on req.headers.authorization (server.js:35), so any nonempty value, including an unvalidated fabricated value, passes. The attacker-selected path parameter is then passed directly to db.getUser (server.js:36). db.getUser interpolates that value into the user lookup (db.js:7-8), and the callback returns the selected row via res.json(row) without checking identity, ownership, or role (server.js:37-39). Thus a caller can request another existing user's id and receive that user's id, email, and role. No caller or middleware in this repository adds authentication or authorization.
+The complete call path is: an HTTP request reaches GET /api/users/:id (server.js:34); the only gate is a truthiness check on req.headers.authorization (server.js:35), so any nonempty attacker-supplied value passes and no token is parsed or validated. The attacker-controlled req.params.id is then passed unchanged to db.getUser (server.js:36). db.getUser interpolates that ID into a query selecting id, email, and role (db.js:7-8), and the returned row is serialized to the caller with res.json (server.js:37-38). There is no session lookup, identity derivation, ownership comparison, role check, or authorization middleware in the reviewed call path. Thus a caller without valid credentials can present an arbitrary nonempty Authorization value and retrieve another user's email and role, assuming that user ID exists. The query's separate SQL interpolation issue is not needed to establish this candidate.
 
 **Severity inputs**
 
@@ -124,7 +123,7 @@ The route's only gate is a truthiness check on req.headers.authorization (server
 - matrix: impact=medium × likelihood=high → high
 - critical (unproven): unauthenticated, network-reachable, cross-tenant, but nothing was executed
 
-### c5 — Hardcoded admin token protects destructive session reset
+### c5 — Hardcoded administrator token authorizes global session deletion
 
 **critical (unproven)** · confidence 0.3 · CWE-798
 
@@ -132,20 +131,21 @@ The route's only gate is a truthiness check on req.headers.authorization (server
 
 **Locations**
 
-- `server.js:10-12` — `ADMIN_TOKEN declaration`
-- `server.js:40-45` — `POST /api/admin/reset handler`
+- `server.js:10-11` — `ADMIN_TOKEN`
+- `server.js:36-41` — `POST /api/admin/reset`
+- `db.js:10-12` — `reset`
 
 **What an attacker gets**
 
-Anyone who obtains the source or otherwise learns the embedded token can invoke the reset endpoint and delete all sessions, causing broad authentication disruption.
+Anyone who obtains the source or otherwise learns the embedded token can invoke the reset endpoint and delete every session; the credential cannot be rotated independently of deployment.
 
 **Evidence**
 
-> The credential is embedded as a source literal at line 11. The route authorizes solely by exact equality of the attacker-supplied x-admin-token header at line 41, then calls db.reset at line 42; db.reset deletes every sessions row (db.js lines 10-12).
+> server.js:11 embeds the static token in source. Lines 37-38 grant the reset operation solely when the request header exactly matches it, with no identity, expiry, scope, or audit check. db.js:11 executes DELETE FROM sessions, so successful use has global session impact.
 
 **Investigation**
 
-Static end-to-end trace: server.js line 11 defines the administrative credential as a source literal. The POST /api/admin/reset handler at lines 40-45 compares the attacker-controlled x-admin-token header only against that literal; there is no other authorization or rate/role control. A request supplying the learned literal passes the equality check at line 41, invokes db.reset() at line 42, and db.js lines 10-12 execute DELETE FROM sessions, removing every session. This is not self-only and crosses all users' authentication state; learning the source/token is a credential-disclosure prerequisite, not an existing administrative privilege. The route is exposed by the Express app and is network-reachable when the app is served. No control in the actual call path prevents use of the embedded token.
+The request path completes without a control: server.js:12 hardcodes ADMIN_TOKEN; server.js:42-43 exposes POST /api/admin/reset and authorizes solely by exact equality of the attacker-supplied x-admin-token header; server.js:44 invokes db.reset(); db.js:11-12 runs DELETE FROM sessions without a WHERE clause. No caller restriction, token expiry/rotation, identity check, or scope check exists in this path. An attacker who learns the embedded token can remotely invalidate every session. Static review only; no execution claimed.
 
 **Severity inputs**
 
@@ -155,55 +155,26 @@ Static end-to-end trace: server.js line 11 defines the administrative credential
 - matrix: impact=high × likelihood=high → high
 - critical (unproven): unauthenticated, network-reachable, cross-tenant, but nothing was executed
 
-### c6 — Ping endpoint allows server-side requests to attacker-selected hosts
-
-**critical (unproven)** · confidence 0.3 · CWE-918
-
-> `proof_gap: no_execution` — this severity is asserted from code, not demonstrated.
-
-**Locations**
-
-- `server.js:15-19` — `GET /api/ping handler`
-
-**What an attacker gets**
-
-A remote caller can make the application host send ping traffic to arbitrary destinations reachable from its network, enabling internal-network probing or abuse of the server's network position.
-
-**Evidence**
-
-> The route accepts req.query.host at line 16 and invokes ping against that value at line 17 without an allowlist or restriction to public, expected destinations. Even absent shell metacharacters, the endpoint gives callers control over the destination of server-originated network activity.
-
-**Investigation**
-
-The actual route has a direct attacker-input-to-network-effect path with no validation or destination restriction: an HTTP GET to /api/ping supplies req.query.host (server.js:15-16), which is interpolated into the shell command passed to child_process.exec (server.js:17). The ping process therefore originates from the application host and targets the supplied destination; its output is returned to the caller at server.js:18-19. No middleware or caller-side check in this path constrains host. In fact, shell interpolation also creates a separate command-injection risk, but the SSRF/network-probing behavior exists even for a plain hostname or address.
-
-**Severity inputs**
-
-`impact=medium` `vector=remote` `auth_required=none` `network_reachable=true` `cross_tenant=false` `traced_path_no_control=true` `code_execution_proven=false` `method=code_reading`
-
-- likelihood high from vector=remote, auth_required=none
-- matrix: impact=medium × likelihood=high → high
-- critical (unproven): unauthenticated, network-reachable, traced path with no intervening control, but nothing was executed
-
-### c3 — User ID is concatenated into a SQL query
+### c3 — User lookup is vulnerable to SQL injection
 
 **medium** · confidence 0.3 · CWE-89
 
 **Locations**
 
-- `db.js:6-8` — `getUser`
+- `db.js:5-7` — `getUser`
+- `server.js:30-33` — `GET /api/users/:id`
 
 **What an attacker gets**
 
-A remote caller can inject SQL through /api/users/:id and alter the users lookup, potentially returning records beyond the requested identifier or changing query behavior.
+A caller can inject SQL through the id path parameter and alter the users query, potentially bypassing the lookup predicate or extracting unintended user data.
 
 **Evidence**
 
-> getUser receives the route-controlled id and constructs `SELECT ... WHERE id = '${id}'` through string interpolation at line 7 before passing it to sqlite3 at line 8. No bound parameter or input constraint separates SQL syntax from the identifier.
+> server.js:31 forwards req.params.id directly to db.getUser after only checking whether an Authorization header exists. db.js:6 concatenates id inside a quoted SQL string and executes it with conn.get at line 7; no parameter binding or input validation is used.
 
 **Investigation**
 
-The route handler takes req.params.id directly from the remote URL and, after only checking that an Authorization header is present, passes it unchanged to db.getUser (server.js:33-36). getUser interpolates that value inside a quoted SQL string and executes it with sqlite3.Database#get (db.js:6-8). A value such as ' OR 1=1 -- closes the string and changes the WHERE predicate, so the query can return a row other than the requested identifier. There is no parameter binding, identifier validation, or escaping in this call path. The existing authorization check requires only a caller-supplied header and does not constrain the id or SQL syntax.
+The actual request path completes without a stopping control: Express supplies the URL segment as req.params.id (server.js:29-31), the route only checks for presence of an Authorization header, and passes the value directly to db.getUser. db.js:6-7 interpolates id inside a quoted SQL string and executes it via conn.get. A quote-containing id can change the WHERE expression (for example, an OR predicate), and the returned row is sent to the caller at server.js:32-34. No parameter binding, type check, or escaping exists in this path; the header check does not constrain the id or SQL. Static review only; no execution claimed.
 
 **Severity inputs**
 
@@ -218,9 +189,9 @@ The route handler takes req.params.id directly from the remote URL and, after on
 findings" from an agent that looked hard — unless the dead ends are written
 down. These are they.
 
-- The global express.json parser accepts JSON, but no route reads req.body and Express applies its normal parser limit, so I found no body-driven sink or separate parser exploit.
-- The app exports the Express object without a listener or visible proxy, so deployment exposure is unknown rather than a demonstrated repository defect.
-- Database reset has no callback/error response, but the observable security issue is the separately recorded hardcoded-token authorization; no additional injection or authorization sink was identified in db.js.
+- Reviewed express.json() at server.js:8-9; no route reads req.body, so no body-controlled sink is reachable in this repository.
+- Reviewed db.reset() at db.js:10-12 and its caller; it is intentionally destructive but has no additional attacker-controlled SQL input beyond the separate static-token authorization issue.
+- Reviewed download error handling at server.js:25-26; it returns a generic 404 and does not add a distinct information disclosure beyond the traversal flaw.
 
 ---
 

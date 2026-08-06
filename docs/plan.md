@@ -111,14 +111,17 @@ it the three adapters resolve ambient state three different ways.
 ### The agent tool
 
 ```
-probe        read, grep, find, ls, opensec         ← no bash
-investigate  read, grep, find, ls, bash, opensec   ← container profile only
+probe        read, grep, find, ls, opensec, delegate         ← no bash
+investigate  read, grep, find, ls, bash, opensec, delegate   ← bash: container only
+subagent     read, grep, find, ls, opensec(read-only verbs)   ← cannot file findings
 
 opensec({ verb: "work.next",         limit, cursor })  → assigned files + total
 opensec({ verb: "candidate.create",  title, cwe, locations[], summary, evidence })
 opensec({ verb: "candidate.resolve", id, disposition, confidence, evidence,
                                      impact, likelihood, suppression{} })
 opensec({ verb: "lead.record",       text, status })
+
+delegate({ agent_type: "tracer" | "skeptic", task, description })  → the child's report
 ```
 
 Prose arrives as JSON and never touches a shell — no backtick command substitution,
@@ -129,7 +132,10 @@ derived from traces (§6), so an agent cannot mark work it never did.
 pi's `subagent` extension, which spawns a fresh `pi` process: `customTools` don't
 cross the boundary (the `opensec` tool silently vanishes), `--no-session` kills the
 traces coverage depends on, budget and abort don't propagate, and the child inherits
-the API key. Pin `@mariozechner/pi-coding-agent` to an exact version.
+the API key. Confirmed from its source: it is `spawn(execPath, ["--mode","json","-p",
+"--no-session"])`. **Agent-initiated delegation uses the same in-process path**, one
+level deep, so a subagent keeps the tool, the trace, the budget and the coverage.
+Pin `@earendil-works/pi-coding-agent` to an exact version.
 
 ---
 

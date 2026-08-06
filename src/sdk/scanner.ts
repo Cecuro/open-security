@@ -14,6 +14,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 import { AgentRunner, pricingOf } from "../agents/session.js";
+import type { SubagentDeps } from "../agents/subagent.js";
 import type { RunContext } from "../agents/tool.js";
 import { Ledger, scanArtifactDir, shortHash } from "../db/db.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
@@ -134,6 +135,22 @@ export class Scanner {
 		this.ledger.addUsage(this.scanId, r.tokensIn, r.tokensOut, r.costUsd);
 	}
 
+	/**
+	 * Handed to the phases that benefit from delegation. threat-model and dedup
+	 * do not get it: one is orientation, the other is a comparison over rows that
+	 * are already in front of it.
+	 */
+	private subagentDeps(): SubagentDeps {
+		return {
+			prompts: this.prompts,
+			run: (a) => this.runner.run(a),
+			checkBudget: () => this.checkBudget(),
+			bill: (r) => this.bill(r),
+			tracePath: (w) => this.tracePath(w),
+			onEvent: (m) => this.say(m),
+		};
+	}
+
 	/** Where this run's agent transcripts go. In-memory sessions leave nothing otherwise. */
 	private tracePath(workerId: string): string {
 		return join(scanArtifactDir(this.scanId), "traces", `${workerId}.jsonl`);
@@ -220,6 +237,7 @@ export class Scanner {
 		const result = await this.runner.run({
 			ctx: this.ctx("probe-1"),
 			tracePath: this.tracePath("probe-1"),
+			subagents: this.subagentDeps(),
 			modelRef: this.opts.models?.discovery,
 			systemPrompt: this.prompts.get("probe.md"),
 			prompt: [
@@ -259,6 +277,7 @@ export class Scanner {
 		const result = await this.runner.run({
 			ctx: this.ctx(`investigate-${candidate.id}`),
 			tracePath: this.tracePath(`investigate-${candidate.id}`),
+			subagents: this.subagentDeps(),
 			modelRef: this.opts.models?.investigate,
 			systemPrompt: [
 				this.prompts.get("investigate.md"),

@@ -29,6 +29,8 @@ export const PROMPT_NAMES = [
 	"investigate.md",
 	"dedup.md",
 	"refs/counterevidence.md",
+	"agents/tracer.md",
+	"agents/skeptic.md",
 ] as const;
 
 export type PromptName = (typeof PROMPT_NAMES)[number];

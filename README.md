@@ -72,6 +72,13 @@ Agents write through **one tool with four verbs** — `work.next`,
 `candidate.create`, `candidate.resolve`, `lead.record`. File lists, severity
 arithmetic and the report are ordinary TypeScript that cannot drift.
 
+The probe and investigate agents can also `delegate` one focused question to a
+subagent — a `tracer` that follows a single path, or a `skeptic` that tries to
+refute a claim. Subagents run **in-process**, one level deep, sharing the ledger:
+their reads count toward coverage and their spend counts against `--max-cost`.
+They cannot record findings. They report back, and the agent that delegated stays
+accountable for what gets filed.
+
 ## Three things worth knowing before you trust the output
 
 **"Runs locally" does not mean your code stays local.** The orchestrator, the
