@@ -34,7 +34,9 @@ one "does this check actually cover that input" question.
 ## The rating
 
 Call `opensec({ verb: "candidate.assess", id, ... })` exactly once, with the
-reachability trace and the observable inputs.
+reachability trace, the observable inputs, and a `rationale`. The rationale is
+required: it is where you say what the trace shows and why the controls you
+listed do not stop it.
 
 **You do not set severity.** You supply inputs and the CLI computes it:
 

@@ -202,10 +202,13 @@ const VERB_DOC: Record<Verb, string> = {
 		"  suspected flaw. locations must cite real line ranges in files inside the repo.",
 	"candidate.validate":
 		"- candidate.validate({ id, disposition, rationale }) — is it real? No severity here.",
+	// rationale is required and used to sit inside the "...", which every
+	// attack-path agent discovered by having its first call rejected. Naming a
+	// required field is cheaper than the round trip that teaches it.
 	"candidate.assess":
-		"- candidate.assess({ id, entry_point, path, controls, impact, ... }) — how far it\n" +
-		"  reaches, plus the observable inputs severity is computed from. You do not set\n" +
-		"  severity.",
+		"- candidate.assess({ id, entry_point, path, controls, rationale, impact, ... }) —\n" +
+		"  how far it reaches, plus the observable inputs severity is computed from. You\n" +
+		"  do not set severity.",
 	"lead.record":
 		"- lead.record({ text, status }) — a hypothesis you chased. Record dead ends too.",
 };
