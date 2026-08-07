@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import { AgentRunner, type AgentRunResult, pricingOf, type RunArgs } from "../agents/session.js";
 import type { SubagentDeps } from "../agents/subagent.js";
@@ -309,7 +309,12 @@ export class Scanner {
 		const tm = threatModel ?? this.ledger.getThreatModel(this.scanId) ?? "";
 		this.checkBudget();
 
-		const parts = this.partitions ?? [{ id: 0, paths: [], bytes: 0 }];
+		const parts = this.partitions;
+		if (!parts) {
+			// Without this, a discover() with no inventory scans zero files and
+			// reports a clean completed scan.
+			throw new Error("discover() before inventory(): nothing is in scope yet. run() orders the phases.");
+		}
 		this.say(`discovery: ${describeDistribution(parts)}, ${this.concurrency} at a time`);
 
 		await mapConcurrent(parts, this.concurrency, async (part) => {

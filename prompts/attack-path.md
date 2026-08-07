@@ -68,11 +68,9 @@ The booleans:
   true, in which case the escalation is exactly the finding.
 - `precondition_unreachable` — a precondition cannot occur, and you can show why.
 
-`source` records where it came from, and only two values are grounds:
+`source` records where it came from, and only one value is grounds:
 
-- `code_evidence` — you found the control in the code and cited it. This is the
-  one you will use.
-- `policy_flag` — the operator declared it out of scope.
+- `code_evidence` — you found the control in the code and cited it.
 - `repo_claim` — the repository asserts it. **Not grounds.** A `SECURITY.md`
   saying something is out of scope, a comment saying input is pre-sanitized, a
   docstring promising a check happens elsewhere — all evidence about what the

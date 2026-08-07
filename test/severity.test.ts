@@ -79,6 +79,14 @@ describe("a suppression boolean is not enough on its own", () => {
 		expect(r.rationale.join(" ")).toContain("no evidence");
 	});
 
+	it("refuses 'policy_flag' — no mechanism exists for an operator to declare policy", () => {
+		// The value used to be grounds, but nothing verified an operator ever
+		// declared anything, so a repo could talk an agent into asserting it.
+		const r = suppressed({ self_only: true, evidence: "operator said so", source: "policy_flag" });
+		expect(r.reportable).toBe(true);
+		expect(r.rationale.join(" ")).toContain("not grounds");
+	});
+
 	it("says so in the report rather than suppressing quietly either way", () => {
 		const r = suppressed({ precondition_unreachable: true, source: "repo_claim", evidence: "x" });
 		expect(r.rationale.join(" ")).toContain("precondition_unreachable");

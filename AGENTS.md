@@ -3,12 +3,12 @@
 This file provides guidance to all AI code assistants when working with code in this repository.
 
 # opensec
-A code review tool based on the PI harness that make bug identification and management easy for any team and any software
+A code review tool based on the PI harness that makes bug identification and management easy for any team and any software
 
 ## Important notes
-- Keep instructions for agent lean. Less is more and it should be usable across all agents and models
-- Make tools be intuititve and easy to use. Don't manipulate agent context in unclear ways
-- Lss restrictions is usually better for agents
+- Keep instructions for agents lean. Less is more and it should be usable across all agents and models
+- Make tools intuitive and easy to use. Don't manipulate agent context in unclear ways
+- Less restrictions is usually better for agents
 - We build general capable agents and give them the tools to solve their own problems instead of hardcoding solutions around small issues
 - DRY: Do not repeat code
 - Cleanup: remove old and unused code

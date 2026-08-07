@@ -82,25 +82,16 @@ const SuppressionSchema = Type.Object(
 		precondition_unreachable: Type.Optional(Type.Boolean()),
 		evidence: Type.Optional(Type.String()),
 		source: Type.Optional(
-			Type.Union([
-				Type.Literal("policy_flag"),
-				Type.Literal("code_evidence"),
-				Type.Literal("repo_claim"),
-			]),
+			Type.Union([Type.Literal("code_evidence"), Type.Literal("repo_claim")]),
 		),
 	},
 	{ additionalProperties: false },
 );
 
-const ParamsSchema = Type.Object(
+const paramsSchema = (verbs: Verb[]) =>
+	Type.Object(
 	{
-		verb: Type.Union([
-			Type.Literal("work.next"),
-			Type.Literal("candidate.create"),
-			Type.Literal("candidate.validate"),
-			Type.Literal("candidate.assess"),
-			Type.Literal("lead.record"),
-		]),
+		verb: Type.Union(verbs.map((v) => Type.Literal(v))),
 
 		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
 		cursor: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -198,28 +189,53 @@ const ParamsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const DESCRIPTION = `Record security review work. One tool, five verbs:
+const ALL_VERBS: Verb[] = [
+	"work.next",
+	"candidate.create",
+	"candidate.validate",
+	"candidate.assess",
+	"lead.record",
+];
 
-- work.next({ limit, cursor }) — the files you are accountable for, and the total.
-- candidate.create({ title, cwe, locations, summary, evidence, instance }) — a
-  suspected flaw. locations must cite real line ranges in files inside the repo.
-- candidate.validate({ id, disposition, rationale }) — is it real? No severity here.
-- candidate.assess({ id, entry_point, path, controls, impact, ... }) — how far it
-  reaches, plus the observable inputs severity is computed from. You do not set
-  severity.
-- lead.record({ text, status }) — a hypothesis you chased. Record dead ends too.`;
+// The tool describes only the verbs this worker may call. A description that
+// advertises a verb the worker cannot use is an instruction to make an error.
+const VERB_DOC: Record<Verb, string> = {
+	"work.next":
+		"- work.next({ limit, cursor }) — the files you are accountable for, and the total.",
+	"candidate.create":
+		"- candidate.create({ title, cwe, locations, summary, evidence, instance }) — a\n" +
+		"  suspected flaw. locations must cite real line ranges in files inside the repo.",
+	"candidate.validate":
+		"- candidate.validate({ id, disposition, rationale }) — is it real? No severity here.",
+	"candidate.assess":
+		"- candidate.assess({ id, entry_point, path, controls, impact, ... }) — how far it\n" +
+		"  reaches, plus the observable inputs severity is computed from. You do not set\n" +
+		"  severity.",
+	"lead.record":
+		"- lead.record({ text, status }) — a hypothesis you chased. Record dead ends too.",
+};
 
 export function createOpensecTool(ctx: RunContext) {
+	const verbs = ctx.verbs ?? ALL_VERBS;
+	const guidelines = [
+		...(verbs.includes("work.next")
+			? ["Call opensec work.next before reviewing anything — it is the list you are accountable for."]
+			: []),
+		...(verbs.includes("lead.record")
+			? ["Record dead ends with lead.record. Silence is indistinguishable from never having looked."]
+			: []),
+	];
 	return defineTool({
 		name: "opensec",
 		label: "opensec",
-		description: DESCRIPTION,
-		parameters: ParamsSchema,
+		description: [
+			`Record security review work. ${verbs.length === 1 ? "One verb" : `${verbs.length} verbs`}:`,
+			"",
+			...verbs.map((v) => VERB_DOC[v]),
+		].join("\n"),
+		parameters: paramsSchema(verbs),
 		promptSnippet: "opensec - record worklist progress, candidates, verdicts and leads",
-		promptGuidelines: [
-			"Call opensec work.next before reviewing anything — it is the list you are accountable for.",
-			"Record dead ends with lead.record. Silence is indistinguishable from never having looked.",
-		],
+		...(guidelines.length > 0 ? { promptGuidelines: guidelines } : {}),
 		// Two calls in one tool batch must not interleave a create and a validate.
 		executionMode: "sequential",
 		async execute(_id, params) {
@@ -233,14 +249,6 @@ type Params = {
 	verb: Verb;
 	[k: string]: unknown;
 };
-
-const ALL_VERBS: Verb[] = [
-	"work.next",
-	"candidate.create",
-	"candidate.validate",
-	"candidate.assess",
-	"lead.record",
-];
 
 function run(ctx: RunContext, p: Params): string {
 	const allowed = ctx.verbs ?? ALL_VERBS;
@@ -343,8 +351,7 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 	const { candidate, id } = requireCandidate(ctx, p);
 	const rationale = sanitize(ctx, requireText(p.rationale, "rationale"));
 
-	let disposition = (p.disposition as Disposition | undefined) ?? "needs_follow_up";
-	const notes: string[] = [];
+	const disposition = (p.disposition as Disposition | undefined) ?? "needs_follow_up";
 
 	if (ctx.dispositions && !ctx.dispositions.includes(disposition)) {
 		throw new Error(
@@ -354,26 +361,38 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 	}
 
 	if (disposition === "duplicate") {
+		// Every failure below throws and records nothing. Writing anything here
+		// would give the candidate a validation record it never earned, and the
+		// validate pass skips rows that already have one.
 		const dup = typeof p.duplicate_of === "string" ? p.duplicate_of : "";
-		const target = dup ? ctx.ledger.getCandidate(ctx.scanId, dup) : undefined;
-		if (!target || dup === id) {
-			disposition = "needs_follow_up";
-			notes.push(`duplicate_of '${dup}' does not resolve; kept as needs_follow_up`);
-		} else if (target.merged_into) {
-			disposition = "needs_follow_up";
-			notes.push(
-				`duplicate_of '${dup}' is itself merged into '${target.merged_into}'; ` +
-					`point every duplicate at the surviving row. Kept as needs_follow_up.`,
+		if (!dup || dup === id) {
+			throw new Error(
+				`duplicate_of must name another candidate — got '${dup}'. Nothing was recorded.`,
 			);
-		} else {
-			ctx.ledger.resolveCandidate(ctx.scanId, id, {
-				disposition: "duplicate",
-				rationale,
-				duplicate_of: dup,
-				validation: { disposition: "duplicate", rationale, at: now() },
-			});
-			return JSON.stringify({ id, disposition: "duplicate", duplicate_of: dup });
 		}
+		if (ctx.resolvableIds && !ctx.resolvableIds.includes(dup)) {
+			throw new Error(
+				`duplicate_of '${dup}' is not in your group. You were asked about: ` +
+					`${ctx.resolvableIds.join(", ")}. Nothing was recorded.`,
+			);
+		}
+		const target = ctx.ledger.getCandidate(ctx.scanId, dup);
+		if (!target) {
+			throw new Error(`no candidate '${dup}' in this scan. Nothing was recorded.`);
+		}
+		if (target.merged_into) {
+			throw new Error(
+				`duplicate_of '${dup}' is itself merged into '${target.merged_into}' — point ` +
+					`every duplicate at the surviving row. Nothing was recorded.`,
+			);
+		}
+		ctx.ledger.resolveCandidate(ctx.scanId, id, {
+			disposition: "duplicate",
+			rationale,
+			duplicate_of: dup,
+			validation: { disposition: "duplicate", rationale, at: now() },
+		});
+		return JSON.stringify({ id, disposition: "duplicate", duplicate_of: dup });
 	}
 
 	const resolution: Resolution = {
@@ -387,7 +406,6 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 	return JSON.stringify({
 		id,
 		disposition,
-		notes,
 		next:
 			disposition === "confirmed"
 				? "a separate attack-path pass will rate this. You do not assess it."
@@ -512,10 +530,8 @@ function readSeverityInputs(
 	if (!impact || !method) return null;
 	if (!vector) notes.push("no vector given; treated as unknown, which caps likelihood at low");
 
-	const suppression = p.suppression as SeverityInputs["suppression"];
-	if (suppression?.evidence) {
-		suppression.evidence = sanitize(ctx, suppression.evidence);
-	}
+	const raw = p.suppression as SeverityInputs["suppression"];
+	const suppression = raw?.evidence ? { ...raw, evidence: sanitize(ctx, raw.evidence) } : raw;
 
 	return {
 		impact,
