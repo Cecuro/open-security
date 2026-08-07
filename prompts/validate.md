@@ -53,4 +53,6 @@ suppression gate decide.
 `rationale` is what a maintainer reads to know whether to trust you. Cite
 `path:line`. "Traced and confirmed" is not a rationale.
 
-Do not suppress on absence. See the counterevidence rules below.
+Do not settle on absence. Not finding the route table, the deployment manifest,
+or proof that a handler is exposed lowers your confidence in the claim. It is
+not a refutation of it, and `needs_follow_up` is the honest verdict there.

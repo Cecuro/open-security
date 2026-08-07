@@ -1,17 +1,3 @@
-/**
- * The one structured tool the scan's agents write through (plan §3).
- *
- * Five verbs. Prose arrives as JSON and never touches a shell — no backtick
- * command substitution, no --body-file dance. There is deliberately no
- * `files.done` verb: coverage is derived from traces, so an agent cannot mark
- * work it never did.
- *
- * `candidate.validate` and `candidate.assess` were one verb until the passes
- * were split. Keeping them separate is what makes the split real: a validating
- * agent has no way to record a severity, and an assessing agent has no way to
- * revisit whether the finding was real.
- */
-
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
@@ -36,60 +22,18 @@ import type {
 	Vector,
 } from "../types.js";
 
-/**
- * Bound to (scan_id, worker_id): everything a tool call needs to know about
- * who is writing and what they are allowed to write about.
- */
 export interface RunContext {
 	scanId: string;
 	workerId: string;
 	repoRoot: string;
 	profile: Profile;
 	ledger: Ledger;
-	/** Per-run delimiter wrapping repo-derived text. Stripped from agent prose. */
 	nonce: string;
-	/**
-	 * Which verbs this worker may call. Every phase used to get all of them, so a
-	 * reducer could dispose of anything and a subagent could file findings its
-	 * parent never saw. Subagents get a read-only subset (plan §4's ownership
-	 * rule only means something if writes are attributable to an accountable
-	 * worker).
-	 */
 	verbs?: Verb[];
-	/** How many subagents deep this worker is. 0 is a phase agent. */
 	depth?: number;
-	/**
-	 * Where this worker's oversized tool results are spilled, and the only path
-	 * outside the repository it may read.
-	 *
-	 * Truncation is the right answer for a tool you can cheaply call again:
-	 * `read` at `offset=401` returns the rest of the same file, so paging costs a
-	 * turn and nothing else. It is the wrong answer for anything whose second run
-	 * is not the first one continued — a shell command with side effects, or a
-	 * subagent, which costs a full agent run and answers differently each time.
-	 * Those must execute once, keep everything, and let the agent page the record.
-	 *
-	 * Per worker, not per scan: this directory sits beside other agents'
-	 * transcripts and findings, and a probe that could read the whole scan
-	 * directory could read another probe's work — the same cross-worker leak the
-	 * verb scoping exists to prevent.
-	 */
 	overflowDir?: string;
-	/**
-	 * Which partition this worker owns. Undefined means the whole scan, which is
-	 * what every phase after discovery gets — only probes are partitioned.
-	 */
 	partitionId?: number;
-	/**
-	 * Which candidates this worker may write to. Undefined means any. Validate is
-	 * handed exactly the row it was asked about; the reducer is handed its group.
-	 */
 	resolvableIds?: string[];
-	/**
-	 * Which dispositions this worker may set. The reducer gets `["duplicate"]`
-	 * only: it is comparing rows that have not been validated yet, so letting it
-	 * mark one `not_applicable` would drop a finding nobody ever read.
-	 */
 	dispositions?: Disposition[];
 }
 
@@ -100,15 +44,6 @@ export type Verb =
 	| "candidate.assess"
 	| "lead.record";
 
-/**
- * Verbs by role, not one set for everyone.
- *
- * A scan of opensec by opensec found the reason: with probes running in
- * parallel, every phase holding every verb meant one probe could resolve
- * another probe's candidate — ids are predictable `c1`, `c2` — and quietly
- * suppress a finding it never saw. Probes file; validate judges; assess rates;
- * the reducer only merges. Nobody needs the whole set.
- */
 export const PROBE_VERBS: Verb[] = ["work.next", "candidate.create", "lead.record"];
 export const VALIDATE_VERBS: Verb[] = ["work.next", "candidate.validate", "lead.record"];
 export const ASSESS_VERBS: Verb[] = ["work.next", "candidate.assess", "lead.record"];
@@ -167,11 +102,9 @@ const ParamsSchema = Type.Object(
 			Type.Literal("lead.record"),
 		]),
 
-		// work.next
 		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
 		cursor: Type.Optional(Type.Integer({ minimum: 0 })),
 
-		// candidate.create
 		title: Type.Optional(Type.String()),
 		cwe: Type.Optional(
 			Type.Array(Type.String(), {
@@ -190,7 +123,6 @@ const ParamsSchema = Type.Object(
 			}),
 		),
 
-		// candidate.validate / candidate.assess
 		id: Type.Optional(Type.String()),
 		disposition: Type.Optional(
 			Type.Union([
@@ -203,7 +135,6 @@ const ParamsSchema = Type.Object(
 		rationale: Type.Optional(Type.String()),
 		duplicate_of: Type.Optional(Type.String()),
 
-		// candidate.assess — reachability
 		entry_point: Type.Optional(
 			Type.String({ description: "path:line where an attacker starts, and what they control" }),
 		),
@@ -220,7 +151,6 @@ const ParamsSchema = Type.Object(
 			}),
 		),
 
-		// candidate.assess — severity inputs
 		impact: Type.Optional(
 			Type.Union([
 				Type.Literal("none"),
@@ -256,7 +186,6 @@ const ParamsSchema = Type.Object(
 		),
 		suppression: Type.Optional(SuppressionSchema),
 
-		// lead.record
 		text: Type.Optional(Type.String()),
 		status: Type.Optional(
 			Type.Union([
@@ -266,7 +195,6 @@ const ParamsSchema = Type.Object(
 			]),
 		),
 	},
-	// A typo'd field is silent data loss, so unknown fields are rejected.
 	{ additionalProperties: false },
 );
 
@@ -292,13 +220,9 @@ export function createOpensecTool(ctx: RunContext) {
 			"Call opensec work.next before reviewing anything — it is the list you are accountable for.",
 			"Record dead ends with lead.record. Silence is indistinguishable from never having looked.",
 		],
-		// The single writer to the ledger. Serialising it keeps two calls in one
-		// tool batch from interleaving a create and a validate.
+		// Two calls in one tool batch must not interleave a create and a validate.
 		executionMode: "sequential",
 		async execute(_id, params) {
-			// Validation failures throw. The agent loop catches per tool call and
-			// hands the message back to the model, so a hallucinated line number is
-			// a hard, recoverable tool error rather than a bad row in the report.
 			const output = run(ctx, params as Params);
 			return { content: [{ type: "text", text: output }], details: undefined };
 		},
@@ -376,8 +300,6 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 
 	const locations = rawLocations.map((l) => validateLocation(ctx, l));
 
-	// Ties every finding to an owner. With one probe this is just "in scope",
-	// but it is the same check that carries into per-worker partitions.
 	if (!locations.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path, ctx.partitionId))) {
 		throw new Error(
 			`no location is in your worklist — cite at least one file from work.next. ` +
@@ -416,17 +338,10 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 	});
 }
 
-/**
- * Pass one: is it real? No severity inputs are accepted here, which is the
- * whole point of the split — a reader deciding "does this hold up" cannot
- * simultaneously talk themselves into a reachability story.
- */
 function candidateValidate(ctx: RunContext, p: Params): string {
 	const { candidate, id } = requireCandidate(ctx, p);
 	const rationale = sanitize(ctx, requireText(p.rationale, "rationale"));
 
-	// Degradation is directional: an unparseable disposition becomes
-	// needs_follow_up, never a quiet drop (plan §4).
 	let disposition = (p.disposition as Disposition | undefined) ?? "needs_follow_up";
 	const notes: string[] = [];
 
@@ -444,10 +359,6 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 			disposition = "needs_follow_up";
 			notes.push(`duplicate_of '${dup}' does not resolve; kept as needs_follow_up`);
 		} else if (target.merged_into) {
-			// Every duplicate must point at a row that survives. Without this, a
-			// mutual merge (c1→c2, c2→c1) removes BOTH rows from the report — the
-			// silent instance destruction plan §4 calls unacceptable. The prompt tells
-			// the model not to chain, but a prompt is not an enforcement mechanism.
 			disposition = "needs_follow_up";
 			notes.push(
 				`duplicate_of '${dup}' is itself merged into '${target.merged_into}'; ` +
@@ -483,11 +394,6 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 	});
 }
 
-/**
- * Pass two, over survivors only: how far does it reach, and what does that make
- * it worth? Reachability is recorded as structure rather than prose so the one
- * input that promotes a finding to critical can be checked against it.
- */
 function candidateAssess(ctx: RunContext, p: Params): string {
 	const { candidate, id } = requireCandidate(ctx, p);
 
@@ -505,7 +411,6 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 	const inputs = readSeverityInputs(ctx, p, notes);
 
 	if (!inputs) {
-		// No severity is a downgrade of the claim, not a deletion of the finding.
 		const resolution: Resolution = {
 			...(candidate.resolution ?? { disposition: "needs_follow_up", rationale }),
 			disposition: "needs_follow_up",
@@ -520,9 +425,6 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 		});
 	}
 
-	// The one input the tool can check. `traced_path_no_control` is one of two
-	// routes to critical, and until the reachability trace existed nothing backed
-	// it — a model could assert it while describing a path full of checks.
 	if (inputs.traced_path_no_control) {
 		if (reachability.path.length === 0) {
 			inputs.traced_path_no_control = false;
@@ -542,7 +444,6 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 	const computed = computeSeverity(inputs, ctx.profile);
 	const resolution: Resolution = {
 		...(candidate.resolution ?? {}),
-		// The gate, not the model, decides whether this leaves the report.
 		disposition: computed.reportable ? "confirmed" : "suppressed",
 		rationale,
 		attack_path: { reachability, rationale, at: now() },
@@ -608,8 +509,6 @@ function readSeverityInputs(
 	if (!impact || !method) return null;
 	if (!vector) notes.push("no vector given; treated as unknown, which caps likelihood at low");
 
-	// suppression.evidence is agent prose like every other free-text field, and
-	// it reaches the report through computed.rationale.
 	const suppression = p.suppression as SeverityInputs["suppression"];
 	if (suppression?.evidence) {
 		suppression.evidence = sanitize(ctx, suppression.evidence);
@@ -628,11 +527,6 @@ function readSeverityInputs(
 	};
 }
 
-/**
- * Locations must resolve inside the repo, be a regular file, and cite a line
- * range that exists. Scanned code is attacker-authored, so a symlink out of the
- * tree is a rejection rather than a read.
- */
 function validateLocation(ctx: RunContext, loc: Location): Location {
 	if (typeof loc?.path !== "string" || loc.path.length === 0) {
 		throw new Error("location.path is required");
@@ -644,15 +538,10 @@ function validateLocation(ctx: RunContext, loc: Location): Location {
 	const root = realpathSync(ctx.repoRoot);
 	const abs = resolve(root, loc.path);
 
-	// Three checks, in this order, so each failure reports its real cause.
-	//
-	// 1. Lexical containment catches `../etc/passwd` before touching the disk.
 	if (outsideRoot(root, abs)) {
 		throw new Error(`location '${loc.path}' resolves outside the repo`);
 	}
 
-	// 2. A symlinked leaf is rejected outright rather than silently rewritten to
-	//    its target: an agent citing a link has cited the wrong file.
 	let leaf: ReturnType<typeof lstatSync>;
 	try {
 		leaf = lstatSync(abs);
@@ -662,10 +551,6 @@ function validateLocation(ctx: RunContext, loc: Location): Location {
 	if (leaf.isSymbolicLink()) throw new Error(`location '${loc.path}' is a symlink`);
 	if (!leaf.isFile()) throw new Error(`location '${loc.path}' is not a regular file`);
 
-	// 3. Lexical containment is not enough on its own: `lstat` declines to follow
-	//    only the FINAL component, so `docs/passwd` where `docs` is a symlink to
-	//    /tmp/outside passes step 1 and reads a file outside the repo entirely.
-	//    Containment must also hold for the fully resolved path.
 	const real = realpathSync(abs);
 	if (outsideRoot(root, real)) {
 		throw new Error(
@@ -690,10 +575,7 @@ function validateLocation(ctx: RunContext, loc: Location): Location {
 		path: rel,
 		start_line: start,
 		end_line: end,
-		// symbol is agent prose like any other field and gets the same treatment.
 		...(loc.symbol ? { symbol: sanitize(ctx, String(loc.symbol)).slice(0, 200) } : {}),
-		// An unrecognised role becomes `evidence` rather than an error: it changes
-		// identity, so a typo must not quietly create a second finding.
 		...(loc.role && (ROLES as readonly string[]).includes(loc.role)
 			? { role: loc.role as LocationRole }
 			: {}),
@@ -705,12 +587,6 @@ function outsideRoot(root: string, abs: string): boolean {
 	return rel.length === 0 || rel.startsWith("..") || isAbsolute(rel);
 }
 
-/**
- * Lines in a file, not elements produced by splitting on "\n". A trailing
- * newline yields a final empty element that is not a line — counting it accepts
- * line N+1 on almost every real file, which is the single most likely
- * hallucination this check exists to catch.
- */
 function countLines(content: string): number {
 	if (content.length === 0) return 0;
 	const parts = content.split("\n");
@@ -720,7 +596,6 @@ function countLines(content: string): number {
 
 function normalizeCwe(cwe: string[] | undefined): string[] {
 	if (!cwe) return [];
-	// No clear class keeps [] — never invent a classification (plan §6.8).
 	return cwe
 		.map((c) => String(c).trim().toUpperCase())
 		.filter((c) => /^CWE-\d+$/.test(c))
@@ -734,19 +609,9 @@ function requireText(v: unknown, field: string): string {
 	return v;
 }
 
-/**
- * probe has no bash but can launder a payload into candidate.summary, which
- * later phases read (plan §5). Strip the run nonce so repo text cannot forge a
- * trust boundary, and strip control characters so findings cannot rewrite a
- * terminal on the way out.
- */
 export function sanitize(
 	ctx: Pick<RunContext, "nonce">,
 	text: string,
-	// The default bounds a single field in the ledger. Callers that keep the full
-	// text somewhere durable and bound the *inlined* part separately — the
-	// subagent spill — pass Infinity, because truncating here would discard the
-	// tail before it is ever written down.
 	limit = 20000,
 ): string {
 	return redactSecrets(

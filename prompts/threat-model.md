@@ -24,6 +24,14 @@ Cover, in this order:
 6. **External surface.** Outbound calls, subprocess execution, template rendering,
    SQL construction, deserialization, path handling, archive extraction — the
    places where a bug becomes someone else's code running.
+7. **Severity calibration.** What makes a finding critical, high, medium or low
+   *in this repository*? Give a concrete example at each level, drawn from this
+   code. Then say which vulnerability classes matter less here than their name
+   suggests, and why: a class that needs attacker control this system never
+   grants is worth saying out loud, and so is a property every component here
+   shares, because a property everything has cannot separate anything. This is
+   the section most likely to be wrong for an unusual codebase, and the one a
+   reader can most usefully correct.
 
 Rules:
 

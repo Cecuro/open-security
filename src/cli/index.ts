@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-/**
- * The CLI shapes arguments and formats results. All behaviour lives in the SDK.
- *
- * Terminal output strips ESC sequences before printing (plan §8): OSC 52 writes
- * the clipboard and OSC 8 forges links, and finding prose is attacker-authored.
- */
 
 import { Scanner } from "../sdk/scanner.js";
 import { stripControlChars } from "../text.js";
@@ -78,8 +72,6 @@ async function main(argv: string[]): Promise<number> {
 	const opts = parseFlags(rest);
 	const target = opts.positional[0] ?? ".";
 
-	// A flag that is silently ignored, or a profile that is silently accepted and
-	// then printed in the report header, is a wrong claim about what ran.
 	const PROFILES: Profile[] = ["static", "container"];
 	const profileFlag = opts.flags.profile;
 	if (profileFlag !== undefined && !PROFILES.includes(profileFlag as Profile)) {
@@ -94,8 +86,6 @@ async function main(argv: string[]): Promise<number> {
 			return 2;
 		}
 	}
-	// `none` is the explicit opt-out, so an unpriced model is a deliberate choice
-	// rather than an accident.
 	let maxCostUsd: number | null = null;
 	const costFlag = opts.flags["max-cost"];
 	if (costFlag !== undefined && costFlag !== "none") {
@@ -113,7 +103,6 @@ async function main(argv: string[]): Promise<number> {
 		return 2;
 	}
 
-	// Estimating spends nothing, writes nothing, and needs no model.
 	if (opts.bools.estimate) {
 		const e = await Scanner.estimate({ repo: target, maxFiles });
 		process.stdout.write(
@@ -192,10 +181,8 @@ function numFlag(v: string | undefined): number | undefined {
 	return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-/** Strip ESC and other C0 controls before anything reaches a terminal. */
 const safe = stripControlChars;
 
-/** Only models whose provider is actually authenticated — the ones you can run. */
 async function listPricedModels(): Promise<
 	Array<{ ref: string; priced: boolean; input: number; output: number }>
 > {

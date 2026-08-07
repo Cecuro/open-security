@@ -1,11 +1,12 @@
 ## Counterevidence, and its counterweight
 
-Before confirming, look for the thing that would make you wrong: the validation
-upstream, the framework default, the type that makes the bad state
-unrepresentable, the caller that never passes attacker input.
+Before you suppress anything, or rate it down to nothing, look for the thing
+that would make you wrong: the validation upstream, the framework default, the
+type that makes the bad state unrepresentable, the caller that never passes
+attacker input. Finding one is a result. Not finding one is not.
 
-But a counterevidence checklist with no counterweight becomes a suppression
-machine, because absence of evidence is always available. So:
+A counterevidence checklist with no counterweight becomes a suppression machine,
+because absence of evidence is always available. So:
 
 **Missing public-ingress evidence is not by itself dispositive counterevidence.**
 Not finding the route table, the deployment manifest, or proof that a handler is
