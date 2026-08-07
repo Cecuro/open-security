@@ -45,9 +45,14 @@ describe("partitioning splits ownership, and only ownership", () => {
 		expect(partition(files(48)).length).toBe(4);
 	});
 
-	it("never spins up a probe for a handful of files", () => {
-		const parts = partition(files(12), { maxFiles: 1, minFiles: 8 });
-		expect(parts).toHaveLength(1);
+	it("puts a handful of files on one probe by default", () => {
+		expect(partition(files(12))).toHaveLength(1);
+	});
+
+	it("honors an explicit small maxFiles instead of second-guessing it", () => {
+		// minFiles used to override this to one partition. If the operator asks
+		// for two-file partitions, the cost of that choice is theirs to make.
+		expect(partition(files(12), { maxFiles: 2 })).toHaveLength(6);
 	});
 
 	it("respects the concurrency ceiling", () => {
@@ -73,7 +78,7 @@ describe("partitioning splits ownership, and only ownership", () => {
 
 	it("keeps a directory together where it can, since sorted paths cluster", () => {
 		const input = [...files(20, "auth"), ...files(20, "billing")];
-		const parts = partition(input, { maxFiles: 20, minFiles: 1 });
+		const parts = partition(input, { maxFiles: 20 });
 		// Each partition should be dominated by one top-level directory.
 		for (const p of parts) {
 			const dirs = new Set(p.paths.map((x) => x.split("/")[0]));

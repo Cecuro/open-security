@@ -122,7 +122,7 @@ export interface Resolution {
 export interface Lead {
 	worker_id: string;
 	text: string;
-	status: "open" | "dead_end" | "became_candidate";
+	status: "open" | "dead_end";
 }
 
 export interface ScanFile {

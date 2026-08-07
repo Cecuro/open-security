@@ -6,12 +6,10 @@ export interface Partition {
 
 export interface PartitionOptions {
 	maxFiles?: number;
-	minFiles?: number;
 	maxPartitions?: number;
 }
 
 export const DEFAULT_PARTITION_MAX_FILES = 15;
-export const DEFAULT_PARTITION_MIN_FILES = 8;
 export const DEFAULT_MAX_PARTITIONS = 8;
 
 export function partition(
@@ -19,16 +17,13 @@ export function partition(
 	opts: PartitionOptions = {},
 ): Partition[] {
 	const maxFiles = opts.maxFiles ?? DEFAULT_PARTITION_MAX_FILES;
-	const minFiles = opts.minFiles ?? DEFAULT_PARTITION_MIN_FILES;
 	const maxPartitions = opts.maxPartitions ?? DEFAULT_MAX_PARTITIONS;
 
 	if (files.length === 0) return [];
 
 	const sorted = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-	let count = Math.ceil(sorted.length / maxFiles);
-	count = Math.min(count, maxPartitions, Math.max(1, Math.floor(sorted.length / minFiles)));
-	count = Math.max(1, count);
+	const count = Math.max(1, Math.min(Math.ceil(sorted.length / maxFiles), maxPartitions));
 
 	const base = Math.floor(sorted.length / count);
 	const extra = sorted.length % count;

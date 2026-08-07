@@ -179,11 +179,7 @@ const paramsSchema = (verbs: Verb[]) =>
 
 		text: Type.Optional(Type.String()),
 		status: Type.Optional(
-			Type.Union([
-				Type.Literal("open"),
-				Type.Literal("dead_end"),
-				Type.Literal("became_candidate"),
-			]),
+			Type.Union([Type.Literal("open"), Type.Literal("dead_end")]),
 		),
 	},
 	{ additionalProperties: false },
@@ -485,7 +481,7 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 
 function leadRecord(ctx: RunContext, p: Params): string {
 	const text = sanitize(ctx, requireText(p.text, "text"));
-	const status = (p.status as "open" | "dead_end" | "became_candidate" | undefined) ?? "open";
+	const status = (p.status as "open" | "dead_end" | undefined) ?? "open";
 	ctx.ledger.recordLead(ctx.scanId, { worker_id: ctx.workerId, text, status });
 	return JSON.stringify({ status: "recorded" });
 }
