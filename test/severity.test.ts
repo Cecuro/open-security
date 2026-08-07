@@ -14,21 +14,27 @@ const base: SeverityInputs = {
 	method: "code_reading",
 };
 
+/** A suppression that is entitled to suppress: boolean, evidence, and grounds. */
+const grounded = (over: Record<string, unknown> = {}) => ({
+	evidence: "the handler rejects any subject other than the caller at auth.ts:40",
+	source: "code_evidence" as const,
+	...over,
+});
+
 describe("the reportability gate runs before the matrix", () => {
 	it("drops self-only findings entirely, rather than landing them at low", () => {
-		const r = computeSeverity({ ...base, suppression: { self_only: true } });
+		const r = computeSeverity({ ...base, suppression: grounded({ self_only: true }) });
 		expect(r.reportable).toBe(false);
 		expect(r.rationale.join(" ")).toContain("self_only");
 	});
 
 	it("keeps a privilege-requiring finding when the privilege delta IS the bug", () => {
 		expect(
-			reportabilityGate({
-				requires_preexisting_privilege: true,
-				privilege_delta_is_the_bug: true,
-			}),
+			reportabilityGate(
+				grounded({ requires_preexisting_privilege: true, privilege_delta_is_the_bug: true }),
+			),
 		).toBeNull();
-		expect(reportabilityGate({ requires_preexisting_privilege: true })).toBe(
+		expect(reportabilityGate(grounded({ requires_preexisting_privilege: true }))).toBe(
 			"requires_preexisting_privilege",
 		);
 	});
@@ -37,6 +43,48 @@ describe("the reportability gate runs before the matrix", () => {
 		const r = computeSeverity({ ...base, impact: "low" });
 		expect(r.reportable).toBe(true);
 		expect(r.severity).toBe("medium");
+	});
+});
+
+/**
+ * Found by opensec scanning opensec. The booleans were checked in code while
+ * `source` was enforced only by the prompt, which made removal-from-the-report
+ * — the strongest claim this tool makes — the one thing a repository could talk
+ * an agent into.
+ */
+describe("a suppression boolean is not enough on its own", () => {
+	const suppressed = (s: Record<string, unknown>) =>
+		computeSeverity({ ...base, suppression: s });
+
+	it("refuses a suppression that rests on the repository's own claim", () => {
+		const r = suppressed({
+			self_only: true,
+			evidence: "SECURITY.md says CLI input is trusted",
+			source: "repo_claim",
+		});
+		expect(r.reportable).toBe(true);
+		expect(r.rationale.join(" ")).toContain("not policy");
+	});
+
+	it("refuses one with NO source, which is the easier attack than repo_claim", () => {
+		// Blocking only repo_claim would be defeated by omitting the field.
+		const r = suppressed({ self_only: true, evidence: "trust me" });
+		expect(r.reportable).toBe(true);
+		expect(r.rationale.join(" ")).toContain("nothing to audit");
+	});
+
+	it("refuses one with grounds but no evidence", () => {
+		const r = suppressed({ self_only: true, source: "code_evidence" });
+		expect(r.reportable).toBe(true);
+		expect(r.rationale.join(" ")).toContain("no evidence");
+	});
+
+	it("says so in the report rather than suppressing quietly either way", () => {
+		const r = suppressed({ precondition_unreachable: true, source: "repo_claim", evidence: "x" });
+		expect(r.rationale.join(" ")).toContain("precondition_unreachable");
+		expect(r.rationale.join(" ")).toContain("stays in the report");
+		// And it is still rated normally, not parked at info.
+		expect(r.severity).toBe("high");
 	});
 });
 

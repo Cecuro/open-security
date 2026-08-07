@@ -21,12 +21,28 @@ describe("partitioning splits ownership, and only ownership", () => {
 	});
 
 	it("splits once the cap is exceeded, and balances rather than filling to the cap", () => {
-		const parts = partition(files(200), { maxFiles: DEFAULT_PARTITION_MAX_FILES });
+		// 100 files at 15 each needs 7 probes, under the 8-probe ceiling, so the
+		// file cap is what binds here.
+		const parts = partition(files(100), { maxFiles: DEFAULT_PARTITION_MAX_FILES });
 		expect(parts.length).toBeGreaterThan(1);
 		const sizes = parts.map((p) => p.paths.length);
 		expect(Math.max(...sizes)).toBeLessThanOrEqual(DEFAULT_PARTITION_MAX_FILES);
 		// Balanced: no partition is more than one file bigger than another.
 		expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1);
+	});
+
+	it("lets the probe ceiling override the file cap, rather than the reverse", () => {
+		// A monorepo cannot buy unlimited concurrency by being large. maxFiles is
+		// the target; maxPartitions is the limit, and the limit wins.
+		const parts = partition(files(400), { maxFiles: 15, maxPartitions: 8 });
+		expect(parts).toHaveLength(8);
+		expect(Math.max(...parts.map((p) => p.paths.length))).toBe(50);
+	});
+
+	it("puts a repo the size of opensec on four probes, not one", () => {
+		// Measured: 48 files under one probe read 53% of the bytes; the same files
+		// on four probes read 100%, for less money.
+		expect(partition(files(48)).length).toBe(4);
 	});
 
 	it("never spins up a probe for a handful of files", () => {

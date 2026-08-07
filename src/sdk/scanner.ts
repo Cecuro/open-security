@@ -10,7 +10,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -23,7 +23,7 @@ import {
 	type RunContext,
 	VALIDATE_VERBS,
 } from "../agents/tool.js";
-import { Ledger, scanArtifactDir, shortHash } from "../db/db.js";
+import { Ledger, opensecDir, scanArtifactDir, shortHash } from "../db/db.js";
 import { collisionGroups } from "../scan/identity.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
 import {
@@ -34,6 +34,7 @@ import {
 } from "../scan/partition.js";
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
+import { redactSecrets, stripControlChars } from "../text.js";
 import type { Candidate, Coverage, Profile } from "../types.js";
 
 export interface ScannerOptions {
@@ -294,18 +295,27 @@ export class Scanner {
 
 		this.bill(result);
 
+		// A threat model names sensitive assets, and a model asked to name them
+		// will happily quote one. Every other piece of model prose goes through
+		// this before it is stored; this one did not, and it is now the piece with
+		// the longest life — it outlives the scan and is read back by later ones.
+		// Found by opensec scanning opensec. Redaction is on write only: a file the
+		// user has edited is theirs, and rewriting it on read would eat their edits.
+		const text = stripControlChars(redactSecrets(result.text));
+
 		const header =
 			`<!-- opensec threat model · repo ${this.repoName} · revision ${this.revision ?? "none"} ` +
 			`· written ${new Date().toISOString()} -->\n` +
 			`<!-- This file is yours to edit. The next scan of this repository reads it as\n` +
 			`     written; opensec only rewrites it when you pass --refresh-threat-model. -->\n\n`;
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, header + result.text, "utf8");
+		opensecDir("repos", this.repoId);
+		writeFileSync(path, header + text, { encoding: "utf8", mode: 0o600 });
+		chmodSync(path, 0o600);
 
-		this.ledger.setThreatModel(this.scanId, result.text, `generated:${path}`);
+		this.ledger.setThreatModel(this.scanId, text, `generated:${path}`);
 		this.threatModelNote = `written this run, saved to \`${path}\``;
 		this.say(`threat model: written to ${path} — edit it and the next scan will use yours`);
-		return result.text;
+		return text;
 	}
 
 	// ------------------------------------------------------------- phase 2
@@ -556,12 +566,15 @@ export class Scanner {
 			threatModel: this.threatModelNote,
 		});
 
-		const dir = scanArtifactDir(this.scanId);
-		mkdirSync(dir, { recursive: true });
+		// Owner-only: the report quotes the code, and findings.json quotes more of it.
+		const dir = opensecDir("scans", this.scanId);
 		const reportPath = join(dir, "report.md");
 		const jsonPath = join(dir, "findings.json");
-		writeFileSync(reportPath, markdown, "utf8");
-		writeFileSync(jsonPath, JSON.stringify({ scan, coverage, candidates }, null, 2), "utf8");
+		writeFileSync(reportPath, markdown, { encoding: "utf8", mode: 0o600 });
+		writeFileSync(jsonPath, JSON.stringify({ scan, coverage, candidates }, null, 2), {
+			encoding: "utf8",
+			mode: 0o600,
+		});
 
 		return { scanId: this.scanId, markdown, reportPath, jsonPath, candidates, coverage };
 	}

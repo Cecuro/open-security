@@ -8,7 +8,7 @@
 
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,12 +38,41 @@ export function scanArtifactDir(scanId: string): string {
 	return join(homedir(), ".opensec", "scans", scanId);
 }
 
+/**
+ * Create a directory under ~/.opensec, owner-only, and return it.
+ *
+ * Found by opensec scanning opensec: everything we keep — the ledger, agent
+ * transcripts, reports, threat models — is a verbatim copy of source code the
+ * agents read, and it was all being written at the process umask. On a shared
+ * machine that is a readable copy of someone's private repository sitting in a
+ * predictable path. The transcripts are the worst of it, because they exist
+ * precisely to record everything.
+ *
+ * ~/.opensec itself is chmod'd on every open rather than only on creation: a
+ * directory made by an earlier version is already 0755, and a mode passed to
+ * mkdirSync does nothing when the directory exists.
+ */
+export function opensecDir(...segments: string[]): string {
+	const root = join(homedir(), ".opensec");
+	mkdirSync(root, { recursive: true, mode: 0o700 });
+	try {
+		chmodSync(root, 0o700);
+	} catch {
+		// Not ours to chmod, or a platform that doesn't. The scan still runs.
+	}
+	if (segments.length === 0) return root;
+	const dir = join(root, ...segments);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	return dir;
+}
+
 export class Ledger {
 	private constructor(private readonly db: Database.Database) {}
 
 	static open(path?: string): Ledger {
 		const file = path ?? defaultDbPath();
-		mkdirSync(dirname(resolve(file)), { recursive: true });
+		if (path === undefined) opensecDir();
+		else mkdirSync(dirname(resolve(file)), { recursive: true });
 		const db = new Database(file);
 		db.pragma("journal_mode = WAL");
 		db.pragma("foreign_keys = ON");

@@ -21,9 +21,8 @@
  *    There is no self-report verb (plan §6).
  */
 
-import { mkdirSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { chmodSync, mkdirSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import {
 	createAgentSession,
@@ -41,6 +40,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 
+import { opensecDir } from "../db/db.js";
 import { createSubagentTool, type SubagentDeps } from "./subagent.js";
 import { createOpensecTool, type RunContext } from "./tool.js";
 
@@ -97,9 +97,7 @@ export function pricingOf(model: { cost?: ModelPricing }): ModelPricing | null {
 
 /** A directory opensec owns, used as pi's "project" so the repo never is. */
 function agentWorkDir(): string {
-	const dir = join(homedir(), ".opensec", "agent");
-	mkdirSync(dir, { recursive: true });
-	return dir;
+	return opensecDir("agent");
 }
 
 export class AgentRunner {
@@ -212,8 +210,13 @@ export class AgentRunner {
 			if (args.tracePath) {
 				// Best effort: losing a transcript must not fail a scan that worked.
 				try {
-					mkdirSync(dirname(args.tracePath), { recursive: true });
+					// A transcript is a verbatim copy of everything the agent read. pi's
+					// exportToJsonl writes with no mode, so the containing directory is
+					// what keeps it private — 0700, and chmod'd afterwards for anyone
+					// whose ~/.opensec predates this.
+					mkdirSync(dirname(args.tracePath), { recursive: true, mode: 0o700 });
 					session.exportToJsonl(args.tracePath);
+					chmodSync(args.tracePath, 0o600);
 				} catch {
 					/* ignore */
 				}

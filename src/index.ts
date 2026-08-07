@@ -1,13 +1,14 @@
 /** Public SDK surface. `import { Scanner } from "opensec"`. */
 
 export { Scanner, type ScannerOptions, type ScanResult } from "./sdk/scanner.js";
-export { Ledger, defaultDbPath, scanArtifactDir } from "./db/db.js";
+export { Ledger, defaultDbPath, opensecDir, scanArtifactDir } from "./db/db.js";
 export { inventory, type InventoryResult, type InventoryEntry } from "./scan/inventory.js";
 export {
 	computeSeverity,
 	formatSeverity,
 	renderMatrix,
 	reportabilityGate,
+	suppressionClaim,
 	severityRank,
 	CONFIDENCE_BY_METHOD,
 } from "./scan/severity.js";

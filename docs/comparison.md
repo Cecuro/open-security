@@ -77,8 +77,17 @@ model is asked to apply:
 > — same file, lines 99–100
 
 We turned those two lines into `self_only` and `precondition_unreachable`, each
-requiring evidence, each evaluated before the matrix rather than inside it. The
-disagreement is real and narrow: they trust the model to apply a policy, we
+requiring evidence, each evaluated before the matrix rather than inside it.
+
+That claim was half true until opensec scanned opensec and found the other half:
+the booleans were checked in code while `source` — the field that says whether
+the model is entitled to set them — was enforced only by the prompt. So the
+strongest claim the tool makes, removal from the report, was the one thing a
+repository's own `SECURITY.md` could talk an agent into. Suppression now
+requires the boolean, written evidence, and a source that is grounds;
+`repo_claim` is not grounds, and neither is omitting the field.
+
+The disagreement is real and narrow: they trust the model to apply a policy, we
 compute the policy from inputs the model supplies. Both approaches depend on the
 model being honest about the inputs. Ours makes the arithmetic auditable and
 keeps a low-impact finding in the report; theirs carries far more domain

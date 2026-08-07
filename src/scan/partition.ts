@@ -31,7 +31,17 @@ export interface PartitionOptions {
 	maxPartitions?: number;
 }
 
-export const DEFAULT_PARTITION_MAX_FILES = 60;
+/**
+ * 60 was a guess, and measuring it on this repository said it was wrong. 48
+ * files under one probe: 47% of files touched, 53% of bytes, $0.134. The same
+ * 48 files split four ways: 100% and 100%, for $0.121. Better coverage AND
+ * cheaper — a probe handed too much reads a bit of everything and finishes.
+ *
+ * 15 is not a measured optimum either, but it puts a 48-file repository on four
+ * probes rather than one, and the failure mode it trades toward — more probes
+ * than strictly needed — costs concurrency, not coverage.
+ */
+export const DEFAULT_PARTITION_MAX_FILES = 15;
 export const DEFAULT_PARTITION_MIN_FILES = 8;
 export const DEFAULT_MAX_PARTITIONS = 8;
 
@@ -58,10 +68,21 @@ export function partition(
 	// Even split rather than fill-to-cap: eight probes with 30 files each beat
 	// four with 60 and one with 3, and the size distribution is what the scan
 	// header reports.
-	const per = Math.ceil(sorted.length / count);
+	//
+	// The remainder is spread one file at a time rather than dumped on the last
+	// slice. `ceil(n/count)` per partition looks even and mostly is, but 100
+	// files across 7 probes gives six probes 15 files and the last one 10 — and
+	// the last probe is the one whose partition the header shows as the minimum.
+	// This was invisible while the cap was 60, because the numbers happened to
+	// divide.
+	const base = Math.floor(sorted.length / count);
+	const extra = sorted.length % count;
 	const parts: Partition[] = [];
+	let start = 0;
 	for (let i = 0; i < count; i++) {
-		const slice = sorted.slice(i * per, (i + 1) * per);
+		const size = base + (i < extra ? 1 : 0);
+		const slice = sorted.slice(start, start + size);
+		start += size;
 		if (slice.length === 0) continue;
 		parts.push({
 			id: parts.length,

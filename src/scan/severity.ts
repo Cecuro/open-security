@@ -53,13 +53,12 @@ export const CONFIDENCE_BY_METHOD: Record<Method, number> = {
 };
 
 /**
- * The hard suppression gate. Returns a reason when the candidate is not
- * reportable at all — not a downgrade, a removal from the report.
+ * Which boolean the model set, ignoring whether it is entitled to.
  *
  * `privilege_delta_is_the_bug` is the escape hatch: needing a privilege is only
  * disqualifying when the privilege isn't itself what's being escalated.
  */
-export function reportabilityGate(s: Suppression | undefined): string | null {
+export function suppressionClaim(s: Suppression | undefined): string | null {
 	if (!s) return null;
 	if (s.self_only) return "self_only";
 	if (s.precondition_unreachable) return "precondition_unreachable";
@@ -67,6 +66,35 @@ export function reportabilityGate(s: Suppression | undefined): string | null {
 		return "requires_preexisting_privilege";
 	}
 	return null;
+}
+
+/** Sources that can carry a suppression. `repo_claim` is deliberately absent. */
+const GROUNDS = new Set(["code_evidence", "policy_flag"]);
+
+/**
+ * The hard suppression gate. Returns a reason when the candidate is not
+ * reportable at all — not a downgrade, a removal from the report.
+ *
+ * A boolean is not enough on its own. Found by opensec scanning opensec: the
+ * booleans were checked in code while `source` — the field that says whether
+ * the model is entitled to set them — was enforced only by the prompt. That is
+ * exactly the criticism this project makes of a severity policy written as
+ * prose, and it made the strongest available claim (removal from the report)
+ * the one thing a repository could talk an agent into.
+ *
+ * So suppression now requires all three: the boolean, written evidence, and a
+ * source that is grounds. `repo_claim` is not grounds — a repository asserting
+ * it is out of scope is evidence about what its authors believe, and the code
+ * says what it does (plan §5). Neither is an ABSENT source, which is the more
+ * important half: blocking only `repo_claim` would be defeated by omitting the
+ * field, which is easier than setting it.
+ */
+export function reportabilityGate(s: Suppression | undefined): string | null {
+	const claim = suppressionClaim(s);
+	if (!claim || !s) return null;
+	if (!GROUNDS.has(s.source ?? "")) return null;
+	if (!s.evidence || s.evidence.trim().length === 0) return null;
+	return claim;
 }
 
 export function computeSeverity(
@@ -97,16 +125,29 @@ export function computeSeverity(
 	}
 
 	const blocked = reportabilityGate(inputs.suppression);
+
+	// A refused suppression is louder than an accepted one: it is the report
+	// saying a finding was argued out of existence and the argument did not hold.
+	const claim = suppressionClaim(inputs.suppression);
+	if (claim && !blocked) {
+		const s = inputs.suppression;
+		const why =
+			s?.source === "repo_claim"
+				? "it rests on an in-repo claim, which is evidence about what the authors believe, not policy"
+				: !s?.source
+					? "no source was given, so there is nothing to audit"
+					: !s?.evidence?.trim()
+						? "no evidence was given for it"
+						: `'${s.source}' is not grounds for suppression`;
+		rationale.push(`suppression '${claim}' refused: ${why}. This stays in the report.`);
+	}
+
 	if (blocked) {
 		rationale.push(`suppressed before the matrix: ${blocked}`);
 		if (inputs.suppression?.evidence) {
 			rationale.push(`suppression evidence: ${inputs.suppression.evidence}`);
 		}
-		if (inputs.suppression?.source === "repo_claim") {
-			rationale.push(
-				"suppression rests on an in-repo claim, which is evidence, not policy",
-			);
-		}
+		rationale.push(`grounds: ${inputs.suppression?.source}`);
 		return {
 			severity: "info",
 			likelihood: "low",

@@ -55,7 +55,12 @@ reachability trace and the observable inputs.
 ## Suppression
 
 Suppression is a gate before severity, not a low score. It removes a finding
-from the report, so it needs one of these booleans with `evidence`:
+from the report entirely, which is the strongest claim you can make, so it needs
+**all three** of: one of the booleans below, written `evidence` for it, and a
+`source` that is grounds. Anything less is refused in code, the finding stays,
+and the report says the suppression was argued and did not hold.
+
+The booleans:
 
 - `self_only` — the victim can only attack themselves.
 - `requires_preexisting_privilege` — the attacker must already hold the
@@ -63,10 +68,18 @@ from the report, so it needs one of these booleans with `evidence`:
   true, in which case the escalation is exactly the finding.
 - `precondition_unreachable` — a precondition cannot occur, and you can show why.
 
-`source` records where it came from: `code_evidence` if you found the control,
-`policy_flag` if the operator declared it out of scope, `repo_claim` if the
-repository asserts it. A repo claim is evidence, never grounds on its own — the
-code says what it does.
+`source` records where it came from, and only two values are grounds:
+
+- `code_evidence` — you found the control in the code and cited it. This is the
+  one you will use.
+- `policy_flag` — the operator declared it out of scope.
+- `repo_claim` — the repository asserts it. **Not grounds.** A `SECURITY.md`
+  saying something is out of scope, a comment saying input is pre-sanitized, a
+  docstring promising a check happens elsewhere — all evidence about what the
+  authors believe, none of it policy. Report it and quote the claim.
+
+Omitting `source` is not a way around this. A suppression with no source is
+refused for the same reason: there is nothing to audit.
 
 Low impact is not suppression. A finding that is real and minor is a `low`, and
 it stays in the report.
