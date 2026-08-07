@@ -208,16 +208,19 @@ export class Ledger {
 		tx();
 	}
 
+	private partitionScope(partitionId?: number): { clause: string; args: unknown[] } {
+		return partitionId === undefined
+			? { clause: "", args: [] }
+			: { clause: " AND partition_id = ?", args: [partitionId] };
+	}
+
 	listWork(
 		scanId: string,
 		limit: number,
 		cursor: number,
 		partitionId?: number,
 	): { files: ScanFile[]; total: number } {
-		const scope =
-			partitionId === undefined
-				? { clause: "", args: [] as unknown[] }
-				: { clause: " AND partition_id = ?", args: [partitionId] };
+		const scope = this.partitionScope(partitionId);
 
 		const total = (
 			this.db
@@ -237,15 +240,12 @@ export class Ledger {
 	}
 
 	fileInScope(scanId: string, path: string, partitionId?: number): boolean {
+		const scope = this.partitionScope(partitionId);
 		const row = this.db
 			.prepare(
-				`SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL${
-					partitionId === undefined ? "" : " AND partition_id = ?"
-				}`,
+				`SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL${scope.clause}`,
 			)
-			.get(...(partitionId === undefined ? [scanId, path] : [scanId, path, partitionId])) as
-			| { ok: number }
-			| undefined;
+			.get(scanId, path, ...scope.args) as { ok: number } | undefined;
 		return row !== undefined;
 	}
 

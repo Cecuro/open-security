@@ -16,7 +16,8 @@ export interface InventoryEntry {
 export interface InventoryResult {
 	entries: InventoryEntry[];
 	inScope: InventoryEntry[];
-	languages: string[];
+	/** File extensions in scope, without the dot. Not language detection. */
+	extensions: string[];
 }
 
 const EXCLUDED_DIRS = [
@@ -74,8 +75,8 @@ export async function inventory(
 		);
 	}
 
-	const languages = [...new Set(inScope.map((e) => ext(e.path)).filter(Boolean))].sort();
-	return { entries, inScope, languages };
+	const extensions = [...new Set(inScope.map((e) => ext(e.path)).filter(Boolean))].sort();
+	return { entries, inScope, extensions };
 }
 
 async function listFiles(root: string): Promise<string[]> {

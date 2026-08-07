@@ -8,7 +8,8 @@ export interface ReportInput {
 	candidates: Candidate[];
 	coverage: Coverage;
 	leads: Array<{ worker_id: string; text: string; status: string }>;
-	languages: string[];
+	/** File extensions in scope, without the dot. */
+	extensions: string[];
 	excludedFiles: number;
 	modelRef: string;
 	promptHash: string;
@@ -37,11 +38,11 @@ export function renderMarkdown(r: ReportInput): string {
 
 	out.push(`# Security scan: ${esc(r.repoName)}`, "");
 	out.push("| | |", "|---|---|");
-	out.push(`| repository | \`${esc(r.repoPath)}\` |`);
-	out.push(`| revision | ${r.scan.revision ? `\`${esc(r.scan.revision)}\`` : "_not a git repo_"} |`);
+	out.push(`| repository | ${codeSpan(r.repoPath)} |`);
+	out.push(`| revision | ${r.scan.revision ? codeSpan(r.scan.revision) : "_not a git repo_"} |`);
 	out.push(`| profile | **${r.scan.profile}**${r.scan.profile === "static" ? " — nothing was executed" : ""} |`);
-	out.push(`| model | \`${esc(r.modelRef)}\` |`);
-	out.push(`| prompts | \`${esc(r.promptHash)}\` |`);
+	out.push(`| model | ${codeSpan(r.modelRef)} |`);
+	out.push(`| prompts | ${codeSpan(r.promptHash)} |`);
 	if (r.threatModel) out.push(`| threat model | ${esc(r.threatModel)} |`);
 	out.push(`| started | ${r.scan.started_at} |`);
 	out.push(`| tokens | ${r.scan.tokens_in.toLocaleString()} in / ${r.scan.tokens_out.toLocaleString()} out |`);
@@ -62,8 +63,8 @@ export function renderMarkdown(r: ReportInput): string {
 		"> review**: a file that was read is not thereby a file that was understood.",
 		"",
 	);
-	if (r.languages.length > 0) {
-		out.push(`Extensions in scope: ${r.languages.map((l) => `\`.${esc(l)}\``).join(", ")}.`, "");
+	if (r.extensions.length > 0) {
+		out.push(`Extensions in scope: ${r.extensions.map((e) => codeSpan(`.${e}`)).join(", ")}.`, "");
 	}
 
 	out.push("## Findings", "");
@@ -81,7 +82,7 @@ export function renderMarkdown(r: ReportInput): string {
 			const comp = c.resolution?.computed;
 			const loc = c.locations[0];
 			out.push(
-				`| ${c.id} | ${comp ? formatSeverity(comp) : "?"} | ${comp?.confidence.toFixed(1) ?? "?"} | ${escInline(c.title)} | \`${loc ? `${esc(loc.path)}:${loc.start_line}` : "?"}\` |`,
+				`| ${c.id} | ${comp ? formatSeverity(comp) : "?"} | ${comp?.confidence.toFixed(1) ?? "?"} | ${escInline(c.title)} | ${loc ? codeSpan(`${loc.path}:${loc.start_line}`) : "?"} |`,
 			);
 		}
 		out.push("");
@@ -97,7 +98,7 @@ export function renderMarkdown(r: ReportInput): string {
 		);
 		for (const c of followUp) {
 			out.push(
-				`- **${c.id}** ${escInline(c.title)} — \`${firstLoc(c)}\`${
+				`- **${c.id}** ${escInline(c.title)} — ${firstLoc(c)}${
 					c.resolution?.rationale ? `\n  ${esc(c.resolution.rationale)}` : ""
 				}`,
 			);
@@ -201,7 +202,7 @@ function renderFinding(c: Candidate): string[] {
 
 	out.push("**Locations**", "");
 	for (const l of c.locations) {
-		out.push(`- \`${escInline(l.path)}:${l.start_line}-${l.end_line}\`${l.symbol ? ` — \`${escInline(l.symbol)}\`` : ""}`);
+		out.push(`- ${codeSpan(`${l.path}:${l.start_line}-${l.end_line}`)}${l.symbol ? ` — ${codeSpan(l.symbol)}` : ""}`);
 	}
 	out.push("");
 
@@ -247,7 +248,14 @@ function renderFinding(c: Candidate): string[] {
 
 function firstLoc(c: Candidate): string {
 	const l = c.locations[0];
-	return l ? `${esc(l.path)}:${l.start_line}` : "?";
+	return l ? codeSpan(`${l.path}:${l.start_line}`) : "?";
+}
+
+// Markdown backslash escapes do not apply inside a code span — `routes/\[id\].ts`
+// renders those backslashes literally. Only two characters matter here: a
+// backtick would end the span, and a pipe splits the table cell even inside one.
+function codeSpan(s: string): string {
+	return `\`${String(s).replace(/[\r\n]+/g, " ").replaceAll("`", "'").replaceAll("|", "\\|")}\``;
 }
 
 function esc(s: string): string {

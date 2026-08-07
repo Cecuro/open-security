@@ -206,7 +206,7 @@ describe("agent prose never reaches the report raw", () => {
 			],
 			coverage: { files_in_scope: 1, files_touched: 1, bytes_in_scope: 10, bytes_read: 10 },
 			leads: [],
-			languages: [],
+			extensions: [],
 			excludedFiles: 0,
 			modelRef: "m",
 			promptHash: "h",
@@ -217,6 +217,55 @@ describe("agent prose never reaches the report raw", () => {
 		expect(md).not.toMatch(/^## Findings$[\s\S]*^## Findings$/m);
 		expect(md).not.toContain("![beacon]");
 		expect(md).toContain("\\!");
+		ledger.close();
+	});
+
+	it("does not backslash-escape paths inside code spans", () => {
+		// Markdown escapes do not apply inside a code span, so `routes/\[id\].ts`
+		// renders those backslashes literally — and bracketed route files are
+		// everyday paths in half the JS frameworks.
+		const ledger = Ledger.open(join(mkdtempSync(join(tmpdir(), "opensec-render2-")), "l.db"));
+		const repoId = ledger.upsertRepo("/tmp/x", "x", null);
+		ledger.createScan({ id: "r", repoId, revision: null, profile: "static", configHash: "c" });
+		const md = renderMarkdown({
+			scan: ledger.getScan("r")!,
+			repoName: "x",
+			repoPath: "/tmp/x",
+			candidates: [
+				{
+					id: "c1",
+					scan_id: "r",
+					worker_id: "w",
+					title: "IDOR on the user route",
+					cwe_ids: [],
+					locations: [{ path: "routes/[id].ts", start_line: 3, end_line: 3 }],
+					summary: "s",
+					evidence: "e",
+					created_at: "now",
+					resolution: {
+						disposition: "confirmed",
+						rationale: "r",
+						computed: {
+							severity: "high",
+							likelihood: "high",
+							confidence: 0.3,
+							reportable: true,
+							rationale: [],
+						},
+					},
+					merged_into: null,
+				},
+			],
+			coverage: { files_in_scope: 1, files_touched: 1, bytes_in_scope: 10, bytes_read: 10 },
+			leads: [],
+			extensions: [],
+			excludedFiles: 0,
+			modelRef: "m",
+			promptHash: "h",
+		});
+
+		expect(md).toContain("`routes/[id].ts:3`");
+		expect(md).not.toContain("\\[id\\]");
 		ledger.close();
 	});
 });

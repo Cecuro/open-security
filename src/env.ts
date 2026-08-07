@@ -89,15 +89,16 @@ function read(path: string): EnvLoadResult {
 			/* stat is advisory here */
 		}
 
-		let text: string;
+		let text: string | null = null;
 		try {
 			text = readFileSync(path, "utf8");
 		} catch (err) {
+			// Not a return: an unreadable file must not skip the aliasing below,
+			// which applies to exported variables that never touched the file.
 			result.warnings.push(`could not read ${path}: ${(err as Error).message}`);
-			return result;
 		}
 
-		for (const [name, value] of parse(text)) {
+		for (const [name, value] of parse(text ?? "")) {
 			if (process.env[name] !== undefined) {
 				result.skipped.push(name);
 				continue;

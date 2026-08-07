@@ -90,6 +90,15 @@ async function main(argv: string[]): Promise<number> {
 	const opts = parseFlags(rest);
 	const target = opts.positional[0] ?? ".";
 
+	// A value flag at the end of the line, or followed by another flag, silently
+	// became undefined and ran the scan with the default. Refuse instead.
+	for (const [name, value] of Object.entries(opts.flags)) {
+		if (value === undefined || value.startsWith("--")) {
+			process.stderr.write(`opensec: --${name} needs a value\n`);
+			return 2;
+		}
+	}
+
 	const PROFILES: Profile[] = ["static", "container"];
 	const profileFlag = opts.flags.profile;
 	if (profileFlag !== undefined && !PROFILES.includes(profileFlag as Profile)) {
@@ -97,12 +106,17 @@ async function main(argv: string[]): Promise<number> {
 		return 2;
 	}
 	let maxFiles: number | undefined;
-	if (opts.flags["max-files"] !== undefined) {
-		maxFiles = Number(opts.flags["max-files"]);
-		if (!Number.isFinite(maxFiles) || maxFiles < 1) {
-			process.stderr.write(`opensec: --max-files needs a positive number\n`);
-			return 2;
-		}
+	let concurrency: number | undefined;
+	let maxTurns: number | undefined;
+	let partitionMaxFiles: number | undefined;
+	try {
+		maxFiles = intFlag("max-files", opts.flags["max-files"]);
+		concurrency = intFlag("concurrency", opts.flags.concurrency);
+		maxTurns = intFlag("max-turns", opts.flags["max-turns"]);
+		partitionMaxFiles = intFlag("partition-max-files", opts.flags["partition-max-files"]);
+	} catch (err) {
+		process.stderr.write(`opensec: ${(err as Error).message}\n`);
+		return 2;
 	}
 	let maxCostUsd: number | null = null;
 	const costFlag = opts.flags["max-cost"];
@@ -125,7 +139,7 @@ async function main(argv: string[]): Promise<number> {
 		const e = await Scanner.estimate({ repo: target, maxFiles });
 		process.stdout.write(
 			`${e.files} files, ${(e.bytes / 1024).toFixed(0)} KB, ~${e.approxTokens.toLocaleString()} tokens of source.\n` +
-				`Extensions: ${e.languages.map((l) => `.${l}`).join(" ") || "none"}\n` +
+				`Extensions: ${e.extensions.map((x) => `.${x}`).join(" ") || "none"}\n` +
 				`This is a floor, not a quote — actual spend depends on how much the agents re-read.\n`,
 		);
 		return 0;
@@ -139,9 +153,9 @@ async function main(argv: string[]): Promise<number> {
 		promptsDir: opts.flags.prompts,
 		maxFiles,
 		maxCostUsd,
-		concurrency: numFlag(opts.flags.concurrency),
-		maxTurns: numFlag(opts.flags["max-turns"]),
-		partitionMaxFiles: numFlag(opts.flags["partition-max-files"]),
+		concurrency,
+		maxTurns,
+		partitionMaxFiles,
 		refreshThreatModel: opts.bools["refresh-threat-model"] === true,
 		onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
 	});
@@ -150,9 +164,12 @@ async function main(argv: string[]): Promise<number> {
 		const result = await scanner.run();
 
 		if (opts.bools.json) {
-			process.stdout.write(`${result.jsonPath}\n`);
+			await flushed(`${result.jsonPath}\n`);
 		} else {
-			process.stdout.write(`${safe(result.markdown)}\n`);
+			// Awaited: process.exit() drops whatever stdout has not flushed, and on
+			// a pipe (`opensec scan . > report.md`) a large report is exactly what
+			// would be truncated.
+			await flushed(`${safe(result.markdown)}\n`);
 			process.stderr.write(`\nreport: ${result.reportPath}\n`);
 		}
 
@@ -193,10 +210,19 @@ function parseFlags(argv: string[]): Parsed {
 	return { flags, bools, positional };
 }
 
-function numFlag(v: string | undefined): number | undefined {
+function intFlag(name: string, v: string | undefined): number | undefined {
 	if (v === undefined) return undefined;
 	const n = Number(v);
-	return Number.isFinite(n) && n > 0 ? n : undefined;
+	if (!Number.isInteger(n) || n < 1) {
+		throw new Error(`--${name} needs a positive integer`);
+	}
+	return n;
+}
+
+function flushed(text: string): Promise<void> {
+	return new Promise((resolve) => {
+		process.stdout.write(text, () => resolve());
+	});
 }
 
 const safe = stripControlChars;
