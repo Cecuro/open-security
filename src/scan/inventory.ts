@@ -1,13 +1,3 @@
-/**
- * Phase 0: inventory. No LLM.
- *
- * `rg --files --hidden --no-ignore` rather than `git ls-files`, because
- * untracked and hidden files are real surface: CI configs, .env.example, a
- * dropped script (plan §4). Sorted LC_ALL=C so the list is byte-identical
- * across runs. Filtering happens after, and every excluded file keeps its
- * exclusion reason rather than vanishing from the denominator.
- */
-
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
@@ -26,11 +16,9 @@ export interface InventoryEntry {
 export interface InventoryResult {
 	entries: InventoryEntry[];
 	inScope: InventoryEntry[];
-	/** Extensions seen in scope, so the report can say which languages it recognized. */
 	languages: string[];
 }
 
-/** Directories that are never the code under review. */
 const EXCLUDED_DIRS = [
 	"node_modules",
 	".git",
@@ -49,7 +37,6 @@ const EXCLUDED_DIRS = [
 	".opensec",
 ];
 
-/** Extensions with no reviewable source. */
 const BINARY_EXT = new Set([
 	"png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "tiff", "svg",
 	"pdf", "zip", "gz", "tar", "bz2", "xz", "7z", "rar",
@@ -81,7 +68,6 @@ export async function inventory(
 	const inScope = entries.filter((e) => e.excludedReason === null);
 
 	if (opts.maxFiles && inScope.length > opts.maxFiles) {
-		// Refuse rather than run away on a monorepo (plan §10).
 		throw new Error(
 			`${inScope.length} files in scope exceeds max_files=${opts.maxFiles}. ` +
 				`Scope the scan to a subdirectory, or raise --max-files.`,
@@ -103,18 +89,10 @@ async function listFiles(root: string): Promise<string[]> {
 		});
 		stdout = res.stdout;
 	} catch (err) {
-		// execFile sets `code` to the spawn error string (ENOENT) or, when the
-		// process ran and failed, to its numeric exit status.
 		const e = err as { code?: string | number; stdout?: string; stderr?: string };
 		if (e.code === "ENOENT") {
 			throw new Error("ripgrep (rg) not found on PATH — opensec needs it for inventory.");
 		}
-		// Exit 1 means "no matches", which is a real (empty) answer. Every other
-		// non-zero exit means rg gave up partway — typically an unreadable
-		// directory, where it prints what it could reach and exits 2. Accepting
-		// that truncated list would silently shrink the denominator every coverage
-		// number is computed against, so the scan would claim high coverage of a
-		// repo it never finished enumerating.
 		if (e.code !== 1) {
 			throw new Error(
 				`ripgrep failed to enumerate the repository (exit ${String(e.code)}): ` +
@@ -143,7 +121,6 @@ function classify(root: string, rel: string): InventoryEntry {
 
 	const e = ext(rel);
 	if (BINARY_EXT.has(e)) {
-		// Recorded, not dropped: binaries we could not review still count against us.
 		return { path: rel, sha: "", bytes: 0, excludedReason: `binary (.${e})` };
 	}
 	if (rel.endsWith(".min.js") || rel.endsWith(".min.css")) {

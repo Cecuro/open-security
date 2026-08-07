@@ -1,11 +1,3 @@
-/**
- * The ledger. One DB at ~/.opensec/opensec.db, one connection, one writer.
- *
- * Never hold a transaction across an LLM call (plan §6) — every write here is a
- * complete statement, and the agent tool calls into these functions one verb at
- * a time.
- */
-
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync } from "node:fs";
@@ -38,27 +30,12 @@ export function scanArtifactDir(scanId: string): string {
 	return join(homedir(), ".opensec", "scans", scanId);
 }
 
-/**
- * Create a directory under ~/.opensec, owner-only, and return it.
- *
- * Found by opensec scanning opensec: everything we keep — the ledger, agent
- * transcripts, reports, threat models — is a verbatim copy of source code the
- * agents read, and it was all being written at the process umask. On a shared
- * machine that is a readable copy of someone's private repository sitting in a
- * predictable path. The transcripts are the worst of it, because they exist
- * precisely to record everything.
- *
- * ~/.opensec itself is chmod'd on every open rather than only on creation: a
- * directory made by an earlier version is already 0755, and a mode passed to
- * mkdirSync does nothing when the directory exists.
- */
 export function opensecDir(...segments: string[]): string {
 	const root = join(homedir(), ".opensec");
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	try {
 		chmodSync(root, 0o700);
 	} catch {
-		// Not ours to chmod, or a platform that doesn't. The scan still runs.
 	}
 	if (segments.length === 0) return root;
 	const dir = join(root, ...segments);
@@ -81,12 +58,6 @@ export class Ledger {
 		return ledger;
 	}
 
-	/**
-	 * `schema.sql` is the version-1 shape and is never edited; everything since
-	 * is a migration. A brand-new database therefore runs the whole migration
-	 * list too, which is the point — the upgrade path is exercised by every test
-	 * that opens a ledger, not only by users who have one from last week.
-	 */
 	private migrate(): void {
 		this.db.exec(readFileSync(join(here, "schema.sql"), "utf8"));
 
@@ -102,8 +73,6 @@ export class Ledger {
 			at = 1;
 		}
 
-		// A database written by a newer opensec may have columns this build will
-		// happily ignore and rows it would misread. Refusing is the honest move.
 		if (at > SCHEMA_VERSION) {
 			throw new Error(
 				`this database is at schema version ${at}, but this opensec understands ${SCHEMA_VERSION}. ` +
@@ -130,8 +99,6 @@ export class Ledger {
 		this.db.close();
 	}
 
-	// ---------------------------------------------------------------- repos
-
 	upsertRepo(path: string, name: string, remoteUrl: string | null): string {
 		const id = shortHash(resolve(path));
 		this.db
@@ -142,8 +109,6 @@ export class Ledger {
 			.run(id, resolve(path), name, remoteUrl, now());
 		return id;
 	}
-
-	// ---------------------------------------------------------------- scans
 
 	createScan(args: {
 		id: string;
@@ -164,7 +129,6 @@ export class Ledger {
 		this.db.prepare("UPDATE scans SET phase = ? WHERE id = ?").run(phase, scanId);
 	}
 
-	/** `source` records whether this was written now or reused from disk. */
 	setThreatModel(scanId: string, text: string, source: string): void {
 		this.db
 			.prepare("UPDATE scans SET threat_model = ?, threat_model_source = ? WHERE id = ?")
@@ -178,10 +142,6 @@ export class Ledger {
 		return row?.threat_model ?? null;
 	}
 
-	/**
-	 * A failed scan keeps the phase it died in — overwriting it with 'report'
-	 * would erase the one field that says where it stopped.
-	 */
 	finishScan(scanId: string, status: ScanStatus): void {
 		if (status === "completed") {
 			this.db
@@ -224,8 +184,6 @@ export class Ledger {
 		};
 	}
 
-	// ---------------------------------------------------------------- files
-
 	insertFiles(
 		scanId: string,
 		files: Array<{ path: string; sha: string; bytes: number; excludedReason: string | null }>,
@@ -250,11 +208,6 @@ export class Ledger {
 		tx();
 	}
 
-	/**
-	 * The worklist query behind `work.next`. Excluded files never appear. With a
-	 * partition, a probe sees only the files it is accountable for — which is the
-	 * whole point of the denominator it reports progress against.
-	 */
 	listWork(
 		scanId: string,
 		limit: number,
@@ -283,10 +236,6 @@ export class Ledger {
 		return { files: rows, total };
 	}
 
-	/**
-	 * Ownership, not readability. A finding must cite at least one file the
-	 * worker is accountable for; it may cite any number of others.
-	 */
 	fileInScope(scanId: string, path: string, partitionId?: number): boolean {
 		const row = this.db
 			.prepare(
@@ -300,10 +249,6 @@ export class Ledger {
 		return row !== undefined;
 	}
 
-	/**
-	 * Record that a read/grep actually reached a file. Coverage is derived from
-	 * this, never self-reported — an agent cannot mark work it never did.
-	 */
 	recordTouch(scanId: string, path: string, bytesRead: number): void {
 		this.db
 			.prepare(
@@ -342,8 +287,6 @@ export class Ledger {
 		).n;
 	}
 
-	// ----------------------------------------------------------- candidates
-
 	nextCandidateId(scanId: string): string {
 		const n = (
 			this.db
@@ -353,18 +296,6 @@ export class Ledger {
 		return `c${n + 1}`;
 	}
 
-	/**
-	 * Create, or fold into the row that already has this identity.
-	 *
-	 * This is the deterministic half of dedup and it costs nothing: two probes
-	 * that reach the same conclusion about the same code produce one row with
-	 * both agents' prose, without a model ever comparing them. The returned
-	 * `merged` flag is handed back to the agent so it knows its work landed on
-	 * an existing finding rather than silently vanishing.
-	 *
-	 * It does NOT resolve anything. A finding filed twice is search evidence,
-	 * not proof it is reportable — the merged row is validated like any other.
-	 */
 	upsertCandidate(c: {
 		scanId: string;
 		workerId: string;
@@ -449,19 +380,15 @@ export class Ledger {
 
 	listCandidates(scanId: string): Candidate[] {
 		const rows = this.db
-			.prepare(// c1, c2, … c10 — lexical order would put c10 between c1 and c2, and this
-				// drives both the investigate loop and the report.
+			.prepare(
 				"SELECT * FROM candidates WHERE scan_id = ? ORDER BY CAST(SUBSTR(id, 2) AS INTEGER), id")
 			.all(scanId) as Array<Record<string, unknown>>;
 		return rows.map(rowToCandidate);
 	}
 
-	/** Rows still in play: never merged away by identity or by the reducer. */
 	listLiveCandidates(scanId: string): Candidate[] {
 		return this.listCandidates(scanId).filter((c) => !c.merged_into);
 	}
-
-	// ---------------------------------------------------------------- leads
 
 	recordLead(scanId: string, lead: Lead): void {
 		this.db

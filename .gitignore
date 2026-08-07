@@ -144,3 +144,14 @@ vite.config.ts.timestamp-*
 
 dist
 .DS_Store
+
+# Credentials. opensec reads ~/.opensec/env and deliberately never reads the
+# current directory or the repository under review — but a stray creds file in
+# a checkout is still one `git add -A` away from being published.
+.dev.vars
+.dev.vars.*
+*.env
+opensec.env
+
+# Claude Code worktrees: full checkouts of this repo, never repo content.
+.claude/worktrees/

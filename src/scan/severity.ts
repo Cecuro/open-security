@@ -1,14 +1,3 @@
-/**
- * Severity is computed, never accepted from the model (plan §6).
- *
- * This module is the single source of truth: the matrix below is one data table,
- * evaluated here and rendered by `opensec help severity` and the report appendix,
- * so the published policy cannot drift from the one being applied.
- *
- * The order matters. Reportability is a gate BEFORE the matrix, because the
- * matrix is not a delete key — low impact downgrades, it never discards.
- */
-
 import type {
 	AuthRequired,
 	Impact,
@@ -22,17 +11,14 @@ import type {
 	Vector,
 } from "../types.js";
 
-/** Likelihood from how the flaw is reached and what auth it needs (plan §6.3). */
 const LIKELIHOOD: Record<Vector, Record<AuthRequired, Likelihood>> = {
 	remote: { none: "high", user: "medium", admin: "low" },
 	local_network: { none: "medium", user: "low", admin: "low" },
 	localhost: { none: "low", user: "low", admin: "low" },
 	none: { none: "low", user: "low", admin: "low" },
-	// An unknown vector must not buy a high likelihood.
 	unknown: { none: "low", user: "low", admin: "low" },
 };
 
-/** impact × likelihood → base severity. No cell is a suppression. */
 const MATRIX: Record<Impact, Record<Likelihood, Severity>> = {
 	high: { high: "high", medium: "high", low: "medium" },
 	medium: { high: "high", medium: "medium", low: "low" },
@@ -40,10 +26,8 @@ const MATRIX: Record<Impact, Record<Likelihood, Severity>> = {
 	none: { high: "low", medium: "low", low: "info" },
 };
 
-/** Methods that actually demonstrate execution, as opposed to reasoning about it. */
 const EXECUTION_METHODS = new Set<Method>(["reproduced_poc", "asan", "debugger"]);
 
-/** Confidence is bound to method numerically, so a static trace cannot report 0.9. */
 export const CONFIDENCE_BY_METHOD: Record<Method, number> = {
 	reproduced_poc: 1.0,
 	asan: 0.9,
@@ -52,12 +36,6 @@ export const CONFIDENCE_BY_METHOD: Record<Method, number> = {
 	counterevidence: 0.0,
 };
 
-/**
- * Which boolean the model set, ignoring whether it is entitled to.
- *
- * `privilege_delta_is_the_bug` is the escape hatch: needing a privilege is only
- * disqualifying when the privilege isn't itself what's being escalated.
- */
 export function suppressionClaim(s: Suppression | undefined): string | null {
 	if (!s) return null;
 	if (s.self_only) return "self_only";
@@ -68,27 +46,8 @@ export function suppressionClaim(s: Suppression | undefined): string | null {
 	return null;
 }
 
-/** Sources that can carry a suppression. `repo_claim` is deliberately absent. */
 const GROUNDS = new Set(["code_evidence", "policy_flag"]);
 
-/**
- * The hard suppression gate. Returns a reason when the candidate is not
- * reportable at all — not a downgrade, a removal from the report.
- *
- * A boolean is not enough on its own. Found by opensec scanning opensec: the
- * booleans were checked in code while `source` — the field that says whether
- * the model is entitled to set them — was enforced only by the prompt. That is
- * exactly the criticism this project makes of a severity policy written as
- * prose, and it made the strongest available claim (removal from the report)
- * the one thing a repository could talk an agent into.
- *
- * So suppression now requires all three: the boolean, written evidence, and a
- * source that is grounds. `repo_claim` is not grounds — a repository asserting
- * it is out of scope is evidence about what its authors believe, and the code
- * says what it does (plan §5). Neither is an ABSENT source, which is the more
- * important half: blocking only `repo_claim` would be defeated by omitting the
- * field, which is easier than setting it.
- */
 export function reportabilityGate(s: Suppression | undefined): string | null {
 	const claim = suppressionClaim(s);
 	if (!claim || !s) return null;
@@ -103,8 +62,6 @@ export function computeSeverity(
 ): SeverityResult {
 	const rationale: string[] = [];
 
-	// `code_execution_proven` is only meaningful under the container profile —
-	// nothing executes under static, so the model cannot have proven it.
 	let executionProven = inputs.code_execution_proven;
 	if (executionProven && profile !== "container") {
 		executionProven = false;
@@ -117,7 +74,6 @@ export function computeSeverity(
 	if (
 		EXECUTION_METHODS.has(inputs.method) && profile !== "container"
 	) {
-		// Same reasoning: an execution-derived method is not available statically.
 		confidence = CONFIDENCE_BY_METHOD.code_reading;
 		rationale.push(
 			`method '${inputs.method}' downgraded to code_reading confidence under the static profile`,
@@ -126,8 +82,6 @@ export function computeSeverity(
 
 	const blocked = reportabilityGate(inputs.suppression);
 
-	// A refused suppression is louder than an accepted one: it is the report
-	// saying a finding was argued out of existence and the argument did not hold.
 	const claim = suppressionClaim(inputs.suppression);
 	if (claim && !blocked) {
 		const s = inputs.suppression;
@@ -165,7 +119,6 @@ export function computeSeverity(
 	let severity = MATRIX[inputs.impact][likelihood];
 	rationale.push(`matrix: impact=${inputs.impact} × likelihood=${likelihood} → ${severity}`);
 
-	// Critical is a promotion from observable inputs, not a matrix cell.
 	let proof_gap: SeverityResult["proof_gap"];
 	const unauthReachable = inputs.network_reachable && inputs.auth_required === "none";
 	if (severity === "high" && unauthReachable) {
@@ -173,8 +126,6 @@ export function computeSeverity(
 			severity = "critical";
 			rationale.push("critical: unauthenticated, network-reachable, execution proven");
 		} else if (inputs.cross_tenant || inputs.traced_path_no_control) {
-			// Second route: a static scan can still reach critical, but it carries
-			// the gap. The ceiling is on confidence, not on severity.
 			severity = "critical";
 			proof_gap = "no_execution";
 			rationale.push(
@@ -185,9 +136,6 @@ export function computeSeverity(
 		}
 	}
 
-	// A `critical` with no proof gap is the strongest claim this tool makes, so
-	// it must rest on an execution-derived method — not on a model setting
-	// `code_execution_proven: true` while reporting `method: "code_reading"`.
 	if (severity === "critical" && !proof_gap && !EXECUTION_METHODS.has(inputs.method)) {
 		proof_gap = "no_execution";
 		rationale.push(
@@ -198,7 +146,6 @@ export function computeSeverity(
 	return { severity, likelihood, confidence, reportable: true, proof_gap, rationale };
 }
 
-/** How a severity prints. `critical (unproven)` is a distinct claim from `critical`. */
 export function formatSeverity(r: SeverityResult): string {
 	return r.proof_gap === "no_execution" ? `${r.severity} (unproven)` : r.severity;
 }
@@ -209,7 +156,6 @@ export function severityRank(s: Severity): number {
 	return SEVERITY_ORDER.indexOf(s);
 }
 
-/** Rendered by `opensec help severity` and embedded in the report appendix. */
 export function renderMatrix(): string {
 	const rows = (Object.keys(MATRIX) as Impact[]).map((impact) => {
 		const cells = (["high", "medium", "low"] as Likelihood[]).map(

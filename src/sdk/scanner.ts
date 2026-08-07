@@ -1,13 +1,3 @@
-/**
- * The SDK *is* the contract; the CLI only shapes arguments and formats results
- * (plan §3). Phases are individually callable so you can drive the spine
- * yourself.
- *
- * The four LLM phases live here as private methods rather than in their own
- * module: each one needs the scanner's ledger, prompts, repo root and nonce, so
- * a separate module bought nothing but a hand-copied duplicate of these fields.
- */
-
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -24,6 +14,7 @@ import {
 	VALIDATE_VERBS,
 } from "../agents/tool.js";
 import { Ledger, opensecDir, scanArtifactDir, shortHash } from "../db/db.js";
+import { loadEnv } from "../env.js";
 import { collisionGroups } from "../scan/identity.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
 import {
@@ -39,9 +30,7 @@ import type { Candidate, Coverage, Profile } from "../types.js";
 
 export interface ScannerOptions {
 	repo: string;
-	/** e.g. "azure-openai-responses/gpt-5.4". Required — nothing is guessed. */
 	model?: string;
-	/** Per-phase overrides; each falls back to `model`. */
 	models?: Partial<
 		Record<"threatModel" | "discovery" | "reduce" | "validate" | "attackPath", string>
 	>;
@@ -49,26 +38,10 @@ export interface ScannerOptions {
 	profile?: Profile;
 	promptsDir?: string;
 	maxFiles?: number;
-	/**
-	 * Spend ceiling in USD. `null` is the explicit opt-out; omitted means the
-	 * same for now. A model with no pricing entry refuses to start under a
-	 * budget rather than running unbounded (plan §8).
-	 */
 	maxCostUsd?: number | null;
-	/** Files per probe before the worklist is split again. */
 	partitionMaxFiles?: number;
-	/** How many agents run at once, across probes and per-candidate passes. */
 	concurrency?: number;
-	/**
-	 * Turns one agent may take before it is stopped. The spend ceiling is only
-	 * checked between agent runs, so without this a single looping agent has
-	 * nothing to stop it. Defaults to `DEFAULT_MAX_TURNS`.
-	 */
 	maxTurns?: number;
-	/**
-	 * Regenerate the stored threat model instead of reusing it. The stored one is
-	 * a file the user is invited to edit, so overwriting it is never implicit.
-	 */
 	refreshThreatModel?: boolean;
 	onEvent?: (msg: string) => void;
 }
@@ -107,21 +80,20 @@ export class Scanner {
 		const profile = opts.profile ?? "static";
 
 		if (profile === "container") {
-			// M2 builds this. Claiming it now would be claiming evidence we don't have.
 			throw new Error(
 				"--profile container is not implemented yet (M2). Use --profile static.",
 			);
 		}
 
+		// SDK callers get the same credential resolution as the CLI. Idempotent,
+		// and anything already in the environment wins.
+		loadEnv();
+
 		const prompts = loadPrompts(opts.promptsDir);
 		const ledger = Ledger.open(opts.db);
 		const runner = await AgentRunner.create({ repoRoot, modelRef: opts.model });
-		// Fail on an unresolvable model before writing a scan row that could never
-		// have finished. `Scanner.estimate()` needs no model and takes no ledger.
 		const model = runner.resolveModel(undefined).model;
 
-		// A budget you cannot price is not a budget (plan §8). Refusing to start
-		// is the honest failure; running unbounded while printing a limit is not.
 		if (typeof opts.maxCostUsd === "number" && !pricingOf(model)) {
 			throw new Error(
 				`--max-cost was given but '${model.provider}/${model.id}' has no pricing entry, ` +
@@ -166,10 +138,6 @@ export class Scanner {
 		};
 	}
 
-	/**
-	 * Per worker, so spilling an oversized tool result never becomes a way to
-	 * read another agent's transcripts or findings — those live one level up.
-	 */
 	private overflowDir(workerId: string): string {
 		return join(scanArtifactDir(this.scanId), "overflow", workerId.replaceAll("/", "_"));
 	}
@@ -186,12 +154,6 @@ export class Scanner {
 		this.ledger.addUsage(this.scanId, r.tokensIn, r.tokensOut, r.costUsd);
 	}
 
-	/**
-	 * Every phase agent goes through here: it applies the turn ceiling, bills the
-	 * run, and says so when an agent was stopped rather than finished. Silence
-	 * about a truncated agent would be the scan overclaiming — the coverage
-	 * numbers would show the gap, but nothing would say why it is there.
-	 */
 	private async runAgent(args: RunArgs): Promise<AgentRunResult> {
 		const result = await this.runner.run({
 			...args,
@@ -207,16 +169,9 @@ export class Scanner {
 		return result;
 	}
 
-	/**
-	 * Handed to the phases that benefit from delegation. threat-model and dedup
-	 * do not get it: one is orientation, the other is a comparison over rows that
-	 * are already in front of it.
-	 */
 	private subagentDeps(): SubagentDeps {
 		return {
 			prompts: this.prompts,
-			// Subagents get the ceiling too: a cap the parent can escape by
-			// delegating is not a cap.
 			run: (a) => this.runner.run({ ...a, maxTurns: this.opts.maxTurns }),
 			checkBudget: () => this.checkBudget(),
 			bill: (r) => this.bill(r),
@@ -225,16 +180,10 @@ export class Scanner {
 		};
 	}
 
-	/** Where this run's agent transcripts go. In-memory sessions leave nothing otherwise. */
 	private tracePath(workerId: string): string {
 		return join(scanArtifactDir(this.scanId), "traces", `${workerId}.jsonl`);
 	}
 
-	/**
-	 * Checked between phases and between candidates, not mid-stream. That means
-	 * the ceiling can be overshot by one agent run, so it is reported as "spent X
-	 * of Y" rather than presented as a hard cap.
-	 */
 	private checkBudget(): void {
 		const max = this.opts.maxCostUsd;
 		if (typeof max !== "number") return;
@@ -247,8 +196,6 @@ export class Scanner {
 			);
 		}
 	}
-
-	// ------------------------------------------------------------- phase 0
 
 	async inventory(): Promise<InventoryResult> {
 		this.ledger.setPhase(this.scanId, "inventory");
@@ -275,15 +222,6 @@ export class Scanner {
 		return inv;
 	}
 
-	// ------------------------------------------------------------- phase 1
-
-	/**
-	 * Where this repository's threat model lives between scans. It is a plain
-	 * markdown file outside the database on purpose: a threat model is the one
-	 * artifact a user has standing to correct — they know what the system is for,
-	 * which entry points are actually exposed, and which "sensitive asset" is
-	 * test data. Editing a row in SQLite is not an invitation; editing a file is.
-	 */
 	threatModelPath(): string {
 		return join(homedir(), ".opensec", "repos", this.repoId, "threat-model.md");
 	}
@@ -299,9 +237,6 @@ export class Scanner {
 			this.threatModelNote = `reused from \`${path}\``;
 			this.say(`threat model: reusing ${path} (edit it, or --refresh-threat-model to rewrite)`);
 			if (wroteAt && wroteAt !== "none" && this.revision && wroteAt !== this.revision) {
-				// Reused anyway: a threat model written two commits ago is still a far
-				// better starting point than none, and the user is told so they can
-				// decide. Refusing to reuse would punish exactly the users who edited it.
 				this.say(
 					`  it was written at ${wroteAt.slice(0, 8)}, the repo is at ${this.revision.slice(0, 8)}`,
 				);
@@ -332,13 +267,8 @@ export class Scanner {
 			].join("\n"),
 		});
 
-
-		// A threat model names sensitive assets, and a model asked to name them
-		// will happily quote one. Every other piece of model prose goes through
-		// this before it is stored; this one did not, and it is now the piece with
-		// the longest life — it outlives the scan and is read back by later ones.
-		// Found by opensec scanning opensec. Redaction is on write only: a file the
-		// user has edited is theirs, and rewriting it on read would eat their edits.
+		// Redacted on write only. This file is the user's to edit, so redacting it
+		// again on read would silently eat their edits.
 		const text = stripControlChars(redactSecrets(result.text));
 
 		const header =
@@ -355,8 +285,6 @@ export class Scanner {
 		this.say(`threat model: written to ${path} — edit it and the next scan will use yours`);
 		return text;
 	}
-
-	// ------------------------------------------------------------- phase 2
 
 	async discover(threatModel?: string): Promise<Candidate[]> {
 		this.ledger.setPhase(this.scanId, "discovery");
@@ -396,22 +324,6 @@ export class Scanner {
 		return found;
 	}
 
-	// ------------------------------------------------------------- phase 3
-
-	/**
-	 * Dedup, second layer. The first is free and already happened: identical
-	 * identities collapsed at `candidate.create`. This one reads.
-	 *
-	 * A model only sees groups that collide on (cwe family, primary file) and
-	 * hold more than one row — usually none, on most scans, which is the point.
-	 * Singleton findings never cost a token, and each group is judged on its own
-	 * so one large group cannot bury a small one in the context.
-	 *
-	 * It runs BEFORE validation, so a duplicate is never investigated twice. It
-	 * may set `duplicate` and nothing else: these rows have not been judged by
-	 * anyone yet, and a reducer that could mark one `not_applicable` would drop a
-	 * finding no one ever read.
-	 */
 	async reduce(): Promise<number> {
 		this.ledger.setPhase(this.scanId, "reduce");
 
@@ -459,9 +371,6 @@ export class Scanner {
 		return merged;
 	}
 
-	// ------------------------------------------------------------ phase 3a
-
-	/** Is it real? One agent per candidate, no severity, no reachability. */
 	async validate(candidates?: Candidate[]): Promise<void> {
 		this.ledger.setPhase(this.scanId, "validate");
 		const todo = (candidates ?? this.ledger.listLiveCandidates(this.scanId)).filter(
@@ -478,19 +387,13 @@ export class Scanner {
 					...this.ctx(workerId),
 					verbs: VALIDATE_VERBS,
 					resolvableIds: [c.id],
-					// Not duplicate: the reducer already ran, and re-merging here would
-					// let one agent that never saw the other row delete it.
 					dispositions: ["confirmed", "not_applicable", "needs_follow_up"],
 				},
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				modelRef: this.opts.models?.validate,
-				systemPrompt: [
-					this.prompts.get("validate.md"),
-					"",
-					this.prompts.get("refs/counterevidence.md"),
-				].join("\n"),
+				systemPrompt: this.prompts.get("validate.md"),
 				prompt: [
 					`Candidate ${c.id}, filed by ${c.worker_id}.`,
 					"",
@@ -502,9 +405,6 @@ export class Scanner {
 				].join("\n"),
 			});
 
-			// Degradation is directional: an agent that returned without a verdict
-			// leaves the row unsettled, which downgrades the scan's claim rather than
-			// quietly dropping the candidate (plan §4).
 			const after = this.ledger.getCandidate(this.scanId, c.id);
 			if (after && !after.resolution?.validation) {
 				this.ledger.resolveCandidate(this.scanId, c.id, {
@@ -518,13 +418,6 @@ export class Scanner {
 		});
 	}
 
-	// ------------------------------------------------------------ phase 3b
-
-	/**
-	 * How far does it reach? Survivors only, and a fresh agent — one that has not
-	 * seen the validating agent's reasoning, so it cannot inherit its confidence.
-	 * This is where the reachability trace and the severity inputs are recorded.
-	 */
 	async assess(): Promise<void> {
 		this.ledger.setPhase(this.scanId, "attack_path");
 		const todo = this.ledger
@@ -546,7 +439,11 @@ export class Scanner {
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				modelRef: this.opts.models?.attackPath,
-				systemPrompt: this.prompts.get("attack-path.md"),
+				systemPrompt: [
+					this.prompts.get("attack-path.md"),
+					"",
+					this.prompts.get("refs/counterevidence.md"),
+				].join("\n"),
 				prompt: [
 					`Candidate ${c.id}. Another reader has confirmed it is real.`,
 					"",
@@ -561,9 +458,6 @@ export class Scanner {
 
 			const after = this.ledger.getCandidate(this.scanId, c.id);
 			if (after && !after.resolution?.attack_path) {
-				// The finding is real — validation said so — but nothing rated it. It
-				// stays in the report as unsettled rather than as a confirmed finding
-				// with no severity behind it.
 				this.ledger.resolveCandidate(this.scanId, c.id, {
 					...(after.resolution ?? { disposition: "needs_follow_up", rationale: "" }),
 					disposition: "needs_follow_up",
@@ -578,8 +472,6 @@ export class Scanner {
 			}
 		});
 	}
-
-	// ------------------------------------------------------------- phase 4
 
 	report(): ScanResult {
 		this.ledger.setPhase(this.scanId, "report");
@@ -604,7 +496,6 @@ export class Scanner {
 			threatModel: this.threatModelNote,
 		});
 
-		// Owner-only: the report quotes the code, and findings.json quotes more of it.
 		const dir = opensecDir("scans", this.scanId);
 		const reportPath = join(dir, "report.md");
 		const jsonPath = join(dir, "findings.json");
@@ -617,14 +508,11 @@ export class Scanner {
 		return { scanId: this.scanId, markdown, reportPath, jsonPath, candidates, coverage };
 	}
 
-	/** The whole spine, in order. */
 	async run(): Promise<ScanResult> {
 		try {
 			await this.inventory();
 			const tm = await this.threatModel();
 			await this.discover(tm);
-			// Merge before judging, so no duplicate is investigated twice; judge
-			// before rating, so nothing unreal is ever assigned a severity.
 			await this.reduce();
 			await this.validate();
 			await this.assess();
@@ -637,10 +525,6 @@ export class Scanner {
 		}
 	}
 
-	/**
-	 * Estimate without spending anything — and without writing anything, or
-	 * needing a model. It is inventory and arithmetic.
-	 */
 	static async estimate(opts: {
 		repo: string;
 		maxFiles?: number;
@@ -673,7 +557,6 @@ function formatLocation(l: {
 	);
 }
 
-/** One candidate as the later phases see it. Always wrapped as untrusted. */
 function describeCandidate(c: Candidate): string {
 	return [
 		`id: ${c.id}`,

