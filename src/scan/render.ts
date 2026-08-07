@@ -13,7 +13,7 @@ export interface ReportInput {
 	excludedFiles: number;
 	modelRef: string;
 	promptHash: string;
-	partitions?: string;
+	ownership?: string;
 	threatModel?: string;
 }
 
@@ -55,7 +55,7 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push(`- **${r.coverage.files_touched} / ${r.coverage.files_in_scope} files touched** (${pctFiles})`);
 	out.push(`- **${fmtBytes(r.coverage.bytes_read)} / ${fmtBytes(r.coverage.bytes_in_scope)} read** (${pctBytes}) — the number to trust`);
 	out.push(`- ${r.excludedFiles} files excluded from scope with a recorded reason`);
-	if (r.partitions) out.push(`- ownership: ${esc(r.partitions)}`);
+	if (r.ownership) out.push(`- ownership: ${esc(r.ownership)}`);
 	out.push("");
 	out.push(
 		"> Coverage is derived from the read and grep calls that actually happened, not",

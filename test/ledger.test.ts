@@ -32,6 +32,53 @@ describe("a failed scan keeps the phase it died in", () => {
 	});
 });
 
+describe("every probe gets the same worklist: all of it", () => {
+	function withFiles(): Ledger {
+		const l = ledger();
+		l.insertFiles("s", [
+			{ path: "a.js", sha: "1", bytes: 100, excludedReason: null },
+			{ path: "b.js", sha: "2", bytes: 100, excludedReason: null },
+			{ path: "c.js", sha: "3", bytes: 100, excludedReason: null },
+			{ path: "d.png", sha: "", bytes: 0, excludedReason: "binary (.png)" },
+		]);
+		return l;
+	}
+
+	it("returns every in-scope file, and nothing excluded", () => {
+		// Probes are independent looks at the whole repository, not owners of a
+		// slice, so there is no scoping argument left to get wrong. If this ever
+		// narrowed again, N probes would quietly become N partial ones with no
+		// error anywhere.
+		const l = withFiles();
+		const { files, total } = l.listWork("s", 100, 0);
+		expect(total).toBe(3);
+		expect(files.map((f) => f.path)).toEqual(["a.js", "b.js", "c.js"]);
+		expect(files.map((f) => f.path)).not.toContain("d.png");
+		l.close();
+	});
+
+	it("accepts any in-scope file as a finding location, and refuses an excluded one", () => {
+		const l = withFiles();
+		expect(l.fileInScope("s", "c.js")).toBe(true);
+		expect(l.fileInScope("s", "d.png")).toBe(false);
+		expect(l.fileInScope("s", "nope.js")).toBe(false);
+		l.close();
+	});
+
+	it("pages through the whole list without dropping or repeating a file", () => {
+		const l = withFiles();
+		const first = l.listWork("s", 2, 0);
+		const second = l.listWork("s", 2, first.files.length);
+		expect(first.total).toBe(3);
+		expect([...first.files, ...second.files].map((f) => f.path)).toEqual([
+			"a.js",
+			"b.js",
+			"c.js",
+		]);
+		l.close();
+	});
+});
+
 describe("coverage counts only what was actually reached", () => {
 	it("starts at zero even with files in scope", () => {
 		const l = ledger();
