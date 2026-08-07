@@ -14,16 +14,17 @@
  * shares the ledger, so its reads count toward coverage and its spend counts
  * toward the budget, automatically.
  *
- * What we do take from the prior art:
+ * There is deliberately no menu of agent types. There were two — `tracer` and
+ * `skeptic` — and they were the same read-only agent with a different paragraph
+ * at the top, which meant the caller had to classify its question before asking
+ * it and could pick wrong. A general agent given a well-posed task does both
+ * jobs, which is also how codex-security launches its workers: a standard
+ * coding agent, and the brief carries the specialisation.
  *
- * - agent types declared as prompt files, so they are data like every other
- *   prompt and travel through `--prompts`
- * - a depth cap, a concurrency cap, and a per-parent count cap
- * - a child may tighten an inherited limit but never relax it
- * - the child's final message is the return value
- *
- * What we deliberately don't: worktree isolation (we never write), context
- * inheritance (the point is to spend less context, not copy the parent's), and
+ * What we keep from the prior art: a depth cap, a concurrency cap, a per-parent
+ * count cap, and the child's final message as the return value. What we
+ * deliberately don't: worktree isolation (we never write), context inheritance
+ * (the point is to spend less context, not copy the parent's), and
  * resumable/background agents (a scan phase is not an interactive session).
  */
 
@@ -39,29 +40,12 @@ export const MAX_DEPTH = 1;
 export const MAX_CONCURRENT = 4;
 export const MAX_PER_PARENT = 8;
 
-export type SubagentType = "tracer" | "skeptic";
-
-const TYPES: Record<SubagentType, { prompt: keyof PromptsByName; blurb: string }> = {
-	tracer: {
-		prompt: "agents/tracer.md",
-		blurb: "follows one data path end to end and reports whether it completes",
-	},
-	skeptic: {
-		prompt: "agents/skeptic.md",
-		blurb: "tries to refute one specific claim, and reports what would disprove it",
-	},
-};
-
-type PromptsByName = Record<string, string>;
-
 const ParamsSchema = Type.Object(
 	{
-		agent_type: Type.Union([Type.Literal("tracer"), Type.Literal("skeptic")], {
-			description: "tracer: follow a path. skeptic: try to refute a claim.",
-		}),
 		task: Type.String({
 			description:
-				"The complete question, self-contained. The subagent cannot see your conversation.",
+				"The complete brief, self-contained. The subagent cannot see your conversation, " +
+				"so name the files, the claim and what would count as an answer.",
 		}),
 		description: Type.String({ description: "3-5 words, shown in scan output" }),
 	},
@@ -100,24 +84,21 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 		name: "delegate",
 		label: "delegate",
 		description:
-			`Delegate one focused question to a subagent with a fresh context. Use this when ` +
-			`answering something would mean reading far more than you need in your own context, ` +
-			`or when a claim deserves an independent look rather than your own second opinion.\n\n` +
-			Object.entries(TYPES)
-				.map(([name, t]) => `- ${name}: ${t.blurb}`)
-				.join("\n") +
-			`\n\nThe subagent shares your worklist and reads the same repository, but it cannot ` +
-			`record findings — it reports back to you, and you decide what to file. ` +
-			`Its task must be self-contained: it cannot see your conversation.`,
+			`Delegate one task to a subagent that starts with a fresh context and the same ` +
+			`read-only tools you have. Use it when answering something yourself would mean ` +
+			`pulling far more into your context than the answer is worth, or when a claim ` +
+			`deserves a reader who has not already seen your reasoning.\n\n` +
+			`Typical briefs: follow one input from a specific entry point to a specific sink ` +
+			`and report every check on the way; take one claim and try to refute it; map every ` +
+			`caller of one function and say which ones pass attacker-controlled data.\n\n` +
+			`The subagent shares your worklist and reads the same repository, but it cannot ` +
+			`record findings — it reports back to you, and you decide what to file. Its task ` +
+			`must be self-contained: it cannot see your conversation.`,
 		parameters: ParamsSchema,
-		promptSnippet: "delegate - hand one focused question to a subagent with a fresh context",
+		promptSnippet: "delegate - hand one self-contained task to a subagent with a fresh context",
 		executionMode: "parallel",
 		async execute(_id, params) {
-			const { agent_type, task, description } = params as {
-				agent_type: SubagentType;
-				task: string;
-				description: string;
-			};
+			const { task, description } = params as { task: string; description: string };
 
 			if (spawned >= MAX_PER_PARENT) {
 				throw new Error(
@@ -135,7 +116,7 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 
 			spawned += 1;
 			running += 1;
-			const workerId = `${parent.workerId}/${agent_type}-${spawned}`;
+			const workerId = `${parent.workerId}/sub-${spawned}`;
 			deps.onEvent?.(`  ${workerId}: ${description}`);
 
 			try {
@@ -145,11 +126,15 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 					depth: depth + 1,
 					// Read and page the worklist, record dead ends. Not findings.
 					verbs: SUBAGENT_VERBS,
+					// Inherited from the parent otherwise, which would let a subagent
+					// write to rows through a verb set it doesn't even have.
+					resolvableIds: [],
+					dispositions: [],
 				};
 
 				const result = await deps.run({
 					ctx: child,
-					systemPrompt: deps.prompts.get(TYPES[agent_type].prompt as never),
+					systemPrompt: deps.prompts.get("agents/delegate.md"),
 					prompt: [
 						`You were delegated this task by ${parent.workerId}. It is the whole brief —`,
 						"there is no prior conversation to refer to.",

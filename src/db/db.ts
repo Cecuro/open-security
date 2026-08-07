@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { identityHash, mergeLocations, mergeProse } from "../scan/identity.js";
 import type {
 	Candidate,
 	Coverage,
@@ -25,8 +26,7 @@ import type {
 	ScanRecord,
 	ScanStatus,
 } from "../types.js";
-
-const SCHEMA_VERSION = 1;
+import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -52,16 +52,48 @@ export class Ledger {
 		return ledger;
 	}
 
+	/**
+	 * `schema.sql` is the version-1 shape and is never edited; everything since
+	 * is a migration. A brand-new database therefore runs the whole migration
+	 * list too, which is the point — the upgrade path is exercised by every test
+	 * that opens a ledger, not only by users who have one from last week.
+	 */
 	private migrate(): void {
-		const schema = readFileSync(join(here, "schema.sql"), "utf8");
-		this.db.exec(schema);
-		const row = this.db
-			.prepare("SELECT MAX(version) AS v FROM schema_version")
-			.get() as { v: number | null };
-		if (row.v === null) {
-			this.db
-				.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
-				.run(SCHEMA_VERSION, now());
+		this.db.exec(readFileSync(join(here, "schema.sql"), "utf8"));
+
+		const stamp = this.db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)");
+		const current = () =>
+			(this.db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as {
+				v: number | null;
+			}).v;
+
+		let at = current();
+		if (at === null) {
+			stamp.run(1, now());
+			at = 1;
+		}
+
+		// A database written by a newer opensec may have columns this build will
+		// happily ignore and rows it would misread. Refusing is the honest move.
+		if (at > SCHEMA_VERSION) {
+			throw new Error(
+				`this database is at schema version ${at}, but this opensec understands ${SCHEMA_VERSION}. ` +
+					`Upgrade opensec, or point --db at a different file.`,
+			);
+		}
+
+		for (const m of MIGRATIONS) {
+			if (m.version <= at) continue;
+			try {
+				this.db.transaction(() => {
+					this.db.exec(m.sql);
+					stamp.run(m.version, now());
+				})();
+			} catch (err) {
+				throw new Error(
+					`schema migration ${m.version} (${m.note}) failed: ${(err as Error).message}`,
+				);
+			}
 		}
 	}
 
@@ -103,8 +135,11 @@ export class Ledger {
 		this.db.prepare("UPDATE scans SET phase = ? WHERE id = ?").run(phase, scanId);
 	}
 
-	setThreatModel(scanId: string, text: string): void {
-		this.db.prepare("UPDATE scans SET threat_model = ? WHERE id = ?").run(text, scanId);
+	/** `source` records whether this was written now or reused from disk. */
+	setThreatModel(scanId: string, text: string, source: string): void {
+		this.db
+			.prepare("UPDATE scans SET threat_model = ?, threat_model_source = ? WHERE id = ?")
+			.run(text, source, scanId);
 	}
 
 	getThreatModel(scanId: string): string | null {
@@ -289,8 +324,19 @@ export class Ledger {
 		return `c${n + 1}`;
 	}
 
-	createCandidate(c: {
-		id: string;
+	/**
+	 * Create, or fold into the row that already has this identity.
+	 *
+	 * This is the deterministic half of dedup and it costs nothing: two probes
+	 * that reach the same conclusion about the same code produce one row with
+	 * both agents' prose, without a model ever comparing them. The returned
+	 * `merged` flag is handed back to the agent so it knows its work landed on
+	 * an existing finding rather than silently vanishing.
+	 *
+	 * It does NOT resolve anything. A finding filed twice is search evidence,
+	 * not proof it is reportable — the merged row is validated like any other.
+	 */
+	upsertCandidate(c: {
 		scanId: string;
 		workerId: string;
 		title: string;
@@ -298,15 +344,48 @@ export class Ledger {
 		locations: Location[];
 		summary: string;
 		evidence: string;
-	}): void {
+		instance?: string | null;
+	}): { id: string; merged: boolean } {
+		const hash = identityHash({
+			cweIds: c.cweIds,
+			locations: c.locations,
+			instance: c.instance,
+		});
+
+		const existing = this.db
+			.prepare(
+				"SELECT * FROM candidates WHERE scan_id = ? AND identity_hash = ? AND merged_into IS NULL",
+			)
+			.get(c.scanId, hash) as Record<string, unknown> | undefined;
+
+		if (existing) {
+			const prev = rowToCandidate(existing);
+			this.db
+				.prepare(
+					`UPDATE candidates SET cwe_ids = ?, locations_json = ?, summary = ?, evidence = ?
+					 WHERE scan_id = ? AND id = ?`,
+				)
+				.run(
+					JSON.stringify([...new Set([...prev.cwe_ids, ...c.cweIds])]),
+					JSON.stringify(mergeLocations(prev.locations, c.locations)),
+					mergeProse(prev.summary, c.summary),
+					mergeProse(prev.evidence, c.evidence),
+					c.scanId,
+					prev.id,
+				);
+			return { id: prev.id, merged: true };
+		}
+
+		const id = this.nextCandidateId(c.scanId);
 		this.db
 			.prepare(
 				`INSERT INTO candidates
-				 (id, scan_id, worker_id, title, cwe_ids, locations_json, summary, evidence, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 (id, scan_id, worker_id, title, cwe_ids, locations_json, summary, evidence,
+				  instance, identity_hash, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
-				c.id,
+				id,
 				c.scanId,
 				c.workerId,
 				c.title,
@@ -314,8 +393,11 @@ export class Ledger {
 				JSON.stringify(c.locations),
 				c.summary,
 				c.evidence,
+				c.instance ?? null,
+				hash,
 				now(),
 			);
+		return { id, merged: false };
 	}
 
 	resolveCandidate(scanId: string, id: string, resolution: Resolution): void {
@@ -345,8 +427,9 @@ export class Ledger {
 		return rows.map(rowToCandidate);
 	}
 
-	listUnresolvedCandidates(scanId: string): Candidate[] {
-		return this.listCandidates(scanId).filter((c) => !c.resolution);
+	/** Rows still in play: never merged away by identity or by the reducer. */
+	listLiveCandidates(scanId: string): Candidate[] {
+		return this.listCandidates(scanId).filter((c) => !c.merged_into);
 	}
 
 	// ---------------------------------------------------------------- leads
@@ -381,6 +464,8 @@ function rowToCandidate(row: Record<string, unknown>): Candidate {
 			? (JSON.parse(row.resolution_json as string) as Resolution)
 			: undefined,
 		merged_into: (row.merged_into as string | null) ?? null,
+		instance: (row.instance as string | null) ?? null,
+		identity_hash: (row.identity_hash as string | null) ?? null,
 	};
 }
 

@@ -62,14 +62,13 @@ describe("subagents run in-process and inherit the scan", () => {
 		expect(tool).not.toBeNull();
 
 		const out = await call(tool!, {
-			agent_type: "tracer",
 			task: "follow req.query.host to exec",
 			description: "trace ping input",
 		});
 
 		expect(out).toBe("child report");
 		expect(env.calls).toHaveLength(1);
-		expect(env.calls[0]?.workerId).toBe("probe-1/tracer-1");
+		expect(env.calls[0]?.workerId).toBe("probe-1/sub-1");
 		expect(env.calls[0]?.depth).toBe(1);
 		expect(env.calls[0]?.verbs).toEqual(SUBAGENT_VERBS);
 	});
@@ -83,10 +82,10 @@ describe("subagents run in-process and inherit the scan", () => {
 		const env = setup();
 		const tool = createSubagentTool(env.ctx, env.deps)!;
 		for (let i = 0; i < MAX_PER_PARENT; i++) {
-			await call(tool, { agent_type: "tracer", task: `t${i}`, description: "d" });
+			await call(tool, { task: `t${i}`, description: "d" });
 		}
 		await expect(
-			call(tool, { agent_type: "tracer", task: "one too many", description: "d" }),
+			call(tool, { task: "one too many", description: "d" }),
 		).rejects.toThrow(/already delegated/);
 		expect(env.calls).toHaveLength(MAX_PER_PARENT);
 	});
@@ -100,7 +99,7 @@ describe("subagents run in-process and inherit the scan", () => {
 			},
 		})!;
 		await expect(
-			call(tool, { agent_type: "skeptic", task: "t", description: "d" }),
+			call(tool, { task: "t", description: "d" }),
 		).rejects.toThrow(/budget exhausted/);
 	});
 
@@ -119,10 +118,10 @@ describe("subagents run in-process and inherit the scan", () => {
 		})!;
 
 		const inflight = Array.from({ length: MAX_CONCURRENT }, (_, i) =>
-			call(tool, { agent_type: "tracer", task: `t${i}`, description: "d" }),
+			call(tool, { task: `t${i}`, description: "d" }),
 		);
 		await expect(
-			call(tool, { agent_type: "tracer", task: "over", description: "d" }),
+			call(tool, { task: "over", description: "d" }),
 		).rejects.toThrow(/already running/);
 		release?.();
 		await Promise.all(inflight);
@@ -134,14 +133,14 @@ describe("subagents run in-process and inherit the scan", () => {
 			...env.deps,
 			run: async () => ({ text: "   ", tokensIn: 0, tokensOut: 0, costUsd: 0 }),
 		})!;
-		const out = await call(tool, { agent_type: "skeptic", task: "t", description: "d" });
+		const out = await call(tool, { task: "t", description: "d" });
 		expect(out).toContain("unsettled");
 	});
 });
 
 describe("verb scoping", () => {
 	it("stops a subagent from recording findings its parent never saw", async () => {
-		const env = setup({ workerId: "probe-1/skeptic-1", verbs: SUBAGENT_VERBS, depth: 1 });
+		const env = setup({ workerId: "probe-1/sub-1", verbs: SUBAGENT_VERBS, depth: 1 });
 		const tool = createOpensecTool(env.ctx);
 		const run = async (p: object) => {
 			const r = await tool.execute("t", p as never, undefined, undefined, {} as never);
@@ -156,7 +155,7 @@ describe("verb scoping", () => {
 				evidence: "e",
 				locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
 			}),
-		).rejects.toThrow(/not available to probe-1\/skeptic-1/);
+		).rejects.toThrow(/not available to probe-1\/sub-1/);
 
 		// It can still page the worklist and record what it ruled out.
 		expect(JSON.parse(await run({ verb: "work.next" })).total).toBe(1);

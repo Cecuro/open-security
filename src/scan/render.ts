@@ -23,6 +23,12 @@ export interface ReportInput {
 	promptHash: string;
 	/** How ownership was split. One probe owning most of a repo is a weaker claim. */
 	partitions?: string;
+	/**
+	 * Where the threat model came from. A scan run against a threat model the
+	 * user edited is a different claim from one that wrote its own, and the
+	 * reader of the report cannot tell unless it says so.
+	 */
+	threatModel?: string;
 }
 
 export function renderMarkdown(r: ReportInput): string {
@@ -51,6 +57,7 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push(`| profile | **${r.scan.profile}**${r.scan.profile === "static" ? " — nothing was executed" : ""} |`);
 	out.push(`| model | \`${esc(r.modelRef)}\` |`);
 	out.push(`| prompts | \`${esc(r.promptHash)}\` |`);
+	if (r.threatModel) out.push(`| threat model | ${esc(r.threatModel)} |`);
 	out.push(`| started | ${r.scan.started_at} |`);
 	out.push(`| tokens | ${r.scan.tokens_in.toLocaleString()} in / ${r.scan.tokens_out.toLocaleString()} out |`);
 	out.push(`| cost | ${r.scan.cost_usd > 0 ? `$${r.scan.cost_usd.toFixed(4)}` : "_not priced_"} |`);
@@ -145,6 +152,11 @@ export function renderMarkdown(r: ReportInput): string {
 
 	if (merged.size > 0) {
 		out.push("## Merged as duplicates", "");
+		out.push(
+			"Merged rows are kept, never deleted. Two probes reaching the same conclusion",
+			"is evidence about the search, not about the finding.",
+			"",
+		);
 		for (const c of r.candidates.filter((x) => x.merged_into)) {
 			out.push(
 				`- **${c.id}** ${escInline(c.title)} → merged into **${escInline(c.merged_into ?? "?")}**: ${escInline(c.resolution?.rationale ?? "")}`,
@@ -214,8 +226,28 @@ function renderFinding(c: Candidate): string[] {
 	out.push("**What an attacker gets**", "", esc(c.summary), "");
 	out.push("**Evidence**", "", quote(c.evidence), "");
 
-	if (c.resolution?.rationale) {
-		out.push("**Investigation**", "", esc(c.resolution.rationale), "");
+	// Both passes, separately attributed. A reader who disagrees with the rating
+	// should be able to see whether the disagreement is about whether the bug is
+	// real or about how far it reaches — they are different arguments, made by
+	// different agents, and collapsing them into one paragraph hides which.
+	if (c.resolution?.validation) {
+		out.push("**Validation**", "", esc(c.resolution.validation.rationale), "");
+	}
+
+	const reach = c.resolution?.attack_path?.reachability;
+	if (reach) {
+		out.push("**Attack path**", "");
+		if (reach.entry_point) out.push(`- **entry** — ${escInline(reach.entry_point)}`);
+		for (const hop of reach.path) out.push(`- ${escInline(hop)}`);
+		out.push("");
+		if (reach.controls.length > 0) {
+			out.push(`Controls on this path: ${reach.controls.map(escInline).join("; ")}.`, "");
+		} else if (reach.path.length > 0) {
+			out.push("**No control was found on this path.**", "");
+		}
+		if (c.resolution?.attack_path?.rationale) {
+			out.push(esc(c.resolution.attack_path.rationale), "");
+		}
 	}
 
 	if (inputs) {

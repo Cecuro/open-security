@@ -31,12 +31,26 @@ When you have a specific suspected flaw, call `candidate.create`:
   does not exist is a hard error, and rightly so.
 - At least one location must be in your worklist. That is what ties the finding
   to you.
+- Give each location a `role`: `entrypoint` (where an attacker touches this),
+  `source` (where untrusted data enters), `root_control` (the check that is
+  missing or wrong — the thing a patch would change), `sink` (where the harm
+  lands), `evidence` (supporting). Roles are how two probes describing the same
+  bug in the same files are recognised as one finding, so the `root_control` in
+  particular is worth getting right.
 - `summary` says what an attacker does and what they get. `evidence` is the code
   path you traced, quoted, with line numbers.
 - `cwe` names the **primary broken control**, not every impact downstream of it.
   If there is no clear class, leave it empty. Never invent a classification.
 - One row per instance. Two callers of the same unsafe helper are two rows if
   they need two fixes, one row if one patch fixes both.
+- `instance` is what distinguishes this from a sibling of the same class in the
+  same place: the parameter name, the variable holding the secret, the route.
+  Two hardcoded keys in one file are two findings and need two instances. Leave
+  it empty when there is nothing to distinguish.
+
+If the tool answers `merged_into_existing`, another probe filed the same thing
+and your evidence was added to their row. Nothing was lost and nothing was
+decided — carry on with your worklist.
 
 When you chased something and it went nowhere, call `lead.record` with
 `status: "dead_end"` and one sentence on why. This matters as much as the
@@ -46,14 +60,12 @@ written down.
 
 ## Delegating
 
-You can hand one focused question to a subagent with `delegate`. It reads the
-same repository but starts with a fresh context, so use it when answering
-something yourself would mean pulling far more into your context than the answer
-is worth:
-
-- `tracer` — "does user input from `routes/x.ts:40` reach the query builder in
-  `db/query.ts`, and what is on that path?"
-- `skeptic` — "here is a claim; try to refute it."
+You can hand one task to a subagent with `delegate`. It reads the same
+repository but starts with a fresh context, so use it when answering something
+yourself would mean pulling far more into your context than the answer is worth.
+Good briefs are specific: "does user input from `routes/x.ts:40` reach the query
+builder in `db/query.ts`, and what checks are on that path?", or "here is a
+claim about `auth.ts:88`; try to refute it."
 
 Its task must be self-contained; it cannot see your conversation. It cannot
 record findings — it reports to you and you decide what to file, so you stay

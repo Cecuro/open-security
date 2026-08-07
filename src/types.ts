@@ -5,12 +5,20 @@ export type Profile = "static" | "container";
 
 export type ScanStatus = "running" | "completed" | "failed";
 
+/**
+ * `reduce` runs before `validate` so duplicates are never validated twice, and
+ * `attack_path` runs after it over survivors only. Validation and reachability
+ * are separate agents on purpose: a reader who has already talked themselves
+ * into "this is real" is a poor judge of how far it actually reaches, and most
+ * false positives die in the first pass without anyone paying for the second.
+ */
 export type Phase =
 	| "inventory"
 	| "threat_model"
 	| "discovery"
-	| "investigate"
-	| "dedup"
+	| "reduce"
+	| "validate"
+	| "attack_path"
 	| "report";
 
 /**
@@ -45,13 +53,38 @@ export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 export type Likelihood = "high" | "medium" | "low";
 
+/**
+ * What a location IS to the finding. Identity is computed over paths and roles,
+ * so "the sink is in a.ts and the missing check is in b.ts" is a different
+ * finding from "the sink is in b.ts and the missing check is in a.ts", even
+ * though the file set is the same.
+ */
+export type LocationRole = "entrypoint" | "source" | "root_control" | "sink" | "evidence";
+
 /** A file:line span. Line numbers are validated against the real file on write. */
 export interface Location {
 	path: string;
 	start_line: number;
 	end_line: number;
-	/** Enclosing function/class if the agent knows it. Used by dedup. */
+	/** Enclosing function/class if the agent knows it. */
 	symbol?: string;
+	/** Defaults to `evidence` when the agent doesn't say. */
+	role?: LocationRole;
+}
+
+/**
+ * The reachability trace, recorded by the attack-path pass. This is what makes
+ * `traced_path_no_control` checkable rather than a boolean the model asserts:
+ * claiming a path with no control while listing controls is a contradiction the
+ * tool can see.
+ */
+export interface Reachability {
+	/** Where an attacker starts. `path:line` plus what they control there. */
+	entry_point: string;
+	/** Each hop from entry point to sink, in order. */
+	path: string[];
+	/** Every check, filter or encoder found ON that path. Empty is a claim. */
+	controls: string[];
 }
 
 /**
@@ -106,11 +139,40 @@ export interface Candidate {
 	created_at: string;
 	resolution?: Resolution;
 	merged_into?: string | null;
+	/**
+	 * What distinguishes this from a sibling finding of the same class in the
+	 * same place — e.g. which secret, which parameter. Part of identity.
+	 */
+	instance?: string | null;
+	/** sha256 of the identity tuple. Equal hashes are one finding, by definition. */
+	identity_hash?: string | null;
 }
 
+/** The first pass: is this real? No severity, no reachability. */
+export interface Validation {
+	disposition: Disposition;
+	rationale: string;
+	at: string;
+}
+
+/** The second pass, over survivors only: how far does it actually reach? */
+export interface AttackPath {
+	reachability: Reachability;
+	rationale: string;
+	at: string;
+}
+
+/**
+ * Accumulated across both passes. `disposition` is the live state — validate
+ * writes it, assess may downgrade it when the suppression gate fires — while
+ * `validation` and `attack_path` keep each pass's own record, so a suppressed
+ * finding still shows what the first reader concluded.
+ */
 export interface Resolution {
 	disposition: Disposition;
 	rationale: string;
+	validation?: Validation;
+	attack_path?: AttackPath;
 	inputs?: SeverityInputs;
 	computed?: SeverityResult;
 	/** Set when disposition is `duplicate`. */

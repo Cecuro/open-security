@@ -14,5 +14,13 @@ export {
 export { renderMarkdown, type ReportInput } from "./scan/render.js";
 export { loadPrompts, wrapUntrusted, type Prompts, PROMPT_NAMES } from "./scan/prompts.js";
 export { AgentRunner } from "./agents/session.js";
-export { createOpensecTool, type RunContext } from "./agents/tool.js";
+export { createOpensecTool, type RunContext, type Verb } from "./agents/tool.js";
+export {
+	collisionGroups,
+	cweFamily,
+	identityHash,
+	identityOf,
+	type Identity,
+} from "./scan/identity.js";
+export { MIGRATIONS, SCHEMA_VERSION, type Migration } from "./db/migrations.js";
 export type * from "./types.js";

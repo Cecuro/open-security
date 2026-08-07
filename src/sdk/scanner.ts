@@ -10,18 +10,21 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { AgentRunner, pricingOf } from "../agents/session.js";
 import type { SubagentDeps } from "../agents/subagent.js";
 import {
-	DEDUP_VERBS,
-	INVESTIGATE_VERBS,
+	ASSESS_VERBS,
 	PROBE_VERBS,
+	REDUCE_VERBS,
 	type RunContext,
+	VALIDATE_VERBS,
 } from "../agents/tool.js";
 import { Ledger, scanArtifactDir, shortHash } from "../db/db.js";
+import { collisionGroups } from "../scan/identity.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
 import {
 	describeDistribution,
@@ -38,7 +41,9 @@ export interface ScannerOptions {
 	/** e.g. "azure-openai-responses/gpt-5.4". Required — nothing is guessed. */
 	model?: string;
 	/** Per-phase overrides; each falls back to `model`. */
-	models?: Partial<Record<"threatModel" | "discovery" | "investigate" | "dedup", string>>;
+	models?: Partial<
+		Record<"threatModel" | "discovery" | "reduce" | "validate" | "attackPath", string>
+	>;
 	db?: string;
 	profile?: Profile;
 	promptsDir?: string;
@@ -51,8 +56,13 @@ export interface ScannerOptions {
 	maxCostUsd?: number | null;
 	/** Files per probe before the worklist is split again. */
 	partitionMaxFiles?: number;
-	/** How many agents run at once, across probes and investigations. */
+	/** How many agents run at once, across probes and per-candidate passes. */
 	concurrency?: number;
+	/**
+	 * Regenerate the stored threat model instead of reusing it. The stored one is
+	 * a file the user is invited to edit, so overwriting it is never implicit.
+	 */
+	refreshThreatModel?: boolean;
 	onEvent?: (msg: string) => void;
 }
 
@@ -68,6 +78,7 @@ export interface ScanResult {
 export class Scanner {
 	private inv?: InventoryResult;
 	private partitions?: Partition[];
+	private threatModelNote?: string;
 
 	private constructor(
 		readonly scanId: string,
@@ -77,6 +88,8 @@ export class Scanner {
 		private readonly prompts: Prompts,
 		private readonly repoRoot: string,
 		private readonly repoName: string,
+		private readonly repoId: string,
+		private readonly revision: string | null,
 		private readonly profile: Profile,
 		private readonly nonce: string,
 	) {}
@@ -127,6 +140,8 @@ export class Scanner {
 			prompts,
 			repoRoot,
 			repoName,
+			repoId,
+			revision,
 			profile,
 			randomBytes(9).toString("hex"),
 		);
@@ -223,8 +238,38 @@ export class Scanner {
 
 	// ------------------------------------------------------------- phase 1
 
+	/**
+	 * Where this repository's threat model lives between scans. It is a plain
+	 * markdown file outside the database on purpose: a threat model is the one
+	 * artifact a user has standing to correct — they know what the system is for,
+	 * which entry points are actually exposed, and which "sensitive asset" is
+	 * test data. Editing a row in SQLite is not an invitation; editing a file is.
+	 */
+	threatModelPath(): string {
+		return join(homedir(), ".opensec", "repos", this.repoId, "threat-model.md");
+	}
+
 	async threatModel(): Promise<string> {
 		this.ledger.setPhase(this.scanId, "threat_model");
+		const path = this.threatModelPath();
+
+		if (existsSync(path) && !this.opts.refreshThreatModel) {
+			const stored = readFileSync(path, "utf8");
+			const wroteAt = /^<!-- opensec threat model .*revision (\S+)/m.exec(stored)?.[1];
+			this.ledger.setThreatModel(this.scanId, stored, `reused:${path}`);
+			this.threatModelNote = `reused from \`${path}\``;
+			this.say(`threat model: reusing ${path} (edit it, or --refresh-threat-model to rewrite)`);
+			if (wroteAt && wroteAt !== "none" && this.revision && wroteAt !== this.revision) {
+				// Reused anyway: a threat model written two commits ago is still a far
+				// better starting point than none, and the user is told so they can
+				// decide. Refusing to reuse would punish exactly the users who edited it.
+				this.say(
+					`  it was written at ${wroteAt.slice(0, 8)}, the repo is at ${this.revision.slice(0, 8)}`,
+				);
+			}
+			return stored;
+		}
+
 		this.checkBudget();
 		this.say("threat model: 1 agent");
 
@@ -248,7 +293,18 @@ export class Scanner {
 		});
 
 		this.bill(result);
-		this.ledger.setThreatModel(this.scanId, result.text);
+
+		const header =
+			`<!-- opensec threat model · repo ${this.repoName} · revision ${this.revision ?? "none"} ` +
+			`· written ${new Date().toISOString()} -->\n` +
+			`<!-- This file is yours to edit. The next scan of this repository reads it as\n` +
+			`     written; opensec only rewrites it when you pass --refresh-threat-model. -->\n\n`;
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, header + result.text, "utf8");
+
+		this.ledger.setThreatModel(this.scanId, result.text, `generated:${path}`);
+		this.threatModelNote = `written this run, saved to \`${path}\``;
+		this.say(`threat model: written to ${path} — edit it and the next scan will use yours`);
 		return result.text;
 	}
 
@@ -294,128 +350,185 @@ export class Scanner {
 
 	// ------------------------------------------------------------- phase 3
 
-	async investigate(candidates?: Candidate[]): Promise<void> {
-		this.ledger.setPhase(this.scanId, "investigate");
-		const todo = candidates ?? this.ledger.listUnresolvedCandidates(this.scanId);
+	/**
+	 * Dedup, second layer. The first is free and already happened: identical
+	 * identities collapsed at `candidate.create`. This one reads.
+	 *
+	 * A model only sees groups that collide on (cwe family, primary file) and
+	 * hold more than one row — usually none, on most scans, which is the point.
+	 * Singleton findings never cost a token, and each group is judged on its own
+	 * so one large group cannot bury a small one in the context.
+	 *
+	 * It runs BEFORE validation, so a duplicate is never investigated twice. It
+	 * may set `duplicate` and nothing else: these rows have not been judged by
+	 * anyone yet, and a reducer that could mark one `not_applicable` would drop a
+	 * finding no one ever read.
+	 */
+	async reduce(): Promise<number> {
+		this.ledger.setPhase(this.scanId, "reduce");
+
+		const live = this.ledger.listLiveCandidates(this.scanId).filter((c) => !c.resolution);
+		const groups = collisionGroups(live);
+		if (groups.length === 0) {
+			if (live.length > 1) this.say(`reduce: ${live.length} candidate(s), no collisions`);
+			return 0;
+		}
+
+		const inGroups = groups.reduce((n, g) => n + g.length, 0);
+		this.say(
+			`reduce: ${inGroups} of ${live.length} candidate(s) collide, in ${groups.length} group(s)`,
+		);
+
+		await mapConcurrent(groups, this.concurrency, async (group, i) => {
+			this.checkBudget();
+			const workerId = `reduce-${i + 1}`;
+			const result = await this.runner.run({
+				ctx: {
+					...this.ctx(workerId),
+					verbs: REDUCE_VERBS,
+					resolvableIds: group.map((c) => c.id),
+					dispositions: ["duplicate"],
+				},
+				tracePath: this.tracePath(workerId),
+				modelRef: this.opts.models?.reduce,
+				systemPrompt: this.prompts.get("reduce.md"),
+				prompt: [
+					`${group.length} candidates in the same class and the same file.`,
+					"They have not been validated. Your only question is whether any of them",
+					"are the same finding.",
+					"",
+					wrapUntrusted(this.nonce, "candidates", group.map(describeCandidate).join("\n\n---\n\n")),
+					"",
+					"Merge what one patch would fix. If nothing here is a duplicate, say so",
+					"and record nothing.",
+				].join("\n"),
+			});
+			this.bill(result);
+		});
+
+		const merged = this.ledger.listCandidates(this.scanId).filter((c) => c.merged_into).length;
+		this.say(`reduce: ${merged} row(s) merged`);
+		return merged;
+	}
+
+	// ------------------------------------------------------------ phase 3a
+
+	/** Is it real? One agent per candidate, no severity, no reachability. */
+	async validate(candidates?: Candidate[]): Promise<void> {
+		this.ledger.setPhase(this.scanId, "validate");
+		const todo = (candidates ?? this.ledger.listLiveCandidates(this.scanId)).filter(
+			(c) => !c.resolution?.validation,
+		);
 		if (todo.length === 0) return;
-		this.say(`investigate: ${todo.length} candidate(s), ${this.concurrency} at a time`);
+		this.say(`validate: ${todo.length} candidate(s), ${this.concurrency} at a time`);
 
 		await mapConcurrent(todo, this.concurrency, async (c) => {
 			this.checkBudget();
-			await this.investigateOne(c);
-			const after = this.ledger.getCandidate(this.scanId, c.id);
-			const d = after?.resolution?.disposition;
-			const sev = after?.resolution?.computed?.severity;
-			this.say(`  ${c.id} → ${d}${sev ? ` (${sev})` : ""}  ${c.title}`);
-		});
-	}
-
-	private async investigateOne(candidate: Candidate): Promise<void> {
-		const result = await this.runner.run({
-			ctx: {
-				...this.ctx(`investigate-${candidate.id}`),
-				verbs: INVESTIGATE_VERBS,
-				resolvableIds: [candidate.id],
-			},
-			tracePath: this.tracePath(`investigate-${candidate.id}`),
-			subagents: this.subagentDeps(),
-			modelRef: this.opts.models?.investigate,
-			systemPrompt: [
-				this.prompts.get("investigate.md"),
-				"",
-				this.prompts.get("refs/counterevidence.md"),
-			].join("\n"),
-			prompt: [
-				`Candidate ${candidate.id}, filed by ${candidate.worker_id}.`,
-				"",
-				wrapUntrusted(
-					this.nonce,
-					`candidate-${candidate.id}`,
-					[
-						`Title: ${candidate.title}`,
-						`CWE: ${candidate.cwe_ids.length ? candidate.cwe_ids.join(", ") : "(none assigned)"}`,
-						"Locations:",
-						candidate.locations.map(formatLocation).join("\n"),
-						"",
-						"Summary:",
-						candidate.summary,
-						"",
-						"Evidence as filed:",
-						candidate.evidence,
-					].join("\n"),
-				),
-				"",
-				"You have no shell — this is a static review. Nothing you conclude may",
-				"claim execution, and `code_execution_proven` must be false.",
-				"",
-				`Investigate, then call opensec({ verb: "candidate.resolve", id: "${candidate.id}", ... }) once.`,
-			].join("\n"),
-		});
-
-		this.bill(result);
-
-		// Degradation is directional: an agent that returned without resolving
-		// leaves the row unresolved, which downgrades the scan's claim rather than
-		// quietly dropping the candidate (plan §4).
-		const after = this.ledger.getCandidate(this.scanId, candidate.id);
-		if (after && !after.resolution) {
-			this.ledger.resolveCandidate(this.scanId, candidate.id, {
-				disposition: "needs_follow_up",
-				rationale: "the investigate agent finished without recording a verdict",
+			const workerId = `validate-${c.id}`;
+			const result = await this.runner.run({
+				ctx: {
+					...this.ctx(workerId),
+					verbs: VALIDATE_VERBS,
+					resolvableIds: [c.id],
+					// Not duplicate: the reducer already ran, and re-merging here would
+					// let one agent that never saw the other row delete it.
+					dispositions: ["confirmed", "not_applicable", "needs_follow_up"],
+				},
+				tracePath: this.tracePath(workerId),
+				subagents: this.subagentDeps(),
+				modelRef: this.opts.models?.validate,
+				systemPrompt: [
+					this.prompts.get("validate.md"),
+					"",
+					this.prompts.get("refs/counterevidence.md"),
+				].join("\n"),
+				prompt: [
+					`Candidate ${c.id}, filed by ${c.worker_id}.`,
+					"",
+					wrapUntrusted(this.nonce, `candidate-${c.id}`, describeCandidate(c)),
+					"",
+					"You have no shell — this is a static review.",
+					"",
+					`Decide, then call opensec({ verb: "candidate.validate", id: "${c.id}", ... }) once.`,
+				].join("\n"),
 			});
-			this.say(`  ${candidate.id}: no verdict recorded → needs_follow_up`);
-		}
+			this.bill(result);
+
+			// Degradation is directional: an agent that returned without a verdict
+			// leaves the row unsettled, which downgrades the scan's claim rather than
+			// quietly dropping the candidate (plan §4).
+			const after = this.ledger.getCandidate(this.scanId, c.id);
+			if (after && !after.resolution?.validation) {
+				this.ledger.resolveCandidate(this.scanId, c.id, {
+					disposition: "needs_follow_up",
+					rationale: "the validate agent finished without recording a verdict",
+				});
+				this.say(`  ${c.id} → needs_follow_up (no verdict recorded)`);
+			} else {
+				this.say(`  ${c.id} → ${after?.resolution?.validation?.disposition}  ${c.title}`);
+			}
+		});
 	}
+
+	// ------------------------------------------------------------ phase 3b
 
 	/**
-	 * Dedup is an agent pass, run only when there is more than one row to compare.
-	 * It may change a finding's state to `duplicate`; it never deletes. Source
-	 * rows are preserved, because over-merging destroys instances silently while
-	 * under-merging only costs budget (plan §4).
+	 * How far does it reach? Survivors only, and a fresh agent — one that has not
+	 * seen the validating agent's reasoning, so it cannot inherit its confidence.
+	 * This is where the reachability trace and the severity inputs are recorded.
 	 */
-	async dedup(): Promise<number> {
-		this.ledger.setPhase(this.scanId, "dedup");
+	async assess(): Promise<void> {
+		this.ledger.setPhase(this.scanId, "attack_path");
+		const todo = this.ledger
+			.listLiveCandidates(this.scanId)
+			.filter((c) => c.resolution?.validation?.disposition === "confirmed" && !c.resolution.computed);
+		if (todo.length === 0) return;
+		this.say(`attack path: ${todo.length} confirmed finding(s), ${this.concurrency} at a time`);
 
-		const reportable = this.ledger
-			.listCandidates(this.scanId)
-			.filter((c) => c.resolution?.disposition === "confirmed" && !c.merged_into);
-		if (reportable.length < 2) return 0;
-
-		const rows = reportable
-			.map((c) =>
-				[
-					`id: ${c.id}`,
-					`title: ${c.title}`,
-					`cwe: ${c.cwe_ids.join(", ") || "(none)"}`,
-					`locations: ${c.locations.map(formatLocation).join("; ")}`,
-					`summary: ${c.summary}`,
+		await mapConcurrent(todo, this.concurrency, async (c) => {
+			this.checkBudget();
+			const workerId = `attack-path-${c.id}`;
+			const result = await this.runner.run({
+				ctx: {
+					...this.ctx(workerId),
+					verbs: ASSESS_VERBS,
+					resolvableIds: [c.id],
+				},
+				tracePath: this.tracePath(workerId),
+				subagents: this.subagentDeps(),
+				modelRef: this.opts.models?.attackPath,
+				systemPrompt: this.prompts.get("attack-path.md"),
+				prompt: [
+					`Candidate ${c.id}. Another reader has confirmed it is real.`,
+					"",
+					wrapUntrusted(this.nonce, `candidate-${c.id}`, describeCandidate(c)),
+					"",
+					"You have no shell — this is a static review. Nothing you conclude may",
+					"claim execution, and `code_execution_proven` must be false.",
+					"",
+					`Trace it, then call opensec({ verb: "candidate.assess", id: "${c.id}", ... }) once.`,
 				].join("\n"),
-			)
-			.join("\n\n---\n\n");
+			});
+			this.bill(result);
 
-		const result = await this.runner.run({
-			ctx: {
-				...this.ctx("dedup"),
-				verbs: DEDUP_VERBS,
-				resolvableIds: reportable.map((r) => r.id),
-			},
-			tracePath: this.tracePath("dedup"),
-			modelRef: this.opts.models?.dedup,
-			systemPrompt: this.prompts.get("dedup.md"),
-			prompt: [
-				`${reportable.length} confirmed findings from this scan:`,
-				"",
-				wrapUntrusted(this.nonce, "findings", rows),
-				"",
-				"Resolve any duplicates now. If there are none, say so and resolve nothing.",
-			].join("\n"),
+			const after = this.ledger.getCandidate(this.scanId, c.id);
+			if (after && !after.resolution?.attack_path) {
+				// The finding is real — validation said so — but nothing rated it. It
+				// stays in the report as unsettled rather than as a confirmed finding
+				// with no severity behind it.
+				this.ledger.resolveCandidate(this.scanId, c.id, {
+					...(after.resolution ?? { disposition: "needs_follow_up", rationale: "" }),
+					disposition: "needs_follow_up",
+					rationale: "confirmed as real, but the attack-path pass recorded no rating",
+				});
+				this.say(`  ${c.id} → needs_follow_up (confirmed but unrated)`);
+			} else {
+				const sev = after?.resolution?.computed?.severity;
+				this.say(
+					`  ${c.id} → ${after?.resolution?.disposition}${sev ? ` (${sev})` : ""}  ${c.title}`,
+				);
+			}
 		});
-
-		this.bill(result);
-
-		const merged = this.ledger.listCandidates(this.scanId).filter((c) => c.merged_into).length;
-		if (merged > 0) this.say(`dedup: ${merged} row(s) merged`);
-		return merged;
 	}
 
 	// ------------------------------------------------------------- phase 4
@@ -440,6 +553,7 @@ export class Scanner {
 			modelRef: this.opts.model ?? "(default)",
 			promptHash: this.prompts.hash,
 			partitions: this.partitions ? describeDistribution(this.partitions) : undefined,
+			threatModel: this.threatModelNote,
 		});
 
 		const dir = scanArtifactDir(this.scanId);
@@ -457,9 +571,12 @@ export class Scanner {
 		try {
 			await this.inventory();
 			const tm = await this.threatModel();
-			const candidates = await this.discover(tm);
-			await this.investigate(candidates);
-			await this.dedup();
+			await this.discover(tm);
+			// Merge before judging, so no duplicate is investigated twice; judge
+			// before rating, so nothing unreal is ever assigned a severity.
+			await this.reduce();
+			await this.validate();
+			await this.assess();
 			const result = this.report();
 			this.ledger.finishScan(this.scanId, "completed");
 			return result;
@@ -492,8 +609,35 @@ export class Scanner {
 	}
 }
 
-function formatLocation(l: { path: string; start_line: number; end_line: number; symbol?: string }): string {
-	return `${l.path}:${l.start_line}-${l.end_line}${l.symbol ? ` (${l.symbol})` : ""}`;
+function formatLocation(l: {
+	path: string;
+	start_line: number;
+	end_line: number;
+	symbol?: string;
+	role?: string;
+}): string {
+	return (
+		`${l.path}:${l.start_line}-${l.end_line}` +
+		`${l.symbol ? ` (${l.symbol})` : ""}${l.role ? ` [${l.role}]` : ""}`
+	);
+}
+
+/** One candidate as the later phases see it. Always wrapped as untrusted. */
+function describeCandidate(c: Candidate): string {
+	return [
+		`id: ${c.id}`,
+		`title: ${c.title}`,
+		`cwe: ${c.cwe_ids.length ? c.cwe_ids.join(", ") : "(none assigned)"}`,
+		...(c.instance ? [`instance: ${c.instance}`] : []),
+		"locations:",
+		c.locations.map((l) => `  ${formatLocation(l)}`).join("\n"),
+		"",
+		"summary:",
+		c.summary,
+		"",
+		"evidence as filed:",
+		c.evidence,
+	].join("\n");
 }
 
 function git(root: string, args: string[]): string | null {

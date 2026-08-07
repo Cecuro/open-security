@@ -94,13 +94,29 @@ describe("the M0 loop, without a model", () => {
 		ledger.recordTouch(SCAN, "server.js", 1200);
 		ledger.recordTouch(SCAN, "db.js", 380);
 
-		// --- phase 3: investigate ---------------------------------------------
+		// --- phase 3a: validate ------------------------------------------------
+		// No severity here. This pass only decides whether the finding is real.
+		for (const [id, why] of [
+			["c1", "req.query.host at server.js:17 does reach exec at server.js:18."],
+			["c2", "The id parameter is interpolated at db.js:9, as filed."],
+		] as const) {
+			const v = await call({
+				verb: "candidate.validate",
+				id,
+				disposition: "confirmed",
+				rationale: why,
+			});
+			expect(v.disposition).toBe("confirmed");
+		}
+
+		// --- phase 3b: attack path ---------------------------------------------
 		const r1 = await call({
-			verb: "candidate.resolve",
+			verb: "candidate.assess",
 			id: "c1",
-			disposition: "confirmed",
-			rationale:
-				"Traced req.query.host at server.js:17 to exec at server.js:18 with no validation, escaping or allowlist in between.",
+			rationale: "Nothing validates, escapes or allowlists the host between the two.",
+			entry_point: "server.js:17 — GET /api/ping, attacker controls the host query parameter",
+			path: ["server.js:17 host = req.query.host", "server.js:18 exec(`ping -c 1 ${host}`)"],
+			controls: [],
 			impact: "high",
 			vector: "remote",
 			auth_required: "none",
@@ -113,10 +129,12 @@ describe("the M0 loop, without a model", () => {
 		expect(r1.confidence).toBe(0.3);
 
 		const r2 = await call({
-			verb: "candidate.resolve",
+			verb: "candidate.assess",
 			id: "c2",
-			disposition: "confirmed",
 			rationale: "The route requires an Authorization header, so an unauthenticated attacker cannot reach it.",
+			entry_point: "server.js:37 — GET /api/user/:id, behind an Authorization check",
+			path: ["server.js:37 id from the path", "db.js:9 interpolated into the SELECT"],
+			controls: ["server.js:35 requires an Authorization header"],
 			impact: "high",
 			vector: "remote",
 			auth_required: "user",
@@ -143,6 +161,11 @@ describe("the M0 loop, without a model", () => {
 		});
 
 		expect(md).toContain("critical (unproven)");
+		// Both passes are attributed separately in the report.
+		expect(md).toContain("**Validation**");
+		expect(md).toContain("**Attack path**");
+		expect(md).toContain("**No control was found on this path.**");
+		expect(md).toContain("Controls on this path:");
 		expect(md).toContain("`server.js:16`");
 		expect(md).toContain("Command injection in /api/ping");
 		expect(md).toContain("2 / 2 files touched");
@@ -186,7 +209,7 @@ describe("the M0 loop, without a model", () => {
 			locations: [{ path: "server.js", start_line: 1, end_line: 1 }],
 		});
 		await call({
-			verb: "candidate.resolve",
+			verb: "candidate.validate",
 			id: "c1",
 			disposition: "needs_follow_up",
 			rationale: "Could not determine whether this route is mounted.",

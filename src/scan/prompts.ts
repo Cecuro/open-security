@@ -26,11 +26,11 @@ const PACKAGED = join(here, "..", "..", "prompts");
 export const PROMPT_NAMES = [
 	"threat-model.md",
 	"probe.md",
-	"investigate.md",
-	"dedup.md",
+	"reduce.md",
+	"validate.md",
+	"attack-path.md",
 	"refs/counterevidence.md",
-	"agents/tracer.md",
-	"agents/skeptic.md",
+	"agents/delegate.md",
 ] as const;
 
 export type PromptName = (typeof PROMPT_NAMES)[number];

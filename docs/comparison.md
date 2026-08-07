@@ -14,7 +14,7 @@ longer in this repository, and three of its four figures were wrong.
 | Prompt / skill markdown | 4,465 lines across 13 skills + 10 shared references | 360 lines across 7 files |
 | **Total** | **~75,000 lines** | **~3,650 lines** |
 | SQLite tables | 19 | 6 |
-| Agent tool surface | 46 `workbench_cli` subcommands | 5 (`opensec` × 4 verbs, `delegate`) |
+| Agent tool surface | 46 `workbench_cli` subcommands | 6 (`opensec` × 5 verbs, `delegate`) |
 | Tests | not counted | 1,195 lines, 65 tests |
 
 Corrections to the plan's §2 table: they have **19** tables (not 15), **34**
@@ -57,6 +57,8 @@ They also have production usage data. We have one fixture and one self-scan.
 | **A ledger you own** | `~/.opensec/opensec.db`, 6 tables, documented, no service. |
 | **In-process subagents** | Shared budget, shared coverage, verb-scoped. Every published pi subagent extension spawns a process and loses all three. |
 | **Budget that refuses to guess** | `--max-cost` will not start against a model with no price. |
+| **An editable, reusable threat model** | Theirs is regenerated per scan and lives in the workbench. Ours is a markdown file at `~/.opensec/repos/<repo>/threat-model.md`, reused as written on the next scan, overwritten only on request. |
+| **A checked reachability trace** | Both of us split validation from attack-path analysis. Theirs records the path as prose the model writes; ours records `{entry_point, path[], controls[]}` as structure, and rejects `traced_path_no_control` when the path is empty or the controls list is not. |
 | **Size** | 3.6k lines against 75k. Their whole Python layer — 19k lines of workbench scripts — is orchestration we do in ~300 lines of TypeScript, because our agents write through one tool instead of 46 CLI subcommands. |
 
 ## The claim that held up

@@ -139,11 +139,19 @@ describe("degradation is directional", () => {
 		locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
 	};
 
+	const confirm = () =>
+		env.call({
+			verb: "candidate.validate",
+			id: "c1",
+			disposition: "confirmed",
+			rationale: "traced it",
+		});
+
 	it("keeps an unresolvable duplicate as needs_follow_up rather than dropping it", async () => {
 		await env.call(good);
 		const out = JSON.parse(
 			await env.call({
-				verb: "candidate.resolve",
+				verb: "candidate.validate",
 				id: "c1",
 				disposition: "duplicate",
 				duplicate_of: "c99",
@@ -153,14 +161,16 @@ describe("degradation is directional", () => {
 		expect(out.disposition).toBe("needs_follow_up");
 	});
 
-	it("keeps a confirmation with missing severity inputs as needs_follow_up", async () => {
+	it("keeps an assessment with missing severity inputs as needs_follow_up", async () => {
 		await env.call(good);
+		await confirm();
 		const out = JSON.parse(
 			await env.call({
-				verb: "candidate.resolve",
+				verb: "candidate.assess",
 				id: "c1",
-				disposition: "confirmed",
 				rationale: "looks bad",
+				entry_point: "app.js:1",
+				path: ["app.js:1"],
 			}),
 		);
 		expect(out.disposition).toBe("needs_follow_up");
@@ -168,12 +178,15 @@ describe("degradation is directional", () => {
 
 	it("computes severity rather than accepting one", async () => {
 		await env.call(good);
+		await confirm();
 		const out = JSON.parse(
 			await env.call({
-				verb: "candidate.resolve",
+				verb: "candidate.assess",
 				id: "c1",
-				disposition: "confirmed",
 				rationale: "traced it",
+				entry_point: "app.js:1 — attacker controls the id parameter",
+				path: ["app.js:1 id reaches the query"],
+				controls: [],
 				impact: "high",
 				vector: "remote",
 				auth_required: "none",
@@ -187,23 +200,145 @@ describe("degradation is directional", () => {
 		expect(out.confidence).toBe(0.3);
 	});
 
-	it("overrides a suppression the gate does not accept", async () => {
+	it("keeps a finding whose suppression the gate does not accept", async () => {
 		await env.call(good);
+		await confirm();
 		const out = JSON.parse(
 			await env.call({
-				verb: "candidate.resolve",
+				verb: "candidate.assess",
 				id: "c1",
-				disposition: "suppressed",
 				rationale: "probably fine",
+				entry_point: "app.js:1",
+				path: ["app.js:1"],
 				impact: "medium",
 				vector: "remote",
 				auth_required: "none",
 				network_reachable: true,
 				method: "code_reading",
+				suppression: { evidence: "feels minor to me" },
 			}),
 		);
+		// No boolean was set, so nothing was suppressed. Low importance is a low
+		// severity, not a removal.
 		expect(out.disposition).toBe("confirmed");
-		expect(out.notes.join(" ")).toContain("no suppression boolean held up");
+		expect(out.severity).toBe("high");
+	});
+});
+
+describe("the two passes are separate, and the tool enforces it", () => {
+	const good = {
+		verb: "candidate.create",
+		title: "SQLi",
+		summary: "s",
+		evidence: "e",
+		locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
+	};
+
+	it("refuses to rate a candidate no one has validated", async () => {
+		await env.call(good);
+		await expect(
+			env.call({
+				verb: "candidate.assess",
+				id: "c1",
+				rationale: "straight to a severity",
+				impact: "high",
+				method: "code_reading",
+			}),
+		).rejects.toThrow(/not confirmed by validation/);
+	});
+
+	it("refuses to rate a candidate validation threw out", async () => {
+		await env.call(good);
+		await env.call({
+			verb: "candidate.validate",
+			id: "c1",
+			disposition: "not_applicable",
+			rationale: "the query is parameterised at app.js:2",
+		});
+		await expect(
+			env.call({ verb: "candidate.assess", id: "c1", rationale: "x", impact: "high", method: "code_reading" }),
+		).rejects.toThrow(/not confirmed by validation/);
+	});
+
+	it("keeps both passes' rationales instead of overwriting one with the other", async () => {
+		await env.call(good);
+		await env.call({
+			verb: "candidate.validate",
+			id: "c1",
+			disposition: "confirmed",
+			rationale: "the interpolation at app.js:1 is real",
+		});
+		await env.call({
+			verb: "candidate.assess",
+			id: "c1",
+			rationale: "reachable from the public route",
+			entry_point: "app.js:1",
+			path: ["app.js:1"],
+			impact: "high",
+			vector: "remote",
+			auth_required: "none",
+			network_reachable: true,
+			method: "code_reading",
+		});
+		const c = env.ctx.ledger.getCandidate(SCAN, "c1");
+		expect(c?.resolution?.validation?.rationale).toContain("interpolation");
+		expect(c?.resolution?.attack_path?.rationale).toContain("public route");
+		expect(c?.resolution?.computed?.severity).toBe("high");
+	});
+});
+
+describe("traced_path_no_control is checked against the trace", () => {
+	const good = {
+		verb: "candidate.create",
+		title: "SQLi",
+		summary: "s",
+		evidence: "e",
+		locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
+	};
+
+	const assess = async (over: Record<string, unknown>) => {
+		await env.call(good);
+		await env.call({ verb: "candidate.validate", id: "c1", disposition: "confirmed", rationale: "r" });
+		return JSON.parse(
+			await env.call({
+				verb: "candidate.assess",
+				id: "c1",
+				rationale: "r",
+				impact: "high",
+				vector: "remote",
+				auth_required: "none",
+				network_reachable: true,
+				traced_path_no_control: true,
+				method: "code_reading",
+				...over,
+			}),
+		);
+	};
+
+	it("rejects the claim when no path was recorded", async () => {
+		const out = await assess({ entry_point: "app.js:1", path: [] });
+		// Without it, the finding is high rather than critical.
+		expect(out.severity).toBe("high");
+		expect(out.notes.join(" ")).toContain("requires the trace");
+	});
+
+	it("rejects the claim when the trace itself lists controls", async () => {
+		const out = await assess({
+			entry_point: "app.js:1",
+			path: ["app.js:1 → app.js:3"],
+			controls: ["app.js:2 escapes the value"],
+		});
+		expect(out.severity).toBe("high");
+		expect(out.notes.join(" ")).toContain("cannot both be true");
+	});
+
+	it("accepts it when the trace backs it", async () => {
+		const out = await assess({
+			entry_point: "app.js:1",
+			path: ["app.js:1 → app.js:3"],
+			controls: [],
+		});
+		expect(out.severity).toBe("critical");
 	});
 });
 

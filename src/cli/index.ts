@@ -28,7 +28,12 @@ Options
                        the model has no price, since that budget is unenforceable.
   --concurrency <n>    agents in flight at once (default 4)
   --partition-max-files <n>  files per probe before the worklist splits again
+  --refresh-threat-model     rewrite the stored threat model instead of reusing it
   --json               print the findings JSON path only
+
+The threat model for each repository is kept at
+~/.opensec/repos/<repo>/threat-model.md. Edit it — the next scan reads yours as
+written, and only --refresh-threat-model overwrites it.
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -98,7 +103,7 @@ async function main(argv: string[]): Promise<number> {
 		}
 	}
 
-	const known = new Set(["estimate", "json"]);
+	const known = new Set(["estimate", "json", "refresh-threat-model"]);
 	const unknown = Object.keys(opts.bools).find((b) => !known.has(b));
 	if (unknown) {
 		process.stderr.write(`opensec: unknown flag '--${unknown}'\n\n${USAGE}`);
@@ -126,6 +131,7 @@ async function main(argv: string[]): Promise<number> {
 		maxCostUsd,
 		concurrency: numFlag(opts.flags.concurrency),
 		partitionMaxFiles: numFlag(opts.flags["partition-max-files"]),
+		refreshThreatModel: opts.bools["refresh-threat-model"] === true,
 		onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
 	});
 

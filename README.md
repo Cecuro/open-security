@@ -52,32 +52,61 @@ const result = await scanner.run();
 // or drive the spine yourself — phases are individually callable
 const inv = await scanner.inventory();
 const tm = await scanner.threatModel();
-await scanner.investigate(await scanner.discover(tm));
+await scanner.discover(tm);
+await scanner.reduce();
+await scanner.validate();
+await scanner.assess();
+const report = scanner.report();
 ```
 
 ## What it actually does
 
 ```
 0  inventory     rg --files → filter → worklist                   no LLM
-1  threat model  1 agent: entry points, trust boundaries,
+1  threat model  1 agent: entry points, trust boundaries,          cached
                  authn/authz, sensitive assets, external surface
-2  discovery     1 probe (M1: N in parallel), handed a worklist,
+2  discovery     N probes in parallel, each handed a worklist,
                  free to read the whole repo                      no bash
-3  investigate   1 agent per candidate, tries to break it
-4  dedup         1 agent, only when there is more than one row
-5  report        SQLite → markdown + JSON                         no LLM
+3  reduce        identical findings merge in code, for free;
+                 an agent reads only the groups that collide
+4  validate      1 agent per candidate: is this real?
+5  attack path   1 agent per survivor: how far does it reach?
+6  report        SQLite → markdown + JSON                         no LLM
 ```
 
-Agents write through **one tool with four verbs** — `work.next`,
-`candidate.create`, `candidate.resolve`, `lead.record`. File lists, severity
-arithmetic and the report are ordinary TypeScript that cannot drift.
+Agents write through **one tool with five verbs** — `work.next`,
+`candidate.create`, `candidate.validate`, `candidate.assess`, `lead.record`.
+File lists, severity arithmetic and the report are ordinary TypeScript that
+cannot drift.
 
-The probe and investigate agents can also `delegate` one focused question to a
-subagent — a `tracer` that follows a single path, or a `skeptic` that tries to
-refute a claim. Subagents run **in-process**, one level deep, sharing the ledger:
-their reads count toward coverage and their spend counts against `--max-cost`.
-They cannot record findings. They report back, and the agent that delegated stays
-accountable for what gets filed.
+**Validation and rating are separate agents, on purpose.** A reader who has
+already talked themselves into "this is real" is a poor judge of how far it
+actually reaches. Splitting them means most false positives die in a cheap pass
+that has no severity fields to reach for, and the agent that builds the attack
+path starts cold, without the first one's reasoning. It also makes the
+reachability trace checkable: `traced_path_no_control` is one of two routes to
+`critical`, and the tool now rejects it when the recorded path is empty or lists
+controls.
+
+**Dedup is two layers.** Findings with the same class, files, roles and instance
+collapse the moment they are filed, without a model — two probes reaching the
+same conclusion produce one row carrying both their evidence. Only groups that
+collide but are not identical reach an agent, and the test there is remediation
+subsumption: two rows are duplicates only if one patch fixes both. Merged rows
+are kept, never deleted. Finding something twice is evidence about the search,
+not about the finding, so a merged row is validated like any other.
+
+**The threat model is yours.** It is written to
+`~/.opensec/repos/<repo>/threat-model.md` and reused on the next scan of the
+same repository, as written. Edit it — you know which entry points are actually
+exposed and which "sensitive asset" is test data. `--refresh-threat-model`
+regenerates it; nothing else overwrites it.
+
+Any agent can `delegate` a self-contained task to a subagent: a general reviewer
+with a fresh context and the same read-only tools. Subagents run **in-process**,
+one level deep, sharing the ledger — their reads count toward coverage and their
+spend counts against `--max-cost`. They cannot record findings. They report back,
+and the agent that delegated stays accountable for what gets filed.
 
 ## Three things worth knowing before you trust the output
 

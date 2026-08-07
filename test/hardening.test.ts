@@ -10,9 +10,10 @@ import { describe, expect, it } from "vitest";
 
 import {
 	createOpensecTool,
-	INVESTIGATE_VERBS,
 	PROBE_VERBS,
+	REDUCE_VERBS,
 	type RunContext,
+	VALIDATE_VERBS,
 } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { renderMarkdown } from "../src/scan/render.js";
@@ -102,27 +103,12 @@ describe("line counting", () => {
 describe("duplicate merging cannot erase findings", () => {
 	it("refuses a mutual merge, which would remove BOTH rows from the report", async () => {
 		const env = setup();
-		await env.call(env.candidate({ title: "first" }));
-		await env.call(env.candidate({ title: "second" }));
-
-		const confirm = (id: string) =>
-			env.call({
-				verb: "candidate.resolve",
-				id,
-				disposition: "confirmed",
-				rationale: "traced",
-				impact: "high",
-				vector: "remote",
-				auth_required: "none",
-				network_reachable: true,
-				traced_path_no_control: true,
-				method: "code_reading",
-			});
-		await confirm("c1");
-		await confirm("c2");
+		// Different instances, so identity does not fold them together first.
+		await env.call(env.candidate({ title: "first", instance: "param=host" }));
+		await env.call(env.candidate({ title: "second", instance: "param=port" }));
 
 		const first = await env.call({
-			verb: "candidate.resolve",
+			verb: "candidate.validate",
 			id: "c1",
 			disposition: "duplicate",
 			duplicate_of: "c2",
@@ -132,7 +118,7 @@ describe("duplicate merging cannot erase findings", () => {
 
 		// The cycle-closing half must not be accepted.
 		const second = await env.call({
-			verb: "candidate.resolve",
+			verb: "candidate.validate",
 			id: "c2",
 			disposition: "duplicate",
 			duplicate_of: "c1",
@@ -141,7 +127,7 @@ describe("duplicate merging cannot erase findings", () => {
 		expect(second.disposition).toBe("needs_follow_up");
 
 		// c2 survives, so the report is not empty.
-		const live = env.ledger.listCandidates("s").filter((c) => !c.merged_into);
+		const live = env.ledger.listLiveCandidates("s");
 		expect(live.map((c) => c.id)).toEqual(["c2"]);
 	});
 });
@@ -269,7 +255,7 @@ describe("text helpers", () => {
 });
 
 describe("parallel workers cannot reach into each other", () => {
-	it("stops a probe from resolving a candidate — that is investigate's job", async () => {
+	it("stops a probe from judging a candidate — that is validate's job", async () => {
 		const env = setup();
 		await env.call(env.candidate());
 		const probe: RunContext = { ...env.ctx, workerId: "probe-2", verbs: PROBE_VERBS };
@@ -277,7 +263,7 @@ describe("parallel workers cannot reach into each other", () => {
 		await expect(
 			tool.execute(
 				"t",
-				{ verb: "candidate.resolve", id: "c1", disposition: "not_applicable", rationale: "x" } as never,
+				{ verb: "candidate.validate", id: "c1", disposition: "not_applicable", rationale: "x" } as never,
 				undefined,
 				undefined,
 				{} as never,
@@ -285,26 +271,56 @@ describe("parallel workers cannot reach into each other", () => {
 		).rejects.toThrow(/not available to probe-2/);
 	});
 
-	it("stops an investigate agent from disposing of a row it was never given", async () => {
+	it("stops a validate agent from disposing of a row it was never given", async () => {
 		const env = setup();
-		await env.call(env.candidate({ title: "mine" }));
-		await env.call(env.candidate({ title: "someone else's" }));
+		await env.call(env.candidate({ title: "mine", instance: "a" }));
+		await env.call(env.candidate({ title: "someone else's", instance: "b" }));
 		const inv: RunContext = {
 			...env.ctx,
-			workerId: "investigate-c1",
-			verbs: INVESTIGATE_VERBS,
+			workerId: "validate-c1",
+			verbs: VALIDATE_VERBS,
 			resolvableIds: ["c1"],
 		};
 		const tool = createOpensecTool(inv);
 		const resolve = (id: string) =>
 			tool.execute(
 				"t",
-				{ verb: "candidate.resolve", id, disposition: "not_applicable", rationale: "x" } as never,
+				{ verb: "candidate.validate", id, disposition: "not_applicable", rationale: "x" } as never,
 				undefined,
 				undefined,
 				{} as never,
 			);
-		await expect(resolve("c2")).rejects.toThrow(/may not resolve 'c2'/);
+		await expect(resolve("c2")).rejects.toThrow(/may not write to 'c2'/);
 		await expect(resolve("c1")).resolves.toBeDefined();
+	});
+
+	it("stops the reducer from doing anything but merging", async () => {
+		const env = setup();
+		await env.call(env.candidate({ title: "one", instance: "a" }));
+		await env.call(env.candidate({ title: "two", instance: "b" }));
+		const reducer: RunContext = {
+			...env.ctx,
+			workerId: "reduce-1",
+			verbs: REDUCE_VERBS,
+			resolvableIds: ["c1", "c2"],
+			dispositions: ["duplicate"],
+		};
+		const tool = createOpensecTool(reducer);
+		const call = (p: object) =>
+			tool.execute("t", p as never, undefined, undefined, {} as never);
+
+		// Nothing here has been validated by anyone, so a reducer marking one
+		// not_applicable would drop a finding no one ever read.
+		await expect(
+			call({ verb: "candidate.validate", id: "c1", disposition: "not_applicable", rationale: "x" }),
+		).rejects.toThrow(/may only set disposition: duplicate/);
+		// It also cannot rate anything.
+		await expect(
+			call({ verb: "candidate.assess", id: "c1", rationale: "x", impact: "high", method: "code_reading" }),
+		).rejects.toThrow(/not available to reduce-1/);
+		// Merging is allowed.
+		await expect(
+			call({ verb: "candidate.validate", id: "c1", disposition: "duplicate", duplicate_of: "c2", rationale: "one patch" }),
+		).resolves.toBeDefined();
 	});
 });
