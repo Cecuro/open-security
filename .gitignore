@@ -152,3 +152,6 @@ dist
 .dev.vars.*
 *.env
 opensec.env
+
+# Claude Code worktrees: full checkouts of this repo, never repo content.
+.claude/worktrees/
