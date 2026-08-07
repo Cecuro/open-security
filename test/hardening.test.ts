@@ -116,15 +116,18 @@ describe("duplicate merging cannot erase findings", () => {
 		});
 		expect(first.disposition).toBe("duplicate");
 
-		// The cycle-closing half must not be accepted.
-		const second = await env.call({
-			verb: "candidate.validate",
-			id: "c2",
-			disposition: "duplicate",
-			duplicate_of: "c1",
-			rationale: "one patch",
-		});
-		expect(second.disposition).toBe("needs_follow_up");
+		// The cycle-closing half must not be accepted, and it must not consume
+		// c2's validation slot either — c2 still needs a real validation pass.
+		await expect(
+			env.call({
+				verb: "candidate.validate",
+				id: "c2",
+				disposition: "duplicate",
+				duplicate_of: "c1",
+				rationale: "one patch",
+			}),
+		).rejects.toThrow(/itself merged into 'c2'/);
+		expect(env.ledger.getCandidate("s", "c2")?.resolution).toBeUndefined();
 
 		// c2 survives, so the report is not empty.
 		const live = env.ledger.listLiveCandidates("s");
@@ -371,5 +374,50 @@ describe("parallel workers cannot reach into each other", () => {
 		await expect(
 			call({ verb: "candidate.validate", id: "c1", disposition: "duplicate", duplicate_of: "c2", rationale: "one patch" }),
 		).resolves.toBeDefined();
+	});
+
+	it("stops the reducer from merging into a row outside its group", async () => {
+		const env = setup();
+		await env.call(env.candidate({ title: "one", instance: "a" }));
+		await env.call(env.candidate({ title: "two", instance: "b" }));
+		await env.call(env.candidate({ title: "elsewhere", instance: "c" }));
+		const reducer: RunContext = {
+			...env.ctx,
+			workerId: "reduce-1",
+			verbs: REDUCE_VERBS,
+			resolvableIds: ["c1", "c2"],
+			dispositions: ["duplicate"],
+		};
+		const tool = createOpensecTool(reducer);
+		await expect(
+			tool.execute(
+				"t",
+				{ verb: "candidate.validate", id: "c1", disposition: "duplicate", duplicate_of: "c3", rationale: "x" } as never,
+				undefined,
+				undefined,
+				{} as never,
+			),
+		).rejects.toThrow(/'c3' is not in your group/);
+		expect(env.ledger.getCandidate("s", "c1")?.resolution).toBeUndefined();
+	});
+});
+
+describe("the tool describes only the verbs a worker may call", () => {
+	it("shows a reducer candidate.validate and nothing else", () => {
+		const env = setup();
+		const tool = createOpensecTool({ ...env.ctx, verbs: REDUCE_VERBS });
+		expect(tool.description).toContain("candidate.validate");
+		expect(tool.description).not.toContain("work.next");
+		expect(tool.description).not.toContain("candidate.create");
+	});
+
+	it("shows a probe its three verbs and not the judging ones", () => {
+		const env = setup();
+		const tool = createOpensecTool({ ...env.ctx, verbs: PROBE_VERBS });
+		expect(tool.description).toContain("work.next");
+		expect(tool.description).toContain("candidate.create");
+		expect(tool.description).toContain("lead.record");
+		expect(tool.description).not.toContain("candidate.validate");
+		expect(tool.description).not.toContain("candidate.assess");
 	});
 });

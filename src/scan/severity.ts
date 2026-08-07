@@ -46,7 +46,10 @@ export function suppressionClaim(s: Suppression | undefined): string | null {
 	return null;
 }
 
-const GROUNDS = new Set(["code_evidence", "policy_flag"]);
+// code_evidence only. There is no mechanism for an operator to declare policy,
+// so accepting a "policy_flag" source would let an agent assert a declaration
+// nobody made. Add the value back when a real --accept-risk flag exists.
+const GROUNDS = new Set(["code_evidence"]);
 
 export function reportabilityGate(s: Suppression | undefined): string | null {
 	const claim = suppressionClaim(s);

@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import { AgentRunner, type AgentRunResult, pricingOf, type RunArgs } from "../agents/session.js";
 import type { SubagentDeps } from "../agents/subagent.js";
@@ -31,9 +31,6 @@ import type { Candidate, Coverage, Profile } from "../types.js";
 export interface ScannerOptions {
 	repo: string;
 	model?: string;
-	models?: Partial<
-		Record<"threatModel" | "discovery" | "reduce" | "validate" | "attackPath", string>
-	>;
 	db?: string;
 	profile?: Profile;
 	promptsDir?: string;
@@ -93,25 +90,16 @@ export class Scanner {
 		const ledger = Ledger.open(opts.db);
 		const runner = await AgentRunner.create({ repoRoot, modelRef: opts.model });
 
-		// Resolve every model up front — the default and each per-phase override —
-		// so a bad ref fails here, not mid-scan after money is spent. The pricing
-		// check must cover the overrides too: an unpriced model reports cost 0, so
-		// under a --max-cost ceiling it would spend without ever counting.
-		const refs: Array<[phase: string, ref: string | undefined]> = [
-			["default", undefined],
-			...Object.entries(opts.models ?? {}).filter(
-				(e): e is [string, string] => typeof e[1] === "string",
-			),
-		];
-		for (const [phase, ref] of refs) {
-			const model = runner.resolveModel(ref).model;
-			if (typeof opts.maxCostUsd === "number" && !pricingOf(model)) {
-				throw new Error(
-					`--max-cost was given but '${model.provider}/${model.id}' (${phase} model) has ` +
-						`no pricing entry, so spend cannot be measured. Use --max-cost none to run ` +
-						`without a ceiling, or add a price for this model.`,
-				);
-			}
+		// Resolve the model up front so a bad ref fails here, not mid-scan after
+		// money is spent. An unpriced model reports cost 0, so under a --max-cost
+		// ceiling it would spend without ever counting.
+		const model = runner.resolveModel(undefined).model;
+		if (typeof opts.maxCostUsd === "number" && !pricingOf(model)) {
+			throw new Error(
+				`--max-cost was given but '${model.provider}/${model.id}' has no pricing ` +
+					`entry, so spend cannot be measured. Use --max-cost none to run without ` +
+					`a ceiling, or add a price for this model.`,
+			);
 		}
 
 		const repoId = ledger.upsertRepo(repoRoot, repoName, git(repoRoot, ["config", "--get", "remote.origin.url"]));
@@ -265,7 +253,6 @@ export class Scanner {
 			ctx: this.ctx("threat-model"),
 			onEvent: (m) => this.say(m),
 			tracePath: this.tracePath("threat-model"),
-			modelRef: this.opts.models?.threatModel,
 			systemPrompt: this.prompts.get("threat-model.md"),
 			prompt: [
 				`Repository: ${this.repoName}`,
@@ -309,7 +296,12 @@ export class Scanner {
 		const tm = threatModel ?? this.ledger.getThreatModel(this.scanId) ?? "";
 		this.checkBudget();
 
-		const parts = this.partitions ?? [{ id: 0, paths: [], bytes: 0 }];
+		const parts = this.partitions;
+		if (!parts) {
+			// Without this, a discover() with no inventory scans zero files and
+			// reports a clean completed scan.
+			throw new Error("discover() before inventory(): nothing is in scope yet. run() orders the phases.");
+		}
 		this.say(`discovery: ${describeDistribution(parts)}, ${this.concurrency} at a time`);
 
 		await mapConcurrent(parts, this.concurrency, async (part) => {
@@ -320,7 +312,6 @@ export class Scanner {
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
-				modelRef: this.opts.models?.discovery,
 				systemPrompt: this.prompts.get("probe.md"),
 				prompt: [
 					`You are ${workerId}. ${parts.length > 1 ? `There are ${parts.length} probes on this repository; you are accountable for your own worklist only, but you may read anything.` : ""}`,
@@ -369,7 +360,6 @@ export class Scanner {
 				},
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
-				modelRef: this.opts.models?.reduce,
 				systemPrompt: this.prompts.get("reduce.md"),
 				prompt: [
 					`${group.length} candidates in the same class and the same file.`,
@@ -410,7 +400,6 @@ export class Scanner {
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
-				modelRef: this.opts.models?.validate,
 				systemPrompt: this.prompts.get("validate.md"),
 				prompt: [
 					`Candidate ${c.id}, filed by ${c.worker_id}.`,
@@ -456,7 +445,6 @@ export class Scanner {
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
-				modelRef: this.opts.models?.attackPath,
 				systemPrompt: [
 					this.prompts.get("attack-path.md"),
 					"",

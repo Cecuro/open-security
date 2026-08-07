@@ -57,7 +57,7 @@ export interface Suppression {
 	privilege_delta_is_the_bug?: boolean;
 	precondition_unreachable?: boolean;
 	evidence?: string;
-	source?: "policy_flag" | "code_evidence" | "repo_claim";
+	source?: "code_evidence" | "repo_claim";
 }
 
 export interface SeverityInputs {
@@ -122,7 +122,7 @@ export interface Resolution {
 export interface Lead {
 	worker_id: string;
 	text: string;
-	status: "open" | "dead_end" | "became_candidate";
+	status: "open" | "dead_end";
 }
 
 export interface ScanFile {

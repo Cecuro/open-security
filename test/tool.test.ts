@@ -147,18 +147,21 @@ describe("degradation is directional", () => {
 			rationale: "traced it",
 		});
 
-	it("keeps an unresolvable duplicate as needs_follow_up rather than dropping it", async () => {
+	it("refuses an unresolvable duplicate and records nothing", async () => {
 		await env.call(good);
-		const out = JSON.parse(
-			await env.call({
+		await expect(
+			env.call({
 				verb: "candidate.validate",
 				id: "c1",
 				disposition: "duplicate",
 				duplicate_of: "c99",
 				rationale: "same as the other one",
 			}),
-		);
-		expect(out.disposition).toBe("needs_follow_up");
+		).rejects.toThrow(/no candidate 'c99'/);
+		// Writing anything here would give c1 a validation record it never
+		// earned, and the validate pass skips rows that already have one.
+		const c1 = env.ctx.ledger.getCandidate("scan-test", "c1");
+		expect(c1?.resolution).toBeUndefined();
 	});
 
 	it("keeps an assessment with missing severity inputs as needs_follow_up", async () => {
