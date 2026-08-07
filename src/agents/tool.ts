@@ -59,6 +59,23 @@ export interface RunContext {
 	/** How many subagents deep this worker is. 0 is a phase agent. */
 	depth?: number;
 	/**
+	 * Where this worker's oversized tool results are spilled, and the only path
+	 * outside the repository it may read.
+	 *
+	 * Truncation is the right answer for a tool you can cheaply call again:
+	 * `read` at `offset=401` returns the rest of the same file, so paging costs a
+	 * turn and nothing else. It is the wrong answer for anything whose second run
+	 * is not the first one continued — a shell command with side effects, or a
+	 * subagent, which costs a full agent run and answers differently each time.
+	 * Those must execute once, keep everything, and let the agent page the record.
+	 *
+	 * Per worker, not per scan: this directory sits beside other agents'
+	 * transcripts and findings, and a probe that could read the whole scan
+	 * directory could read another probe's work — the same cross-worker leak the
+	 * verb scoping exists to prevent.
+	 */
+	overflowDir?: string;
+	/**
 	 * Which partition this worker owns. Undefined means the whole scan, which is
 	 * what every phase after discovery gets — only probes are partitioned.
 	 */

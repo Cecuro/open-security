@@ -156,7 +156,16 @@ export class Scanner {
 			profile: this.profile,
 			ledger: this.ledger,
 			nonce: this.nonce,
+			overflowDir: this.overflowDir(workerId),
 		};
+	}
+
+	/**
+	 * Per worker, so spilling an oversized tool result never becomes a way to
+	 * read another agent's transcripts or findings — those live one level up.
+	 */
+	private overflowDir(workerId: string): string {
+		return join(scanArtifactDir(this.scanId), "overflow", workerId.replaceAll("/", "_"));
 	}
 
 	private get concurrency(): number {
@@ -277,7 +286,8 @@ export class Scanner {
 		const { files, total } = this.ledger.listWork(this.scanId, 200, 0);
 		const result = await this.runner.run({
 			ctx: this.ctx("threat-model"),
-			tracePath: this.tracePath("threat-model"),
+			onEvent: (m) => this.say(m),
+				tracePath: this.tracePath("threat-model"),
 			modelRef: this.opts.models?.threatModel,
 			systemPrompt: this.prompts.get("threat-model.md"),
 			prompt: [
@@ -333,6 +343,7 @@ export class Scanner {
 			const workerId = `probe-${part.id + 1}`;
 			const result = await this.runner.run({
 				ctx: { ...this.ctx(workerId), partitionId: part.id, verbs: PROBE_VERBS },
+				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				modelRef: this.opts.models?.discovery,
@@ -399,6 +410,7 @@ export class Scanner {
 					resolvableIds: group.map((c) => c.id),
 					dispositions: ["duplicate"],
 				},
+				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				modelRef: this.opts.models?.reduce,
 				systemPrompt: this.prompts.get("reduce.md"),
@@ -444,6 +456,7 @@ export class Scanner {
 					// let one agent that never saw the other row delete it.
 					dispositions: ["confirmed", "not_applicable", "needs_follow_up"],
 				},
+				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				modelRef: this.opts.models?.validate,
@@ -504,6 +517,7 @@ export class Scanner {
 					verbs: ASSESS_VERBS,
 					resolvableIds: [c.id],
 				},
+				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				modelRef: this.opts.models?.attackPath,

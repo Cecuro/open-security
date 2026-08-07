@@ -28,6 +28,9 @@
  * resumable/background agents (a scan phase is not an interactive session).
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -39,6 +42,22 @@ import { type RunContext, SUBAGENT_VERBS } from "./tool.js";
 export const MAX_DEPTH = 1;
 export const MAX_CONCURRENT = 4;
 export const MAX_PER_PARENT = 8;
+
+/**
+ * How much of a subagent's report goes straight into its parent's context.
+ *
+ * A delegated answer cannot be truncated the way a file read can. `read` at
+ * `offset=401` returns the rest of the same file; re-running a subagent costs
+ * another full agent run and produces a *different* answer, not the remainder
+ * of this one. So the whole report is written down once and the parent is given
+ * the head plus a path it can page with `read`.
+ *
+ * 16 KB rather than pi's 50 KB because this is prose, not source: a subagent
+ * that needs more than about four thousand tokens to answer one question has
+ * usually been asked the wrong question, and the parent delegated precisely to
+ * avoid holding that much.
+ */
+export const MAX_INLINE_REPORT_BYTES = 16 * 1024;
 
 const ParamsSchema = Type.Object(
 	{
@@ -148,15 +167,11 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 				});
 
 				deps.bill(result);
+				const report =
+					result.text.trim() ||
+					"(the subagent returned nothing — treat this as unsettled, not as a negative result)";
 				return {
-					content: [
-						{
-							type: "text" as const,
-							text:
-								result.text.trim() ||
-								"(the subagent returned nothing — treat this as unsettled, not as a negative result)",
-						},
-					],
+					content: [{ type: "text" as const, text: spill(report, workerId, parent) }],
 					details: undefined,
 				};
 			} finally {
@@ -164,4 +179,44 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 			}
 		},
 	});
+}
+
+/**
+ * Keep the whole report, inline the head, and hand back a path.
+ *
+ * The parent is told the byte count and how to continue, because a truncation
+ * the reader cannot see is worse than no answer at all: it looks like a
+ * complete finding that happens to stop mid-sentence. Falling back to plain
+ * truncation when the spill fails is deliberate — a scan that worked must not
+ * die because a cache directory is read-only — but it says so in the text.
+ */
+function spill(report: string, workerId: string, parent: RunContext): string {
+	const bytes = Buffer.byteLength(report, "utf8");
+	if (bytes <= MAX_INLINE_REPORT_BYTES || !parent.overflowDir) {
+		return bytes <= MAX_INLINE_REPORT_BYTES
+			? report
+			: `${report.slice(0, MAX_INLINE_REPORT_BYTES)}\n\n[Truncated: ${bytes} bytes of report, ` +
+					`${MAX_INLINE_REPORT_BYTES} shown. The rest could not be written down, so it is lost — ` +
+					`delegate a narrower question rather than assuming this answer is complete.]`;
+	}
+
+	const file = join(parent.overflowDir, `${workerId.replaceAll("/", "_")}.md`);
+	try {
+		mkdirSync(parent.overflowDir, { recursive: true, mode: 0o700 });
+		writeFileSync(file, report, { encoding: "utf8", mode: 0o600 });
+	} catch {
+		return (
+			`${report.slice(0, MAX_INLINE_REPORT_BYTES)}\n\n[Truncated: ${bytes} bytes of report, ` +
+			`${MAX_INLINE_REPORT_BYTES} shown, and it could not be written down. Delegate a narrower ` +
+			`question rather than assuming this answer is complete.]`
+		);
+	}
+
+	return (
+		`${report.slice(0, MAX_INLINE_REPORT_BYTES)}\n\n` +
+		`[This report is ${bytes} bytes; the first ${MAX_INLINE_REPORT_BYTES} are above. ` +
+		`The whole thing was written to ${file} — read it with offset to continue. ` +
+		`Do NOT delegate again to see the rest: a second subagent answers a second time, ` +
+		`it does not resume this one.]`
+	);
 }

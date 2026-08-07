@@ -71,6 +71,8 @@ export interface RunArgs {
 	 * always failing.
 	 */
 	subagents?: SubagentDeps;
+	/** Progress and warnings. The scan's transcript is the only debugging record. */
+	onEvent?: (msg: string) => void;
 }
 
 /**
@@ -217,8 +219,14 @@ export class AgentRunner {
 					mkdirSync(dirname(args.tracePath), { recursive: true, mode: 0o700 });
 					session.exportToJsonl(args.tracePath);
 					chmodSync(args.tracePath, 0o600);
-				} catch {
-					/* ignore */
+				} catch (err) {
+					// Still best effort — a scan that worked must not fail because a
+					// directory is read-only. But it says so: sessions are in-memory, so
+					// a silent failure here means the only record of what this agent did
+					// is gone, and "we have traces" quietly stops being true.
+					args.onEvent?.(
+						`  warning: no transcript for ${ctx.workerId} — ${(err as Error).message}`,
+					);
 				}
 			}
 			unsubscribe();
@@ -233,6 +241,17 @@ type AnyToolDef = ToolDefinition<TSchema, unknown, unknown>;
  * pi's file tools take the repo root only as a base for relative paths — the
  * schemas accept absolute paths and resolve them anywhere on the host. Plan §5
  * says reads are confined to the repo root, so confine them.
+ *
+ * Exactly one path outside the repository is readable: this worker's own
+ * overflow directory, where a tool result too large to inline was spilled. That
+ * is what makes "run once, page the record" possible for tools whose second run
+ * is not the first one continued. It is per worker, so it does not become a
+ * window onto another agent's traces or findings.
+ *
+ * M2 note: pi's own bash tool spills to `os.tmpdir()` and hands the model
+ * `Full output: /tmp/…`. That path is not readable here and must be routed into
+ * `overflowDir` when bash is wired up, or the agent will be told where its
+ * output is and then refused when it looks.
  */
 function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 	const inner = def.execute.bind(def);
@@ -240,15 +259,29 @@ function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 		...def,
 		async execute(id, params, signal, onUpdate, extCtx) {
 			const path = (params as { path?: unknown } | undefined)?.path;
-			if (typeof path === "string" && path.length > 0 && !withinRepo(ctx.repoRoot, path)) {
+			if (typeof path === "string" && path.length > 0 && !readableFrom(ctx, path)) {
 				throw new Error(
 					`'${path}' is outside the repository under review. ` +
-						`This scan may only read inside ${ctx.repoRoot}.`,
+						`This scan may only read inside ${ctx.repoRoot}` +
+						`${ctx.overflowDir ? ` and ${ctx.overflowDir}` : ""}.`,
 				);
 			}
 			return inner(id, params, signal, onUpdate, extCtx);
 		},
 	} as AnyToolDef;
+}
+
+/**
+ * The read boundary, as one predicate, so it can be tested without a model.
+ * Exported for that reason and no other — it is the check that a repository
+ * under review cannot read `~/.ssh`, and it has been quietly wrong twice.
+ */
+export function readableFrom(
+	ctx: Pick<RunContext, "repoRoot" | "overflowDir">,
+	path: string,
+): boolean {
+	if (withinRepo(ctx.repoRoot, path)) return true;
+	return ctx.overflowDir !== undefined && withinRepo(ctx.overflowDir, path);
 }
 
 /**
