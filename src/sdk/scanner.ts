@@ -331,7 +331,9 @@ export class Scanner {
 					wrapUntrusted(this.nonce, "threat-model", tm),
 					"",
 					'Begin by calling opensec({ verb: "work.next" }) to get your worklist.',
-					"Page through it until remaining is 0, then report.",
+					"Page through it until remaining is 0. That covers the list; it is not",
+					"where you stop. Keep going until a pass turns up nothing you had not",
+					"already recorded, then report.",
 				].join("\n"),
 			});
 			this.say(`  ${workerId} done`);
