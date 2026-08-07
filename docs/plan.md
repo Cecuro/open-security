@@ -70,8 +70,13 @@ instance-splitting rules are kept near-verbatim (Apache-2.0, with `NOTICE`).
 | Python | 34 scripts, 19k LOC | none |
 | Prompt | 4,465 lines | 360 |
 
-Those figures are counted, not recalled — see [comparison](comparison.md), which
-also lists what they have and we do not.
+Those figures are counted, not recalled — measured against a shallow clone of
+`openai/codex-security` on 2026-08-06. Ordered by how much it would hurt a real
+user, what they have and we do not: remediation (`fix-finding` generates a
+patch), hardening proposals, ticket intake (Jira, GitHub advisories), security
+policy as a first-class object, diff scans, deep mode, SARIF, multi-target
+workspaces — and ~60 bullets of family-specific discovery heuristics against our
+one short general prompt. That last one is §10's bet, and it is the big one.
 
 - **Any model, per phase**, and nothing gated.
 - **Partitioned accountability, not partitioned reading.** Their subagents get
@@ -162,8 +167,19 @@ not a merge**, since `execute` and `open` collide constantly. The partition size
 distribution prints in the scan header, because one probe owning 300 files is a run
 whose coverage claim is worth less.
 
-**Validation and attack-path are one session, two records.** Splitting them meant two
-agents loading the same candidate, code and repro.
+**Validation and attack-path are two sessions.** ~~One session, two records —
+splitting them meant two agents loading the same candidate, code and repro.~~
+**Reversed in `74888df`, and the code is now the authority here.** Paying twice
+to load the candidate is real but small; what it buys is larger. A reader who
+has already talked themselves into "this is real" is a poor judge of how far it
+reaches, so the attack-path agent starts cold, without the first one's
+reasoning. Most false positives then die in a pass that has no severity fields
+to reach for and never costs the second agent at all. It also made reachability
+a structure — `{entry_point, path[], controls[]}` — which is what allows
+`traced_path_no_control`, one of two routes to `critical`, to be checked against
+the trace instead of trusted. Measured on the fixture: the attack-path agent
+found an auth check the validating agent had waved past, listed it, and the
+finding came out `medium` rather than `critical`.
 
 **Dedup.** Exact `(path, line, cwe)` never fires — rounds cite different lines of the
 same function and CWE assignment legitimately varies (CWE-22/-23/-36). Cheap pass is
@@ -456,14 +472,27 @@ would constrain the single-writer design).
 
 | # | Deliverable | Done when |
 |---|---|---|
-| **M0** | **Walking skeleton.** Inventory → threat model → **one** probe, no partitioning → investigate → markdown. SQLite, the write tool, `work.next`, computed severity, static profile | One command on a known-vulnerable repo prints a finding with file:line — the pi-session + tool + SQLite + renderer loop is proven |
-| **M1** | Fan-out and accounting: partitioning, N probes, fragment join, trace coverage, surfaces ledger, dedup, SARIF | A clean-machine install scans a 300-file repo with 8 probes and reports coverage it can defend |
+| **M0** | ✅ **Done** (`d641d1a`). Walking skeleton: inventory → threat model → probe → validate → markdown. SQLite, the write tool, `work.next`, computed severity, static profile | One command on a known-vulnerable repo prints a finding with file:line — the pi-session + tool + SQLite + renderer loop is proven |
+| **M1** | 🔨 **In progress.** Done: partitioning (cheap version — sorted chunking, not import-graph clusters), N probes, trace coverage, dedup (both layers, `74888df`). **Left: SARIF, the `surfaces` ledger, fragment join.** | A clean-machine install scans a 300-file repo with 8 probes and reports coverage it can defend |
 | **M2** | Container + `--profile auto\|container\|static` | Crashing PoCs; CI can require the sandbox |
 | **M3** | Benchmark: execution oracle, temporal holdout, published results | We can state recall@N and sampled precision, per model |
 | **M4** | `opensec mcp` + `opensec serve` | Claude Code can scan and triage without leaving the editor |
 | M5 | `--diff`, `--fail-on`, `--baseline`, GitHub Action | A PR check that comments only CONFIRMED findings |
 | M6 | fingerprints + `opensec compare` | Triage survives a re-scan; new/persisting/resolved |
 | M7 | Deep mode saturation loop + presets from M3 | `deep` terminates `saturated` or `capped` as a checked assertion |
+
+**Three M1 items are independent and can be picked up in parallel:** SARIF is
+self-contained (findings.json → SARIF, no agent involved); the `surfaces` ledger
+is the third coverage number, derived from candidate outcomes with no extra
+model call; fragment join is newly unblocked, since `role: source` / `role: sink`
+did not exist until `74888df`. The import-graph upgrade to partitioning is a
+fourth, and the least urgent — the cheap version measurably works.
+
+**Before any of them:** nothing has scanned a serious third-party codebase yet.
+Every finding so far has been about opensec's own plumbing. §10's bet is that a
+short general prompt travels where their ~60 bullets of family-specific
+heuristics do, and one scan of a real repo tests it for about a dollar. If the
+bet is wrong it changes what M1 should contain, so it is worth doing first.
 
 **v1 = M0–M4.** One rule behind the ordering: nothing claims evidence it doesn't
 have. The benchmark precedes deep mode and presets, because "repeat until saturated"
