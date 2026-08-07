@@ -740,8 +740,16 @@ function requireText(v: unknown, field: string): string {
  * trust boundary, and strip control characters so findings cannot rewrite a
  * terminal on the way out.
  */
-export function sanitize(ctx: Pick<RunContext, "nonce">, text: string): string {
+export function sanitize(
+	ctx: Pick<RunContext, "nonce">,
+	text: string,
+	// The default bounds a single field in the ledger. Callers that keep the full
+	// text somewhere durable and bound the *inlined* part separately — the
+	// subagent spill — pass Infinity, because truncating here would discard the
+	// tail before it is ever written down.
+	limit = 20000,
+): string {
 	return redactSecrets(
 		stripControlChars(text.replaceAll(ctx.nonce, "[nonce-stripped]")),
-	).slice(0, 20000);
+	).slice(0, limit);
 }

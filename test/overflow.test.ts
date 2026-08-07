@@ -41,7 +41,10 @@ function setup(reportText: string) {
 		repoRoot: root,
 		profile: "static",
 		ledger,
-		nonce: "N",
+		// A realistic nonce. `randomBytes(9).toString("hex")` in a real run — a
+		// one-character nonce would have sanitize() strip that letter out of
+		// ordinary prose, which says nothing about the code.
+		nonce: "a1b2c3d4e5f60718293a",
 		overflowDir,
 	};
 

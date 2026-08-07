@@ -14,7 +14,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { AgentRunner, pricingOf } from "../agents/session.js";
+import { AgentRunner, type AgentRunResult, pricingOf, type RunArgs } from "../agents/session.js";
 import type { SubagentDeps } from "../agents/subagent.js";
 import {
 	ASSESS_VERBS,
@@ -59,6 +59,12 @@ export interface ScannerOptions {
 	partitionMaxFiles?: number;
 	/** How many agents run at once, across probes and per-candidate passes. */
 	concurrency?: number;
+	/**
+	 * Turns one agent may take before it is stopped. The spend ceiling is only
+	 * checked between agent runs, so without this a single looping agent has
+	 * nothing to stop it. Defaults to `DEFAULT_MAX_TURNS`.
+	 */
+	maxTurns?: number;
 	/**
 	 * Regenerate the stored threat model instead of reusing it. The stored one is
 	 * a file the user is invited to edit, so overwriting it is never implicit.
@@ -181,6 +187,27 @@ export class Scanner {
 	}
 
 	/**
+	 * Every phase agent goes through here: it applies the turn ceiling, bills the
+	 * run, and says so when an agent was stopped rather than finished. Silence
+	 * about a truncated agent would be the scan overclaiming — the coverage
+	 * numbers would show the gap, but nothing would say why it is there.
+	 */
+	private async runAgent(args: RunArgs): Promise<AgentRunResult> {
+		const result = await this.runner.run({
+			...args,
+			maxTurns: args.maxTurns ?? this.opts.maxTurns,
+		});
+		this.bill(result);
+		if (result.stoppedAtTurnLimit) {
+			this.say(
+				`  ${args.ctx.workerId} hit the turn limit and was stopped — its work so far is ` +
+					`recorded, but it did not finish. Raise --max-turns if this is real work.`,
+			);
+		}
+		return result;
+	}
+
+	/**
 	 * Handed to the phases that benefit from delegation. threat-model and dedup
 	 * do not get it: one is orientation, the other is a comparison over rows that
 	 * are already in front of it.
@@ -188,7 +215,9 @@ export class Scanner {
 	private subagentDeps(): SubagentDeps {
 		return {
 			prompts: this.prompts,
-			run: (a) => this.runner.run(a),
+			// Subagents get the ceiling too: a cap the parent can escape by
+			// delegating is not a cap.
+			run: (a) => this.runner.run({ ...a, maxTurns: this.opts.maxTurns }),
 			checkBudget: () => this.checkBudget(),
 			bill: (r) => this.bill(r),
 			tracePath: (w) => this.tracePath(w),
@@ -284,7 +313,7 @@ export class Scanner {
 		this.say("threat model: 1 agent");
 
 		const { files, total } = this.ledger.listWork(this.scanId, 200, 0);
-		const result = await this.runner.run({
+		const result = await this.runAgent({
 			ctx: this.ctx("threat-model"),
 			onEvent: (m) => this.say(m),
 				tracePath: this.tracePath("threat-model"),
@@ -303,7 +332,6 @@ export class Scanner {
 			].join("\n"),
 		});
 
-		this.bill(result);
 
 		// A threat model names sensitive assets, and a model asked to name them
 		// will happily quote one. Every other piece of model prose goes through
@@ -341,7 +369,7 @@ export class Scanner {
 		await mapConcurrent(parts, this.concurrency, async (part) => {
 			this.checkBudget();
 			const workerId = `probe-${part.id + 1}`;
-			const result = await this.runner.run({
+			const result = await this.runAgent({
 				ctx: { ...this.ctx(workerId), partitionId: part.id, verbs: PROBE_VERBS },
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
@@ -360,7 +388,6 @@ export class Scanner {
 					"Page through it until remaining is 0, then report.",
 				].join("\n"),
 			});
-			this.bill(result);
 			this.say(`  ${workerId} done`);
 		});
 
@@ -403,7 +430,7 @@ export class Scanner {
 		await mapConcurrent(groups, this.concurrency, async (group, i) => {
 			this.checkBudget();
 			const workerId = `reduce-${i + 1}`;
-			const result = await this.runner.run({
+			const result = await this.runAgent({
 				ctx: {
 					...this.ctx(workerId),
 					verbs: REDUCE_VERBS,
@@ -425,7 +452,6 @@ export class Scanner {
 					"and record nothing.",
 				].join("\n"),
 			});
-			this.bill(result);
 		});
 
 		const merged = this.ledger.listCandidates(this.scanId).filter((c) => c.merged_into).length;
@@ -447,7 +473,7 @@ export class Scanner {
 		await mapConcurrent(todo, this.concurrency, async (c) => {
 			this.checkBudget();
 			const workerId = `validate-${c.id}`;
-			const result = await this.runner.run({
+			const result = await this.runAgent({
 				ctx: {
 					...this.ctx(workerId),
 					verbs: VALIDATE_VERBS,
@@ -475,7 +501,6 @@ export class Scanner {
 					`Decide, then call opensec({ verb: "candidate.validate", id: "${c.id}", ... }) once.`,
 				].join("\n"),
 			});
-			this.bill(result);
 
 			// Degradation is directional: an agent that returned without a verdict
 			// leaves the row unsettled, which downgrades the scan's claim rather than
@@ -511,7 +536,7 @@ export class Scanner {
 		await mapConcurrent(todo, this.concurrency, async (c) => {
 			this.checkBudget();
 			const workerId = `attack-path-${c.id}`;
-			const result = await this.runner.run({
+			const result = await this.runAgent({
 				ctx: {
 					...this.ctx(workerId),
 					verbs: ASSESS_VERBS,
@@ -533,7 +558,6 @@ export class Scanner {
 					`Trace it, then call opensec({ verb: "candidate.assess", id: "${c.id}", ... }) once.`,
 				].join("\n"),
 			});
-			this.bill(result);
 
 			const after = this.ledger.getCandidate(this.scanId, c.id);
 			if (after && !after.resolution?.attack_path) {

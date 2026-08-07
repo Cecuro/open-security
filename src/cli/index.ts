@@ -27,6 +27,9 @@ Options
   --max-cost <usd>     spend ceiling, or "none" (default). Refuses to start if
                        the model has no price, since that budget is unenforceable.
   --concurrency <n>    agents in flight at once (default 4)
+  --max-turns <n>      turns one agent may take before it is stopped (default 80).
+                       --max-cost is only checked between agents, so this is what
+                       bounds a single agent that loops.
   --partition-max-files <n>  files per probe before the worklist splits again
   --refresh-threat-model     rewrite the stored threat model instead of reusing it
   --json               print the findings JSON path only
@@ -130,6 +133,7 @@ async function main(argv: string[]): Promise<number> {
 		maxFiles,
 		maxCostUsd,
 		concurrency: numFlag(opts.flags.concurrency),
+		maxTurns: numFlag(opts.flags["max-turns"]),
 		partitionMaxFiles: numFlag(opts.flags["partition-max-files"]),
 		refreshThreatModel: opts.bools["refresh-threat-model"] === true,
 		onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
@@ -164,7 +168,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "partition-max-files"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "partition-max-files", "max-turns"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
