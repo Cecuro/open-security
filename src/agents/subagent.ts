@@ -33,7 +33,7 @@ import { Type } from "typebox";
 
 import type { Prompts } from "../scan/prompts.js";
 import { wrapUntrusted } from "../scan/prompts.js";
-import { type RunContext, SUBAGENT_VERBS } from "./tool.js";
+import { type RunContext, sanitize, SUBAGENT_VERBS } from "./tool.js";
 
 /** A subagent cannot spawn subagents. One level is delegation; two is a fork bomb. */
 export const MAX_DEPTH = 1;
@@ -148,12 +148,19 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 				});
 
 				deps.bill(result);
+				// The child read attacker-authored files and its answer lands straight
+				// in the parent's context, so it gets the same treatment as every other
+				// piece of agent prose: nonce stripped so repo text cannot forge the
+				// trust boundary the parent reads its own prompt through, control
+				// characters stripped, secrets redacted, and a length cap so one
+				// delegation cannot eat the context it was spawned to save.
+				const answer = sanitize(parent, result.text).trim();
 				return {
 					content: [
 						{
 							type: "text" as const,
 							text:
-								result.text.trim() ||
+								answer ||
 								"(the subagent returned nothing — treat this as unsettled, not as a negative result)",
 						},
 					],
