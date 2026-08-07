@@ -6,6 +6,7 @@
  * the clipboard and OSC 8 forges links, and finding prose is attacker-authored.
  */
 
+import { describeEnv, envFilePath, loadEnv } from "../env.js";
 import { Scanner } from "../sdk/scanner.js";
 import { stripControlChars } from "../text.js";
 import { renderMatrix } from "../scan/severity.js";
@@ -16,6 +17,7 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
   opensec scan <path> [options]
   opensec scan <path> --estimate      files and tokens; spends nothing
   opensec models                      models with a price, so budgets are enforceable
+  opensec env                         which credentials are configured, by name
   opensec help severity               how severity is computed
 
 Options
@@ -42,6 +44,16 @@ written, and only --refresh-threat-model overwrites it.
 async function main(argv: string[]): Promise<number> {
 	const [command, ...rest] = argv;
 
+	// Before anything resolves a model. Values already in the environment win, so
+	// this only fills gaps.
+	const env = loadEnv();
+	for (const w of env.warnings) process.stderr.write(`opensec: ${safe(w)}\n`);
+
+	if (command === "env") {
+		process.stdout.write(`${safe(describeEnv(env))}\n`);
+		return 0;
+	}
+
 	if (!command || command === "help" || command === "--help" || command === "-h") {
 		if (rest[0] === "severity") {
 			process.stdout.write(`${renderMatrix()}\n`);
@@ -54,8 +66,14 @@ async function main(argv: string[]): Promise<number> {
 	if (command === "models") {
 		const models = await listPricedModels();
 		if (models.length === 0) {
+			// pi's own message points at a `/login` command opensec does not have,
+			// so say what this tool actually reads.
 			process.stdout.write(
-				"No models are available. Set a provider API key, e.g. AZURE_OPENAI_API_KEY.\n",
+				`No models are available — no provider key is set.\n\n` +
+					`Put credentials in ${envFilePath()}, one KEY=VALUE per line:\n\n` +
+					`  AZURE_OPENAI_API_KEY=...\n` +
+					`  AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com\n\n` +
+					`Then run: opensec env\n`,
 			);
 			return 1;
 		}
