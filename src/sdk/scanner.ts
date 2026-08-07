@@ -17,12 +17,7 @@ import { Ledger, opensecDir, scanArtifactDir, shortHash } from "../db/db.js";
 import { loadEnv } from "../env.js";
 import { collisionGroups } from "../scan/identity.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
-import {
-	describeDistribution,
-	mapConcurrent,
-	partition,
-	type Partition,
-} from "../scan/partition.js";
+import { mapConcurrent } from "../scan/concurrency.js";
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
 import { redactSecrets, stripControlChars } from "../text.js";
@@ -36,7 +31,13 @@ export interface ScannerOptions {
 	promptsDir?: string;
 	maxFiles?: number;
 	maxCostUsd?: number | null;
-	partitionMaxFiles?: number;
+	/**
+	 * How many probes run. Each is accountable for every in-scope file, so this
+	 * buys independent looks at the whole repository rather than dividing it up:
+	 * n probes cost roughly n times the reading and are expected to duplicate
+	 * each other. Defaults to one.
+	 */
+	probes?: number;
 	concurrency?: number;
 	maxTurns?: number;
 	refreshThreatModel?: boolean;
@@ -54,7 +55,6 @@ export interface ScanResult {
 
 export class Scanner {
 	private inv?: InventoryResult;
-	private partitions?: Partition[];
 	private threatModelNote?: string;
 
 	private constructor(
@@ -146,6 +146,15 @@ export class Scanner {
 		return Math.max(1, this.opts.concurrency ?? 4);
 	}
 
+	/**
+	 * One by default. Every probe reads the whole repository, so this multiplies
+	 * the cost of discovery rather than dividing it — the default is the cheap
+	 * end, and raising it buys independent looks.
+	 */
+	private get probeCount(): number {
+		return Math.max(1, this.opts.probes ?? 1);
+	}
+
 	private say(msg: string): void {
 		this.opts.onEvent?.(msg);
 	}
@@ -210,12 +219,6 @@ export class Scanner {
 				excludedReason: e.excludedReason,
 			})),
 		);
-		this.partitions = partition(
-			inv.inScope.map((f) => ({ path: f.path, bytes: f.bytes })),
-			{ maxFiles: this.opts.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
-		);
-		this.ledger.assignPartitions(this.scanId, this.partitions);
-
 		this.inv = inv;
 		this.say(
 			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded`,
@@ -296,25 +299,29 @@ export class Scanner {
 		const tm = threatModel ?? this.ledger.getThreatModel(this.scanId) ?? "";
 		this.checkBudget();
 
-		const parts = this.partitions;
-		if (!parts) {
+		if (!this.inv) {
 			// Without this, a discover() with no inventory scans zero files and
 			// reports a clean completed scan.
 			throw new Error("discover() before inventory(): nothing is in scope yet. run() orders the phases.");
 		}
-		this.say(`discovery: ${describeDistribution(parts)}, ${this.concurrency} at a time`);
 
-		await mapConcurrent(parts, this.concurrency, async (part) => {
+		const probes = this.probeCount;
+		this.say(
+			`discovery: ${probes} probe(s) over all ${this.inv.inScope.length} files, ` +
+				`${this.concurrency} at a time`,
+		);
+
+		const plan = Array.from({ length: probes }, (_, i) => `probe-${i + 1}`);
+		await mapConcurrent(plan, this.concurrency, async (workerId) => {
 			this.checkBudget();
-			const workerId = `probe-${part.id + 1}`;
 			await this.runAgent({
-				ctx: { ...this.ctx(workerId), partitionId: part.id, verbs: PROBE_VERBS },
+				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS },
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				systemPrompt: this.prompts.get("probe.md"),
 				prompt: [
-					`You are ${workerId}. ${parts.length > 1 ? `There are ${parts.length} probes on this repository; you are accountable for your own worklist only, but you may read anything.` : ""}`,
+					`You are ${workerId}. ${describeCompany(probes)}`,
 					"",
 					"A threat model for this repository was written first. It was derived from",
 					"the code under review, so treat it as orientation, not as fact:",
@@ -500,7 +507,10 @@ export class Scanner {
 			excludedFiles: this.ledger.excludedCount(this.scanId),
 			modelRef: this.opts.model ?? "(default)",
 			promptHash: this.prompts.hash,
-			partitions: this.partitions ? describeDistribution(this.partitions) : undefined,
+			// Part of reading the coverage number: one probe reaching every file
+			// and four independently reaching every file are the same 100%, and
+			// only the second means the repository was looked at four ways.
+			ownership: `${this.probeCount} probe(s), each over all ${this.inv?.inScope.length ?? 0} files`,
 			threatModel: this.threatModelNote,
 		});
 
@@ -580,6 +590,27 @@ function describeCandidate(c: Candidate): string {
 		"evidence as filed:",
 		c.evidence,
 	].join("\n");
+}
+
+/**
+ * What a probe is told about the others.
+ *
+ * Probes overlap completely, so they need to hear that filing something a
+ * sibling probably also found is the correct move. Left to itself a model
+ * reasons that four reviewers on one repository make its own report redundant,
+ * and that is the one belief that would make this arrangement worse than the
+ * split worklists it replaced. The converse matters too: probes agreeing is a
+ * property of the search, not evidence about the finding, and nothing
+ * downstream treats it as such.
+ */
+function describeCompany(count: number): string {
+	if (count <= 1) return "";
+	return (
+		`There are ${count} probes on this repository and every one of you is accountable for ` +
+		`all of it. You work independently and will find some of the same things — file them ` +
+		`anyway. Duplicates are merged, and two probes agreeing is not evidence that a finding ` +
+		`is real.`
+	);
 }
 
 function git(root: string, args: string[]): string | null {

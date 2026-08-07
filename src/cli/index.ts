@@ -26,7 +26,11 @@ Options
   --max-turns <n>      turns one agent may take before it is stopped (default 80).
                        --max-cost is only checked between agents, so this is what
                        bounds a single agent that loops.
-  --partition-max-files <n>  files per probe before the worklist splits again
+  --probes <n>         how many probes review the repository (default 1). Each
+                       one is accountable for every file, so they overlap
+                       completely and duplicate each other on purpose: this
+                       buys independent looks, and costs roughly n times the
+                       reading.
   --refresh-threat-model     rewrite the stored threat model instead of reusing it
   --json               print the findings JSON path only
 
@@ -109,12 +113,12 @@ async function main(argv: string[]): Promise<number> {
 	let maxFiles: number | undefined;
 	let concurrency: number | undefined;
 	let maxTurns: number | undefined;
-	let partitionMaxFiles: number | undefined;
+	let probes: number | undefined;
 	try {
 		maxFiles = intFlag("max-files", opts.flags["max-files"]);
 		concurrency = intFlag("concurrency", opts.flags.concurrency);
 		maxTurns = intFlag("max-turns", opts.flags["max-turns"]);
-		partitionMaxFiles = intFlag("partition-max-files", opts.flags["partition-max-files"]);
+		probes = intFlag("probes", opts.flags.probes);
 	} catch (err) {
 		process.stderr.write(`opensec: ${(err as Error).message}\n`);
 		return 2;
@@ -156,7 +160,7 @@ async function main(argv: string[]): Promise<number> {
 		maxCostUsd,
 		concurrency,
 		maxTurns,
-		partitionMaxFiles,
+		probes,
 		refreshThreatModel: opts.bools["refresh-threat-model"] === true,
 		onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
 	});
@@ -193,7 +197,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "partition-max-files", "max-turns"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";

@@ -30,6 +30,14 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE scans ADD COLUMN threat_model_source TEXT;
 		`,
 	},
+	{
+		version: 5,
+		note: "drop files.partition_id — probes own the whole repository, not a slice of it",
+		sql: `
+			DROP INDEX IF EXISTS files_partition;
+			ALTER TABLE files DROP COLUMN partition_id;
+		`,
+	},
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.reduce((v, m) => Math.max(v, m.version), 1);

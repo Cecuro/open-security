@@ -32,7 +32,6 @@ export interface RunContext {
 	verbs?: Verb[];
 	depth?: number;
 	overflowDir?: string;
-	partitionId?: number;
 	resolvableIds?: string[];
 	dispositions?: Disposition[];
 }
@@ -273,7 +272,7 @@ function run(ctx: RunContext, p: Params): string {
 function workNext(ctx: RunContext, p: Params): string {
 	const limit = (p.limit as number | undefined) ?? 40;
 	const cursor = (p.cursor as number | undefined) ?? 0;
-	const { files, total } = ctx.ledger.listWork(ctx.scanId, limit, cursor, ctx.partitionId);
+	const { files, total } = ctx.ledger.listWork(ctx.scanId, limit, cursor);
 	const next = cursor + files.length;
 	const lines = files.map((f) => `${f.path} (${f.bytes_total} bytes)`);
 	return JSON.stringify(
@@ -304,7 +303,7 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 
 	const locations = rawLocations.map((l) => validateLocation(ctx, l));
 
-	if (!locations.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path, ctx.partitionId))) {
+	if (!locations.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path))) {
 		throw new Error(
 			`no location is in your worklist — cite at least one file from work.next. ` +
 				`Got: ${locations.map((l) => l.path).join(", ")}`,

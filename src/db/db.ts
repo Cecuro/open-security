@@ -198,54 +198,32 @@ export class Ledger {
 		tx();
 	}
 
-	assignPartitions(scanId: string, partitions: Array<{ id: number; paths: string[] }>): void {
-		const stmt = this.db.prepare(
-			"UPDATE files SET partition_id = ? WHERE scan_id = ? AND path = ?",
-		);
-		const tx = this.db.transaction(() => {
-			for (const p of partitions) for (const path of p.paths) stmt.run(p.id, scanId, path);
-		});
-		tx();
-	}
-
-	private partitionScope(partitionId?: number): { clause: string; args: unknown[] } {
-		return partitionId === undefined
-			? { clause: "", args: [] }
-			: { clause: " AND partition_id = ?", args: [partitionId] };
-	}
-
-	listWork(
-		scanId: string,
-		limit: number,
-		cursor: number,
-		partitionId?: number,
-	): { files: ScanFile[]; total: number } {
-		const scope = this.partitionScope(partitionId);
-
+	/**
+	 * The worklist. Every probe gets the same one — the whole repository — so
+	 * there is nothing to scope it by.
+	 */
+	listWork(scanId: string, limit: number, cursor: number): { files: ScanFile[]; total: number } {
 		const total = (
 			this.db
-				.prepare(
-					`SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND excluded_reason IS NULL${scope.clause}`,
-				)
-				.get(scanId, ...scope.args) as { n: number }
+				.prepare("SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND excluded_reason IS NULL")
+				.get(scanId) as { n: number }
 		).n;
 		const rows = this.db
 			.prepare(
 				`SELECT path, sha, bytes_total, bytes_read, excluded_reason, first_touched_at
-				 FROM files WHERE scan_id = ? AND excluded_reason IS NULL${scope.clause}
+				 FROM files WHERE scan_id = ? AND excluded_reason IS NULL
 				 ORDER BY path LIMIT ? OFFSET ?`,
 			)
-			.all(scanId, ...scope.args, limit, cursor) as ScanFile[];
+			.all(scanId, limit, cursor) as ScanFile[];
 		return { files: rows, total };
 	}
 
-	fileInScope(scanId: string, path: string, partitionId?: number): boolean {
-		const scope = this.partitionScope(partitionId);
+	fileInScope(scanId: string, path: string): boolean {
 		const row = this.db
 			.prepare(
-				`SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL${scope.clause}`,
+				"SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL",
 			)
-			.get(scanId, path, ...scope.args) as { ok: number } | undefined;
+			.get(scanId, path) as { ok: number } | undefined;
 		return row !== undefined;
 	}
 

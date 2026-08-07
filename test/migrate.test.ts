@@ -66,13 +66,20 @@ describe("schema migrations", () => {
 			(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
 				(c) => c.name,
 			);
-		// partition_id is the one that was missing. It was added by editing the
-		// schema file, so a database written before that never had it and crashed
-		// on the index in schema.sql the moment it was reopened.
-		expect(cols("files")).toContain("partition_id");
 		expect(cols("candidates")).toContain("instance");
 		expect(cols("candidates")).toContain("identity_hash");
 		expect(cols("scans")).toContain("threat_model_source");
+		// partition_id was added by migration 2 and taken away again by migration
+		// 5, once probes stopped owning slices. A database that predates both has
+		// to arrive at the same place as one that lived through them, which is the
+		// only reason the add is still in the list at all.
+		expect(cols("files")).not.toContain("partition_id");
+		const indexes = (
+			db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{
+				name: string;
+			}>
+		).map((r) => r.name);
+		expect(indexes).not.toContain("files_partition");
 		db.close();
 	});
 
