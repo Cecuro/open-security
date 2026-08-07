@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { describeEnv, envFilePath, loadEnv } from "../env.js";
+import { describeEnv, loadEnv, piAuthPath } from "../env.js";
 import { Scanner } from "../sdk/scanner.js";
 import { stripControlChars } from "../text.js";
 import { renderMatrix } from "../scan/severity.js";
@@ -64,7 +64,8 @@ async function main(argv: string[]): Promise<number> {
 			// so say what this tool actually reads.
 			process.stdout.write(
 				`No models are available — no provider key is set.\n\n` +
-					`Put credentials in ${envFilePath()}, one KEY=VALUE per line:\n\n` +
+					`opensec reads the credentials pi already stores, at\n${piAuthPath()}.\n` +
+					`Log in with pi, or export the provider's own variables:\n\n` +
 					`  AZURE_OPENAI_API_KEY=...\n` +
 					`  AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com\n\n` +
 					`Then run: opensec env\n`,
