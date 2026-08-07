@@ -118,4 +118,24 @@ describe("mapConcurrent", () => {
 	it("does nothing on an empty list", async () => {
 		expect(await mapConcurrent([], 4, async () => 1)).toEqual([]);
 	});
+
+	it("stops dispatching new items after a failure, but lets in-flight work finish", async () => {
+		// Each item is a full agent run. Before this held, one probe's provider
+		// error meant the surviving workers kept launching agents for the rest of
+		// the worklist while the caller had already marked the scan failed and
+		// moved on to closing the ledger.
+		const started: number[] = [];
+		let inFlightFinished = false;
+		await expect(
+			mapConcurrent([1, 2, 3, 4], 2, async (n) => {
+				started.push(n);
+				if (n === 1) throw new Error("agent run failed");
+				await new Promise((r) => setTimeout(r, 20));
+				inFlightFinished = true;
+				return n;
+			}),
+		).rejects.toThrow(/agent run failed/);
+		expect(started).toEqual([1, 2]);
+		expect(inFlightFinished).toBe(true);
+	});
 });

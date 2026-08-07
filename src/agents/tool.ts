@@ -315,7 +315,8 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 	const { id, merged } = ctx.ledger.upsertCandidate({
 		scanId: ctx.scanId,
 		workerId: ctx.workerId,
-		title: sanitize(ctx, title),
+		// Capped like instance and symbol: a title is one line of a findings table.
+		title: sanitize(ctx, title).slice(0, 200),
 		cweIds: normalizeCwe(p.cwe as string[] | undefined),
 		locations,
 		summary: sanitize(ctx, summary),
@@ -376,7 +377,7 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 	}
 
 	const resolution: Resolution = {
-		...(candidate.resolution ?? {}),
+		...candidate.resolution,
 		disposition,
 		rationale,
 		validation: { disposition, rationale, at: now() },
@@ -411,8 +412,10 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 	const inputs = readSeverityInputs(ctx, p, notes);
 
 	if (!inputs) {
+		// candidate.resolution exists here — the confirmed-validation check above
+		// already threw otherwise.
 		const resolution: Resolution = {
-			...(candidate.resolution ?? { disposition: "needs_follow_up", rationale }),
+			...candidate.resolution,
 			disposition: "needs_follow_up",
 			rationale,
 			attack_path: { reachability, rationale, at: now() },
@@ -443,7 +446,7 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 
 	const computed = computeSeverity(inputs, ctx.profile);
 	const resolution: Resolution = {
-		...(candidate.resolution ?? {}),
+		...candidate.resolution,
 		disposition: computed.reportable ? "confirmed" : "suppressed",
 		rationale,
 		attack_path: { reachability, rationale, at: now() },

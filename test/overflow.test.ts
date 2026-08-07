@@ -92,6 +92,17 @@ describe("a subagent report larger than the inline budget", () => {
 		expect(saved).toContain("TAIL-MARKER");
 	});
 
+	it("budgets the inline head in bytes, not UTF-16 units, and never splits a code point", async () => {
+		// "é" is one JS character but two UTF-8 bytes: a character-counted slice
+		// would inline twice the budget, and a byte-counted one that cuts blindly
+		// would end mid-sequence and render a replacement character.
+		const env = setup("é".repeat(MAX_INLINE_REPORT_BYTES));
+		const out = await env.call(createSubagentTool(env.ctx, env.deps)!);
+		const head = out.split("\n\n[")[0] ?? "";
+		expect(Buffer.byteLength(head, "utf8")).toBeLessThanOrEqual(MAX_INLINE_REPORT_BYTES);
+		expect(head).not.toContain("�");
+	});
+
 	it("tells the parent not to re-delegate, because a rerun is a different answer", async () => {
 		const env = setup(huge);
 		const out = await env.call(createSubagentTool(env.ctx, env.deps)!);

@@ -102,7 +102,13 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 						`You were delegated this task by ${parent.workerId}. It is the whole brief —`,
 						"there is no prior conversation to refer to.",
 						"",
-						wrapUntrusted(parent.nonce, `task-from-${parent.workerId}`, task),
+						// The parent saw the nonce in its own prompt, so its task text could
+						// carry a forged end-marker that breaks out of this fence.
+						wrapUntrusted(
+							parent.nonce,
+							`task-from-${parent.workerId}`,
+							sanitize(parent, task, Number.POSITIVE_INFINITY),
+						),
 						"",
 						"Investigate, then answer in your final message. Cite path:line for every",
 						"claim. If you could not settle it, say so and say what is missing.",
@@ -128,31 +134,40 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 
 function spill(report: string, workerId: string, parent: RunContext): string {
 	const bytes = Buffer.byteLength(report, "utf8");
-	if (bytes <= MAX_INLINE_REPORT_BYTES || !parent.overflowDir) {
-		return bytes <= MAX_INLINE_REPORT_BYTES
-			? report
-			: `${report.slice(0, MAX_INLINE_REPORT_BYTES)}\n\n[Truncated: ${bytes} bytes of report, ` +
-					`${MAX_INLINE_REPORT_BYTES} shown. The rest could not be written down, so it is lost — ` +
-					`delegate a narrower question rather than assuming this answer is complete.]`;
-	}
+	if (bytes <= MAX_INLINE_REPORT_BYTES) return report;
 
-	const file = join(parent.overflowDir, `${workerId.replaceAll("/", "_")}.md`);
-	try {
-		mkdirSync(parent.overflowDir, { recursive: true, mode: 0o700 });
-		writeFileSync(file, report, { encoding: "utf8", mode: 0o600 });
-	} catch {
-		return (
-			`${report.slice(0, MAX_INLINE_REPORT_BYTES)}\n\n[Truncated: ${bytes} bytes of report, ` +
-			`${MAX_INLINE_REPORT_BYTES} shown, and it could not be written down. Delegate a narrower ` +
-			`question rather than assuming this answer is complete.]`
-		);
+	const head = headBytes(report, MAX_INLINE_REPORT_BYTES);
+
+	if (parent.overflowDir) {
+		const file = join(parent.overflowDir, `${workerId.replaceAll("/", "_")}.md`);
+		try {
+			mkdirSync(parent.overflowDir, { recursive: true, mode: 0o700 });
+			writeFileSync(file, report, { encoding: "utf8", mode: 0o600 });
+			return (
+				`${head}\n\n` +
+				`[This report is ${bytes} bytes; the first ${MAX_INLINE_REPORT_BYTES} are above. ` +
+				`The whole thing was written to ${file} — read it with offset to continue. ` +
+				`Do NOT delegate again to see the rest: a second subagent answers a second time, ` +
+				`it does not resume this one.]`
+			);
+		} catch {
+			// The tail is gone either way; say so below.
+		}
 	}
 
 	return (
-		`${report.slice(0, MAX_INLINE_REPORT_BYTES)}\n\n` +
-		`[This report is ${bytes} bytes; the first ${MAX_INLINE_REPORT_BYTES} are above. ` +
-		`The whole thing was written to ${file} — read it with offset to continue. ` +
-		`Do NOT delegate again to see the rest: a second subagent answers a second time, ` +
-		`it does not resume this one.]`
+		`${head}\n\n[Truncated: ${bytes} bytes of report, ` +
+		`${MAX_INLINE_REPORT_BYTES} shown. The rest could not be written down, so it is lost — ` +
+		`delegate a narrower question rather than assuming this answer is complete.]`
 	);
+}
+
+// The budget is in bytes; string .slice() counts UTF-16 code units and can both
+// blow the budget threefold and split a code point in half.
+function headBytes(s: string, maxBytes: number): string {
+	const buf = Buffer.from(s, "utf8");
+	if (buf.length <= maxBytes) return s;
+	let end = maxBytes;
+	while (end > 0 && ((buf[end] ?? 0) & 0xc0) === 0x80) end--;
+	return buf.subarray(0, end).toString("utf8");
 }

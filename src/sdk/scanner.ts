@@ -92,14 +92,26 @@ export class Scanner {
 		const prompts = loadPrompts(opts.promptsDir);
 		const ledger = Ledger.open(opts.db);
 		const runner = await AgentRunner.create({ repoRoot, modelRef: opts.model });
-		const model = runner.resolveModel(undefined).model;
 
-		if (typeof opts.maxCostUsd === "number" && !pricingOf(model)) {
-			throw new Error(
-				`--max-cost was given but '${model.provider}/${model.id}' has no pricing entry, ` +
-					`so spend cannot be measured. Use --max-cost none to run without a ceiling, ` +
-					`or add a price for this model.`,
-			);
+		// Resolve every model up front — the default and each per-phase override —
+		// so a bad ref fails here, not mid-scan after money is spent. The pricing
+		// check must cover the overrides too: an unpriced model reports cost 0, so
+		// under a --max-cost ceiling it would spend without ever counting.
+		const refs: Array<[phase: string, ref: string | undefined]> = [
+			["default", undefined],
+			...Object.entries(opts.models ?? {}).filter(
+				(e): e is [string, string] => typeof e[1] === "string",
+			),
+		];
+		for (const [phase, ref] of refs) {
+			const model = runner.resolveModel(ref).model;
+			if (typeof opts.maxCostUsd === "number" && !pricingOf(model)) {
+				throw new Error(
+					`--max-cost was given but '${model.provider}/${model.id}' (${phase} model) has ` +
+						`no pricing entry, so spend cannot be measured. Use --max-cost none to run ` +
+						`without a ceiling, or add a price for this model.`,
+				);
+			}
 		}
 
 		const repoId = ledger.upsertRepo(repoRoot, repoName, git(repoRoot, ["config", "--get", "remote.origin.url"]));
@@ -187,11 +199,12 @@ export class Scanner {
 	private checkBudget(): void {
 		const max = this.opts.maxCostUsd;
 		if (typeof max !== "number") return;
-		const spent = this.ledger.getScan(this.scanId)?.cost_usd ?? 0;
+		const scan = this.ledger.getScan(this.scanId);
+		const spent = scan?.cost_usd ?? 0;
 		if (spent >= max) {
 			throw new Error(
 				`budget exhausted: spent $${spent.toFixed(4)} of $${max} at phase ` +
-					`'${this.ledger.getScan(this.scanId)?.phase}'. Findings recorded so far are ` +
+					`'${scan?.phase}'. Findings recorded so far are ` +
 					`in the ledger; raise --max-cost to continue.`,
 			);
 		}
@@ -251,7 +264,7 @@ export class Scanner {
 		const result = await this.runAgent({
 			ctx: this.ctx("threat-model"),
 			onEvent: (m) => this.say(m),
-				tracePath: this.tracePath("threat-model"),
+			tracePath: this.tracePath("threat-model"),
 			modelRef: this.opts.models?.threatModel,
 			systemPrompt: this.prompts.get("threat-model.md"),
 			prompt: [
@@ -268,8 +281,13 @@ export class Scanner {
 		});
 
 		// Redacted on write only. This file is the user's to edit, so redacting it
-		// again on read would silently eat their edits.
-		const text = stripControlChars(redactSecrets(result.text));
+		// again on read would silently eat their edits. The nonce is stripped for
+		// the same reason it is stripped from tool inputs: this text goes back into
+		// other agents' prompts inside wrapUntrusted fences that use the same
+		// nonce, and the agent that wrote it saw that nonce in its own prompt.
+		const text = stripControlChars(
+			redactSecrets(result.text.replaceAll(this.nonce, "[nonce-stripped]")),
+		);
 
 		const header =
 			`<!-- opensec threat model · repo ${this.repoName} · revision ${this.revision ?? "none"} ` +
@@ -297,7 +315,7 @@ export class Scanner {
 		await mapConcurrent(parts, this.concurrency, async (part) => {
 			this.checkBudget();
 			const workerId = `probe-${part.id + 1}`;
-			const result = await this.runAgent({
+			await this.runAgent({
 				ctx: { ...this.ctx(workerId), partitionId: part.id, verbs: PROBE_VERBS },
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
@@ -342,7 +360,7 @@ export class Scanner {
 		await mapConcurrent(groups, this.concurrency, async (group, i) => {
 			this.checkBudget();
 			const workerId = `reduce-${i + 1}`;
-			const result = await this.runAgent({
+			await this.runAgent({
 				ctx: {
 					...this.ctx(workerId),
 					verbs: REDUCE_VERBS,
@@ -382,7 +400,7 @@ export class Scanner {
 		await mapConcurrent(todo, this.concurrency, async (c) => {
 			this.checkBudget();
 			const workerId = `validate-${c.id}`;
-			const result = await this.runAgent({
+			await this.runAgent({
 				ctx: {
 					...this.ctx(workerId),
 					verbs: VALIDATE_VERBS,
@@ -429,7 +447,7 @@ export class Scanner {
 		await mapConcurrent(todo, this.concurrency, async (c) => {
 			this.checkBudget();
 			const workerId = `attack-path-${c.id}`;
-			const result = await this.runAgent({
+			await this.runAgent({
 				ctx: {
 					...this.ctx(workerId),
 					verbs: ASSESS_VERBS,
@@ -488,7 +506,7 @@ export class Scanner {
 			candidates,
 			coverage,
 			leads: this.ledger.listLeads(this.scanId),
-			languages: this.inv?.languages ?? [],
+			extensions: this.inv?.extensions ?? [],
 			excludedFiles: this.ledger.excludedCount(this.scanId),
 			modelRef: this.opts.model ?? "(default)",
 			promptHash: this.prompts.hash,
@@ -528,14 +546,14 @@ export class Scanner {
 	static async estimate(opts: {
 		repo: string;
 		maxFiles?: number;
-	}): Promise<{ files: number; bytes: number; approxTokens: number; languages: string[] }> {
+	}): Promise<{ files: number; bytes: number; approxTokens: number; extensions: string[] }> {
 		const inv = await inventory(resolve(opts.repo), { maxFiles: opts.maxFiles });
 		const bytes = inv.inScope.reduce((n, f) => n + f.bytes, 0);
 		return {
 			files: inv.inScope.length,
 			bytes,
 			approxTokens: Math.round(bytes / 3.6),
-			languages: inv.languages,
+			extensions: inv.extensions,
 		};
 	}
 
