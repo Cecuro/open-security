@@ -14,6 +14,7 @@ import {
 	VALIDATE_VERBS,
 } from "../agents/tool.js";
 import { Ledger, opensecDir, scanArtifactDir, shortHash } from "../db/db.js";
+import { loadEnv } from "../env.js";
 import { collisionGroups } from "../scan/identity.js";
 import { inventory, type InventoryResult } from "../scan/inventory.js";
 import {
@@ -83,6 +84,10 @@ export class Scanner {
 				"--profile container is not implemented yet (M2). Use --profile static.",
 			);
 		}
+
+		// SDK callers get the same credential resolution as the CLI. Idempotent,
+		// and anything already in the environment wins.
+		loadEnv();
 
 		const prompts = loadPrompts(opts.promptsDir);
 		const ledger = Ledger.open(opts.db);

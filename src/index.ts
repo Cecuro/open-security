@@ -11,6 +11,7 @@ export {
 	CONFIDENCE_BY_METHOD,
 } from "./scan/severity.js";
 export { renderMarkdown, type ReportInput } from "./scan/render.js";
+export { loadEnv, describeEnv, envFilePath, type EnvLoadResult } from "./env.js";
 export { loadPrompts, wrapUntrusted, type Prompts, PROMPT_NAMES } from "./scan/prompts.js";
 export { AgentRunner } from "./agents/session.js";
 export { createOpensecTool, type RunContext, type Verb } from "./agents/tool.js";
