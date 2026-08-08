@@ -1,4 +1,11 @@
-export { Scanner, type ScannerOptions, type ScanResult } from "./sdk/scanner.js";
+export {
+	PHASE_ORDER,
+	phaseBefore,
+	reportScan,
+	Scanner,
+	type ScannerOptions,
+	type ScanResult,
+} from "./sdk/scanner.js";
 export { Ledger, defaultDbPath, opensecDir, scanArtifactDir } from "./db/db.js";
 export { inventory, type InventoryResult, type InventoryEntry } from "./scan/inventory.js";
 export {

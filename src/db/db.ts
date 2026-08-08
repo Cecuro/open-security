@@ -116,13 +116,64 @@ export class Ledger {
 		revision: string | null;
 		profile: Profile;
 		configHash: string;
+		modelRef?: string;
+		promptHash?: string;
+		probes?: number;
 	}): void {
 		this.db
 			.prepare(
-				`INSERT INTO scans (id, repo_id, revision, profile, status, phase, config_hash, started_at)
-				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?)`,
+				`INSERT INTO scans (id, repo_id, revision, profile, status, phase, config_hash,
+				 model_ref, prompt_hash, probes, started_at)
+				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?, ?, ?, ?)`,
 			)
-			.run(args.id, args.repoId, args.revision, args.profile, args.configHash, now());
+			.run(
+				args.id,
+				args.repoId,
+				args.revision,
+				args.profile,
+				args.configHash,
+				args.modelRef ?? null,
+				args.promptHash ?? null,
+				args.probes ?? null,
+				now(),
+			);
+	}
+
+	getRepo(id: string): { id: string; path: string; name: string } | undefined {
+		return this.db.prepare("SELECT id, path, name FROM repos WHERE id = ?").get(id) as
+			| { id: string; path: string; name: string }
+			| undefined;
+	}
+
+	listScans(limit = 20): Array<{
+		id: string;
+		repo_name: string;
+		status: ScanStatus;
+		phase: Phase;
+		started_at: string;
+		cost_usd: number;
+	}> {
+		return this.db
+			.prepare(
+				`SELECT s.id, r.name AS repo_name, s.status, s.phase, s.started_at, s.cost_usd
+				 FROM scans s JOIN repos r ON r.id = s.repo_id
+				 ORDER BY s.started_at DESC LIMIT ?`,
+			)
+			.all(limit) as Array<{
+			id: string;
+			repo_name: string;
+			status: ScanStatus;
+			phase: Phase;
+			started_at: string;
+			cost_usd: number;
+		}>;
+	}
+
+	/** Put a failed or interrupted scan back into 'running' so it can be resumed. */
+	reopenScan(scanId: string): void {
+		this.db
+			.prepare("UPDATE scans SET status = 'running', completed_at = NULL WHERE id = ?")
+			.run(scanId);
 	}
 
 	setPhase(scanId: string, phase: Phase): void {
@@ -176,6 +227,10 @@ export class Ledger {
 			status: row.status as ScanStatus,
 			phase: row.phase as Phase,
 			config_hash: row.config_hash as string,
+			model_ref: (row.model_ref as string | null) ?? null,
+			prompt_hash: (row.prompt_hash as string | null) ?? null,
+			probes: (row.probes as number | null) ?? null,
+			threat_model_source: (row.threat_model_source as string | null) ?? null,
 			started_at: row.started_at as string,
 			completed_at: row.completed_at as string | null,
 			tokens_in: row.tokens_in as number,
@@ -216,6 +271,23 @@ export class Ledger {
 			)
 			.all(scanId, limit, cursor) as ScanFile[];
 		return { files: rows, total };
+	}
+
+	/** Whether inventory ran at all for this scan, excluded files included. */
+	hasFiles(scanId: string): boolean {
+		return (
+			this.db.prepare("SELECT 1 AS ok FROM files WHERE scan_id = ? LIMIT 1").get(scanId) !==
+			undefined
+		);
+	}
+
+	listInScopePaths(scanId: string): string[] {
+		const rows = this.db
+			.prepare(
+				"SELECT path FROM files WHERE scan_id = ? AND excluded_reason IS NULL ORDER BY path",
+			)
+			.all(scanId) as Array<{ path: string }>;
+		return rows.map((r) => r.path);
 	}
 
 	fileInScope(scanId: string, path: string): boolean {

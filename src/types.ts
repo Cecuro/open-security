@@ -142,6 +142,10 @@ export interface ScanRecord {
 	status: ScanStatus;
 	phase: Phase;
 	config_hash: string;
+	model_ref: string | null;
+	prompt_hash: string | null;
+	probes: number | null;
+	threat_model_source: string | null;
 	started_at: string;
 	completed_at: string | null;
 	tokens_in: number;

@@ -16,12 +16,12 @@ import {
 import { Ledger, opensecDir, scanArtifactDir, shortHash } from "../db/db.js";
 import { loadEnv } from "../env.js";
 import { collisionGroups } from "../scan/identity.js";
-import { inventory, type InventoryResult } from "../scan/inventory.js";
+import { ext, inventory, type InventoryResult } from "../scan/inventory.js";
 import { mapConcurrent } from "../scan/concurrency.js";
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
 import { redactSecrets, stripControlChars } from "../text.js";
-import type { Candidate, Coverage, Profile } from "../types.js";
+import type { Candidate, Coverage, Phase, Profile } from "../types.js";
 
 export interface ScannerOptions {
 	repo: string;
@@ -53,10 +53,25 @@ export interface ScanResult {
 	coverage: Coverage;
 }
 
-export class Scanner {
-	private inv?: InventoryResult;
-	private threatModelNote?: string;
+/**
+ * Phases in execution order. A resumed scan re-enters at the phase it stopped
+ * in; everything strictly before it is already in the ledger and is not redone.
+ */
+export const PHASE_ORDER: Phase[] = [
+	"inventory",
+	"threat_model",
+	"discovery",
+	"reduce",
+	"validate",
+	"attack_path",
+	"report",
+];
 
+export function phaseBefore(a: Phase, b: Phase): boolean {
+	return PHASE_ORDER.indexOf(a) < PHASE_ORDER.indexOf(b);
+}
+
+export class Scanner {
 	private constructor(
 		readonly scanId: string,
 		private readonly opts: ScannerOptions,
@@ -69,6 +84,7 @@ export class Scanner {
 		private readonly revision: string | null,
 		private readonly profile: Profile,
 		private readonly nonce: string,
+		private readonly startPhase: Phase = "inventory",
 	) {}
 
 	static async open(opts: ScannerOptions): Promise<Scanner> {
@@ -89,18 +105,7 @@ export class Scanner {
 		const prompts = loadPrompts(opts.promptsDir);
 		const ledger = Ledger.open(opts.db);
 		const runner = await AgentRunner.create({ repoRoot, modelRef: opts.model });
-
-		// Resolve the model up front so a bad ref fails here, not mid-scan after
-		// money is spent. An unpriced model reports cost 0, so under a --max-cost
-		// ceiling it would spend without ever counting.
-		const model = runner.resolveModel(undefined).model;
-		if (typeof opts.maxCostUsd === "number" && !pricingOf(model)) {
-			throw new Error(
-				`--max-cost was given but '${model.provider}/${model.id}' has no pricing ` +
-					`entry, so spend cannot be measured. Use --max-cost none to run without ` +
-					`a ceiling, or add a price for this model.`,
-			);
-		}
+		const model = Scanner.resolveEnforceable(runner, opts.maxCostUsd);
 
 		const repoId = ledger.upsertRepo(repoRoot, repoName, git(repoRoot, ["config", "--get", "remote.origin.url"]));
 		const revision = git(repoRoot, ["rev-parse", "HEAD"]);
@@ -109,7 +114,16 @@ export class Scanner {
 			JSON.stringify({ prompts: prompts.hash, model: opts.model, profile }),
 		);
 
-		ledger.createScan({ id: scanId, repoId, revision, profile, configHash });
+		ledger.createScan({
+			id: scanId,
+			repoId,
+			revision,
+			profile,
+			configHash,
+			modelRef: `${model.provider}/${model.id}`,
+			promptHash: prompts.hash,
+			probes: Math.max(1, opts.probes ?? 1),
+		});
 
 		return new Scanner(
 			scanId,
@@ -124,6 +138,87 @@ export class Scanner {
 			profile,
 			randomBytes(9).toString("hex"),
 		);
+	}
+
+	/**
+	 * Pick a failed or interrupted scan back up at the phase it stopped in.
+	 * Phases already in the ledger are not redone; validate and attack-path
+	 * skip individual candidates that already carry a verdict. Spend so far
+	 * still counts against --max-cost, so a scan that died on budget needs a
+	 * higher ceiling to get anywhere.
+	 */
+	static async resume(
+		scanId: string,
+		opts: Omit<ScannerOptions, "repo" | "profile"> = {},
+	): Promise<Scanner> {
+		loadEnv();
+		const ledger = Ledger.open(opts.db);
+		try {
+			const scan = ledger.getScan(scanId);
+			if (!scan) {
+				throw new Error(
+					`no scan '${scanId}' in this ledger. 'opensec report' lists the scans it knows.`,
+				);
+			}
+			if (scan.status === "completed") {
+				throw new Error(
+					`scan ${scanId} already completed. 'opensec report ${scanId}' re-renders it.`,
+				);
+			}
+			const repo = ledger.getRepo(scan.repo_id);
+			if (!repo) throw new Error(`scan ${scanId} references a repo that is not in the ledger`);
+			if (!existsSync(repo.path)) {
+				throw new Error(`the repository this scan reviewed is gone: ${repo.path}`);
+			}
+
+			const prompts = loadPrompts(opts.promptsDir);
+			const runner = await AgentRunner.create({ repoRoot: repo.path, modelRef: opts.model });
+			Scanner.resolveEnforceable(runner, opts.maxCostUsd);
+
+			const head = git(repo.path, ["rev-parse", "HEAD"]);
+			if (scan.revision && head && head !== scan.revision) {
+				opts.onEvent?.(
+					`resume: the repo moved from ${scan.revision.slice(0, 8)} to ${head.slice(0, 8)} ` +
+						`since this scan started — recorded line numbers may be stale`,
+				);
+			}
+
+			ledger.reopenScan(scanId);
+			opts.onEvent?.(`resuming ${scanId} at phase '${scan.phase}'`);
+
+			return new Scanner(
+				scanId,
+				{ ...opts, repo: repo.path },
+				ledger,
+				runner,
+				prompts,
+				repo.path,
+				repo.name,
+				scan.repo_id,
+				scan.revision,
+				scan.profile,
+				randomBytes(9).toString("hex"),
+				scan.phase,
+			);
+		} catch (err) {
+			ledger.close();
+			throw err;
+		}
+	}
+
+	// Resolve the model up front so a bad ref fails here, not mid-scan after
+	// money is spent. An unpriced model reports cost 0, so under a --max-cost
+	// ceiling it would spend without ever counting.
+	private static resolveEnforceable(runner: AgentRunner, maxCostUsd: number | null | undefined) {
+		const model = runner.resolveModel(undefined).model;
+		if (typeof maxCostUsd === "number" && !pricingOf(model)) {
+			throw new Error(
+				`--max-cost was given but '${model.provider}/${model.id}' has no pricing ` +
+					`entry, so spend cannot be measured. Use --max-cost none to run without ` +
+					`a ceiling, or add a price for this model.`,
+			);
+		}
+		return model;
 	}
 
 	private ctx(workerId: string): RunContext {
@@ -219,7 +314,6 @@ export class Scanner {
 				excludedReason: e.excludedReason,
 			})),
 		);
-		this.inv = inv;
 		this.say(
 			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded`,
 		);
@@ -238,7 +332,6 @@ export class Scanner {
 			const stored = readFileSync(path, "utf8");
 			const wroteAt = /^<!-- opensec threat model .*revision (\S+)/m.exec(stored)?.[1];
 			this.ledger.setThreatModel(this.scanId, stored, `reused:${path}`);
-			this.threatModelNote = `reused from \`${path}\``;
 			this.say(`threat model: reusing ${path} (edit it, or --refresh-threat-model to rewrite)`);
 			if (wroteAt && wroteAt !== "none" && this.revision && wroteAt !== this.revision) {
 				this.say(
@@ -289,7 +382,6 @@ export class Scanner {
 		chmodSync(path, 0o600);
 
 		this.ledger.setThreatModel(this.scanId, text, `generated:${path}`);
-		this.threatModelNote = `written this run, saved to \`${path}\``;
 		this.say(`threat model: written to ${path} — edit it and the next scan will use yours`);
 		return text;
 	}
@@ -299,15 +391,16 @@ export class Scanner {
 		const tm = threatModel ?? this.ledger.getThreatModel(this.scanId) ?? "";
 		this.checkBudget();
 
-		if (!this.inv) {
+		if (!this.ledger.hasFiles(this.scanId)) {
 			// Without this, a discover() with no inventory scans zero files and
 			// reports a clean completed scan.
 			throw new Error("discover() before inventory(): nothing is in scope yet. run() orders the phases.");
 		}
 
 		const probes = this.probeCount;
+		const inScope = this.ledger.coverage(this.scanId).files_in_scope;
 		this.say(
-			`discovery: ${probes} probe(s) over all ${this.inv.inScope.length} files, ` +
+			`discovery: ${probes} probe(s) over all ${inScope} files, ` +
 				`${this.concurrency} at a time`,
 		);
 
@@ -490,48 +583,28 @@ export class Scanner {
 
 	report(): ScanResult {
 		this.ledger.setPhase(this.scanId, "report");
-		const scan = this.ledger.getScan(this.scanId);
-		if (!scan) throw new Error(`scan ${this.scanId} vanished from the ledger`);
-
-		const candidates = this.ledger.listCandidates(this.scanId);
-		const coverage = this.ledger.coverage(this.scanId);
-
-		const markdown = renderMarkdown({
-			scan,
-			repoName: this.repoName,
-			repoPath: this.repoRoot,
-			candidates,
-			coverage,
-			leads: this.ledger.listLeads(this.scanId),
-			extensions: this.inv?.extensions ?? [],
-			excludedFiles: this.ledger.excludedCount(this.scanId),
-			modelRef: this.opts.model ?? "(default)",
-			promptHash: this.prompts.hash,
-			// Part of reading the coverage number: one probe reaching every file
-			// and four independently reaching every file are the same 100%, and
-			// only the second means the repository was looked at four ways.
-			ownership: `${this.probeCount} probe(s), each over all ${this.inv?.inScope.length ?? 0} files`,
-			threatModel: this.threatModelNote,
-		});
-
-		const dir = opensecDir("scans", this.scanId);
-		const reportPath = join(dir, "report.md");
-		const jsonPath = join(dir, "findings.json");
-		writeFileSync(reportPath, markdown, { encoding: "utf8", mode: 0o600 });
-		writeFileSync(jsonPath, JSON.stringify({ scan, coverage, candidates }, null, 2), {
-			encoding: "utf8",
-			mode: 0o600,
-		});
-
-		return { scanId: this.scanId, markdown, reportPath, jsonPath, candidates, coverage };
+		return reportScan(this.ledger, this.scanId);
 	}
 
 	async run(): Promise<ScanResult> {
+		// A resumed scan re-enters at startPhase; everything before it is already
+		// in the ledger. Validate and assess always run — they skip individual
+		// candidates that already carry a verdict, so on resume they only do what
+		// is left.
+		const skip = (p: Phase) => phaseBefore(p, this.startPhase);
 		try {
-			await this.inventory();
-			const tm = await this.threatModel();
-			await this.discover(tm);
-			await this.reduce();
+			if (skip("inventory")) {
+				this.say(
+					`inventory: kept from the interrupted run — ` +
+						`${this.ledger.coverage(this.scanId).files_in_scope} files in scope`,
+				);
+			} else {
+				await this.inventory();
+			}
+			let tm: string | undefined;
+			if (!skip("threat_model")) tm = await this.threatModel();
+			if (!skip("discovery")) await this.discover(tm);
+			if (!skip("reduce")) await this.reduce();
 			await this.validate();
 			await this.assess();
 			const result = this.report();
@@ -539,6 +612,11 @@ export class Scanner {
 			return result;
 		} catch (err) {
 			this.ledger.finishScan(this.scanId, "failed");
+			this.say(
+				`scan failed — everything recorded so far is kept. ` +
+					`'opensec resume ${this.scanId}' picks it back up; ` +
+					`'opensec report ${this.scanId}' renders what exists.`,
+			);
 			throw err;
 		}
 	}
@@ -560,6 +638,65 @@ export class Scanner {
 	close(): void {
 		this.ledger.close();
 	}
+}
+
+/**
+ * Render a scan's report from the ledger alone — no agents, no repo access, no
+ * model. This is what makes a failed scan's work recoverable: everything the
+ * report needs was recorded as it happened.
+ */
+export function reportScan(ledger: Ledger, scanId: string): ScanResult {
+	const scan = ledger.getScan(scanId);
+	if (!scan) {
+		throw new Error(`no scan '${scanId}' in this ledger. 'opensec report' lists the scans it knows.`);
+	}
+	const repo = ledger.getRepo(scan.repo_id);
+	const candidates = ledger.listCandidates(scanId);
+	const coverage = ledger.coverage(scanId);
+	const extensions = [
+		...new Set(ledger.listInScopePaths(scanId).map(ext).filter(Boolean)),
+	].sort();
+
+	const markdown = renderMarkdown({
+		scan,
+		repoName: repo?.name ?? scan.repo_id,
+		repoPath: repo?.path ?? "(unknown)",
+		candidates,
+		coverage,
+		leads: ledger.listLeads(scanId),
+		extensions,
+		excludedFiles: ledger.excludedCount(scanId),
+		modelRef: scan.model_ref ?? "(not recorded)",
+		promptHash: scan.prompt_hash ?? "(not recorded)",
+		// Part of reading the coverage number: one probe reaching every file
+		// and four independently reaching every file are the same 100%, and
+		// only the second means the repository was looked at four ways.
+		ownership: scan.probes
+			? `${scan.probes} probe(s), each over all ${coverage.files_in_scope} files`
+			: undefined,
+		threatModel: threatModelNote(scan.threat_model_source),
+	});
+
+	const dir = opensecDir("scans", scanId);
+	const reportPath = join(dir, "report.md");
+	const jsonPath = join(dir, "findings.json");
+	writeFileSync(reportPath, markdown, { encoding: "utf8", mode: 0o600 });
+	writeFileSync(jsonPath, JSON.stringify({ scan, coverage, candidates }, null, 2), {
+		encoding: "utf8",
+		mode: 0o600,
+	});
+
+	return { scanId, markdown, reportPath, jsonPath, candidates, coverage };
+}
+
+function threatModelNote(source: string | null): string | undefined {
+	if (!source) return undefined;
+	const sep = source.indexOf(":");
+	const kind = sep === -1 ? source : source.slice(0, sep);
+	const path = sep === -1 ? "" : source.slice(sep + 1);
+	if (kind === "reused") return `reused from \`${path}\``;
+	if (kind === "generated") return `written this run, saved to \`${path}\``;
+	return source;
 }
 
 function formatLocation(l: {
