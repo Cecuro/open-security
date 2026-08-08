@@ -18,6 +18,12 @@ export interface InventoryResult {
 	inScope: InventoryEntry[];
 	/** File extensions in scope, without the dot. Not language detection. */
 	extensions: string[];
+	/**
+	 * `--exclude` globs that matched no file. An exclusion that excluded nothing
+	 * is indistinguishable from one that worked, and the user has already paid
+	 * for the wider scan by the time the findings say otherwise.
+	 */
+	unusedExcludes: string[];
 }
 
 const EXCLUDED_DIRS = [
@@ -61,7 +67,7 @@ export async function inventory(
 	const root = resolve(repoRoot);
 	const paths = await listFiles(root);
 
-	const excluders = (opts.exclude ?? []).map((g) => ({ glob: g, re: globToRegExp(g) }));
+	const excluders = (opts.exclude ?? []).map((g) => ({ glob: g, re: globToRegExp(g), hits: 0 }));
 
 	const entries: InventoryEntry[] = [];
 	for (const rel of paths) {
@@ -71,6 +77,7 @@ export async function inventory(
 		// the same reason coverage is.
 		const hit = excluders.find((e) => e.re.test(rel));
 		if (hit) {
+			hit.hits++;
 			entries.push({
 				path: rel,
 				sha: "",
@@ -92,7 +99,12 @@ export async function inventory(
 	}
 
 	const extensions = [...new Set(inScope.map((e) => ext(e.path)).filter(Boolean))].sort();
-	return { entries, inScope, extensions };
+	return {
+		entries,
+		inScope,
+		extensions,
+		unusedExcludes: excluders.filter((e) => e.hits === 0).map((e) => e.glob),
+	};
 }
 
 /**

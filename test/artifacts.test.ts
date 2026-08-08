@@ -225,3 +225,29 @@ describe("a one-pass report says it is one sample", () => {
 		expect(md(undefined)).not.toMatch(/one pass/);
 	});
 });
+
+describe("an exclusion that excluded nothing says so", () => {
+	it("reports globs that matched no file, and stays quiet about ones that did", async () => {
+		// `--exclude peridot-dashboard` matches nothing because entries are files;
+		// it needed `peridot-dashboard/**`. Silence there means paying for the
+		// wider scan and reading findings you believed were out of scope.
+		const { inventory } = await import("../src/scan/inventory.js");
+		const root = mkdtempSync(join(tmpdir(), "opensec-inv-"));
+		mkdirSync(join(root, "app"), { recursive: true });
+		writeFileSync(join(root, "app", "a.ts"), "const a = 1;\n");
+		writeFileSync(join(root, "b.ts"), "const b = 2;\n");
+
+		const inv = await inventory(root, { exclude: ["app/**", "app", "nope/**"] });
+		expect(inv.inScope.map((f) => f.path)).toEqual(["b.ts"]);
+		expect(inv.unusedExcludes).toEqual(["app", "nope/**"]);
+	});
+
+	it("is empty when every glob did something", async () => {
+		const { inventory } = await import("../src/scan/inventory.js");
+		const root = mkdtempSync(join(tmpdir(), "opensec-inv2-"));
+		writeFileSync(join(root, "keep.ts"), "1\n");
+		writeFileSync(join(root, "drop.ts"), "2\n");
+		const inv = await inventory(root, { exclude: ["drop.ts"] });
+		expect(inv.unusedExcludes).toEqual([]);
+	});
+});

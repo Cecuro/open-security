@@ -333,6 +333,12 @@ export class Scanner {
 		this.say(
 			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded`,
 		);
+		for (const glob of inv.unusedExcludes) {
+			// `--exclude peridot-dashboard` matches nothing, because entries are
+			// files: it needed `peridot-dashboard/**`. Saying so beats scanning what
+			// they meant to leave out and billing them for it.
+			this.say(`  --exclude '${glob}' matched no file — check the pattern`);
+		}
 		return inv;
 	}
 
