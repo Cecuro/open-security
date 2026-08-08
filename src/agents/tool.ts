@@ -302,12 +302,12 @@ function workNext(ctx: RunContext, p: Params): string {
 			files: lines,
 			returned: files.length,
 			remaining: Math.max(0, unread - files.length),
+			// A silent cap is the tool lying about what it did. Say it, so an agent
+			// that asked for 200 knows why it got 50 and does not read a short batch
+			// as a nearly-empty worklist.
+			...(capped ? { asked, capped_to: WORK_BATCH_MAX } : {}),
 			// "no files but work remaining" is not a state the worklist can be in.
 			// Saying so is cheaper than a probe quietly concluding it is done.
-			// A silent cap is the tool lying about what it did. Say it, so an agent
-			// that asked for 200 knows why it got 50 and does not conclude the
-			// worklist is nearly empty.
-			...(capped ? { asked, capped_to: WORK_BATCH_MAX } : {}),
 			note:
 				files.length > 0
 					? `these are unread. read them, then call work.next for the next batch` +
@@ -346,8 +346,11 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 		throw new Error(
 			(substantive.length > 0
 				? `no entrypoint, source, root_control or sink is in your worklist — an evidence ` +
-					`location does not tie a finding to you. Cite a file from work.next. `
-				: `no location is in your worklist — cite at least one file from work.next. `) +
+					`location does not tie a finding to you. Cite a file from work.next, or, if ` +
+					`the flaw really lives outside your list, record it with lead.record so it is ` +
+					`not lost. `
+				: `no location is in your worklist — cite at least one file from work.next, or ` +
+					`record it with lead.record. `) +
 				`Got: ${anchors.map((l) => `${l.path}${l.role ? ` (${l.role})` : ""}`).join(", ")}`,
 		);
 	}

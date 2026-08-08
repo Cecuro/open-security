@@ -453,6 +453,20 @@ describe("what ties a finding to your worklist", () => {
 		).rejects.toThrow(/evidence location does not tie a finding to you/);
 	});
 
+	it("tells a refused agent where to put the finding instead", async () => {
+		// A refusal with nowhere to go loses what the agent found. If the flaw
+		// really is outside its list, the lead is the record that survives.
+		await expect(
+			env.call({
+				...base,
+				locations: [
+					{ path: "app.js", start_line: 1, end_line: 1, role: "evidence" },
+					{ path: "secret.txt", start_line: 1, end_line: 1, role: "root_control" },
+				],
+			}),
+		).rejects.toThrow(/lead\.record/);
+	});
+
 	it("accepts it when a substantive location is in scope", async () => {
 		const out = JSON.parse(
 			await env.call({
