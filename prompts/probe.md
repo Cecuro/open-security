@@ -16,6 +16,13 @@ The threat model above names this repository's highest-risk areas. Work those
 first, then work the rest of your list. For each file, ask what an attacker
 controls when this code runs, and what this code does with it.
 
+It also ends with **Worth a look** — things that struck its writer as odd
+without being claims. Those are leads, not findings, and they are the part of
+the map most likely to point somewhere the categories missed. Where one touches
+your worklist, spend the few minutes. Neither list bounds you: an area named
+nowhere in the threat model is still yours to review, and a control the threat
+model says exists is a claim to check, not a reason to skip the file.
+
 ## Recording
 
 When you have a specific suspected flaw, call `candidate.create`:

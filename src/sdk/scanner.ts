@@ -11,6 +11,7 @@ import {
 	PROBE_VERBS,
 	REDUCE_VERBS,
 	type RunContext,
+	THREAT_MODEL_VERBS,
 	VALIDATE_VERBS,
 } from "../agents/tool.js";
 import { Ledger, opensecDir, scanArtifactDir, shortHash } from "../db/db.js";
@@ -253,9 +254,10 @@ export class Scanner {
 
 		const { files, total } = this.ledger.listWork(this.scanId, 200, 0);
 		const result = await this.runAgent({
-			ctx: this.ctx("threat-model"),
+			ctx: { ...this.ctx("threat-model"), verbs: THREAT_MODEL_VERBS },
 			onEvent: (m) => this.say(m),
 			tracePath: this.tracePath("threat-model"),
+			subagents: this.subagentDeps(),
 			systemPrompt: this.prompts.get("threat-model.md"),
 			prompt: [
 				`Repository: ${this.repoName}`,
