@@ -364,7 +364,13 @@ export class Scanner {
 			// but scope is per run, so --exclude can leave one whose highest-risk
 			// areas are all files this scan will not review — pointing every probe
 			// at code it cannot file against. Say so rather than orient them wrongly.
-			const drift = citedOutOfScope(stored, new Set(this.inv?.inScope.map((f) => f.path)));
+			// Only when there is an inventory to compare against. Phases are
+			// individually callable, and `new Set(undefined)` is empty — which would
+			// report every file the model cites as out of scope, confidently and
+			// wrongly, to anyone calling threatModel() on its own.
+			const drift = this.inv
+				? citedOutOfScope(stored, new Set(this.inv.inScope.map((f) => f.path)))
+				: { cited: 0, outOfScope: 0 };
 			if (drift.outOfScope > 0) {
 				// Stated, not thresholded. A share is the wrong summary anyway — this
 				// model spent its top two highest-risk areas on excluded files while
