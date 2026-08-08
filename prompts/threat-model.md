@@ -12,11 +12,12 @@ is:
    enters, and what the caller controls.
 3. **Trust boundaries and controls.** Where data or authority changes hands, and
    the control that enforces each boundary.
-4. **High-risk operations.** Code that executes, stores, sends, or trusts data;
-   add domain-specific invariants such as economic, consensus, custody, tenancy,
-   or safety rules when they matter.
-5. **Severity.** What critical, high, medium, and low mean in this repository.
-6. **Review priorities.** Three to seven highest-risk areas, each pointing at
+4. **External surfaces.** Where the system calls, executes, stores, parses, or
+   trusts something outside its control.
+5. **High-risk operations.** Add domain-specific invariants such as economic,
+   consensus, custody, tenancy, or safety rules when they matter.
+6. **Severity.** What critical, high, medium, and low mean in this repository.
+7. **Review priorities.** Three to seven highest-risk areas, each pointing at
    code, followed by open leads worth checking. Leads are observations, not
    findings.
 
