@@ -158,3 +158,23 @@ describe("schema migrations", () => {
 		expect(() => Ledger.open(file)).toThrow(/Upgrade opensec/);
 	});
 });
+
+describe("file_reads is held to the same integrity as every other scan table", () => {
+	it("refuses a row for a scan that does not exist", () => {
+		// Every other table keyed on scan_id declares REFERENCES scans(id), and
+		// the connection turns foreign_keys on. This one was written without it,
+		// which would have let a pass's read history outlive the scan it belongs
+		// to and only show up as a worklist that never drains.
+		const file = tmpFile("fk.db");
+		Ledger.open(file).close();
+		const db = new Database(file);
+		db.pragma("foreign_keys = ON");
+		expect(db.prepare("PRAGMA foreign_key_list(file_reads)").all()).toHaveLength(1);
+		expect(() =>
+			db
+				.prepare("INSERT INTO file_reads (scan_id, read_group, path, bytes_read) VALUES (?,?,?,?)")
+				.run("no-such-scan", "pass-1", "a.rs", 1),
+		).toThrow(/FOREIGN KEY/);
+		db.close();
+	});
+});
