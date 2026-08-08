@@ -43,6 +43,10 @@ export type Verb =
 	| "candidate.assess"
 	| "lead.record";
 
+// The threat model is a map, not a findings list — its prompt says so, so the
+// tool must not advertise candidate.create to it. Without this it fell through
+// to ALL_VERBS and offered three verbs the phase has no use for.
+export const THREAT_MODEL_VERBS: Verb[] = ["work.next", "lead.record"];
 export const PROBE_VERBS: Verb[] = ["work.next", "candidate.create", "lead.record"];
 export const VALIDATE_VERBS: Verb[] = ["work.next", "candidate.validate", "lead.record"];
 export const ASSESS_VERBS: Verb[] = ["work.next", "candidate.assess", "lead.record"];

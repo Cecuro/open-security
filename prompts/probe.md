@@ -16,6 +16,9 @@ The threat model above names this repository's highest-risk areas. Work those
 first, then work the rest of your list. For each file, ask what an attacker
 controls when this code runs, and what this code does with it.
 
+Treat the threat model's priorities and open leads as starting points, not
+boundaries. Verify its claims and review the rest of your worklist too.
+
 ## Recording
 
 When you have a specific suspected flaw, call `candidate.create`:

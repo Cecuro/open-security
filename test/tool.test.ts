@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createOpensecTool, type RunContext } from "../src/agents/tool.js";
+import {
+	createOpensecTool,
+	type RunContext,
+	THREAT_MODEL_VERBS,
+} from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 
 const SCAN = "scan-test";
@@ -349,5 +353,43 @@ describe("leads", () => {
 	it("records dead ends", async () => {
 		await env.call({ verb: "lead.record", text: "checked the CSRF story, framework covers it", status: "dead_end" });
 		expect(env.ctx.ledger.listLeads(SCAN)).toHaveLength(1);
+	});
+});
+
+describe("the threat-model phase is a map, not a findings list", () => {
+	// It used to pass no verbs at all, which fell through to ALL_VERBS and
+	// advertised candidate.create to an agent whose prompt says nothing it
+	// writes is a finding yet.
+	function threatModelTool() {
+		const ctx: RunContext = { ...env.ctx, workerId: "threat-model", verbs: THREAT_MODEL_VERBS };
+		const tool = createOpensecTool(ctx);
+		return {
+			description: tool.description,
+			call: async (p: Record<string, unknown>) => {
+				const r = await tool.execute("id", p as never, undefined, undefined, {} as never);
+				return r.content.map((c) => ("text" in c ? c.text : "")).join("");
+			},
+		};
+	}
+
+	it("can read the worklist and record what it could not settle", async () => {
+		const t = threatModelTool();
+		expect(JSON.parse(await t.call({ verb: "work.next" })).total).toBe(2);
+		await t.call({ verb: "lead.record", text: "could not find the route table", status: "open" });
+		expect(env.ctx.ledger.listLeads(SCAN)).toHaveLength(1);
+	});
+
+	it("cannot file a candidate, and is not told it could", async () => {
+		const t = threatModelTool();
+		expect(t.description).not.toContain("candidate.create");
+		await expect(
+			t.call({
+				verb: "candidate.create",
+				title: "t",
+				summary: "s",
+				evidence: "e",
+				locations: [{ path: "app.js", start_line: 1, end_line: 2 }],
+			}),
+		).rejects.toThrow(/not available to threat-model/);
 	});
 });
