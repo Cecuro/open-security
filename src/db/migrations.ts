@@ -47,6 +47,19 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE scans ADD COLUMN probes INTEGER;
 		`,
 	},
+	{
+		version: 7,
+		note: "file_reads — what each pass has read, so a second pass is not handed an empty worklist",
+		sql: `
+			CREATE TABLE IF NOT EXISTS file_reads (
+			  scan_id    TEXT NOT NULL REFERENCES scans(id),
+			  read_group TEXT NOT NULL,
+			  path       TEXT NOT NULL,
+			  bytes_read INTEGER NOT NULL DEFAULT 0,
+			  PRIMARY KEY (scan_id, read_group, path)
+			);
+		`,
+	},
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.reduce((v, m) => Math.max(v, m.version), 1);

@@ -14,6 +14,8 @@ export interface ReportInput {
 	modelRef: string;
 	promptHash: string;
 	ownership?: string;
+	/** Independent passes that ran. Undefined when the caller does not track it. */
+	passes?: number;
 	threatModel?: string;
 }
 
@@ -63,6 +65,20 @@ export function renderMarkdown(r: ReportInput): string {
 		"> review**: a file that was read is not thereby a file that was understood.",
 		"",
 	);
+	// Coverage says what was read. It says nothing about what was noticed, and
+	// what gets noticed varies a lot: repeated scans of the same code at the same
+	// revision, reading all of it, return overlapping but different findings —
+	// including runs that miss what an earlier one found. A report that presents
+	// one pass as the answer is overstating itself, so it says so.
+	if (r.passes !== undefined && r.passes < 2) {
+		out.push(
+			"> This was **one pass**. Reading everything is not noticing everything: a",
+			"> second pass over the same code, at the same revision, finds an overlapping",
+			"> but different set — in both directions, including findings this one made.",
+			"> Treat this as one sample, not the finding list. Raise `--probes` for more.",
+			"",
+		);
+	}
 	if (r.extensions.length > 0) {
 		out.push(`Extensions in scope: ${r.extensions.map((e) => codeSpan(`.${e}`)).join(", ")}.`, "");
 	}
@@ -86,7 +102,7 @@ export function renderMarkdown(r: ReportInput): string {
 			);
 		}
 		out.push("");
-		for (const c of confirmed) out.push(...renderFinding(c));
+		for (const c of confirmed) out.push(...renderFinding(c, mergedInto(r.candidates, c.id)));
 	}
 
 	if (followUp.length > 0) {
@@ -184,7 +200,18 @@ export function renderMarkdown(r: ReportInput): string {
 	return out.join("\n");
 }
 
-function renderFinding(c: Candidate): string[] {
+/**
+ * How many separate filings collapsed into this one.
+ *
+ * Only interesting above 1, and only really above 1 once more than one pass is
+ * running. It is deliberately not an input to anything: see the note this puts
+ * in the report.
+ */
+function mergedInto(candidates: Candidate[], id: string): number {
+	return candidates.filter((c) => c.merged_into === id).length;
+}
+
+function renderFinding(c: Candidate, mergedCount = 0): string[] {
 	const comp = c.resolution?.computed;
 	const inputs = c.resolution?.inputs;
 	const out: string[] = [];
@@ -198,6 +225,17 @@ function renderFinding(c: Candidate): string[] {
 	);
 	if (comp?.proof_gap) {
 		out.push(`> \`proof_gap: ${comp.proof_gap}\` — this severity is asserted from code, not demonstrated.`, "");
+	}
+	if (mergedCount > 0) {
+		// Said plainly because the temptation is to read it as corroboration. Two
+		// agents agreeing is a property of the search — they read the same code
+		// under the same instructions — and severity and confidence are computed
+		// from the evidence either way. A finding filed once is not weaker for it.
+		out.push(
+			`> Filed ${mergedCount + 1} times independently and merged. That is a fact about ` +
+				`the search, not evidence about the finding.`,
+			"",
+		);
 	}
 
 	out.push("**Locations**", "");

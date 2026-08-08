@@ -61,7 +61,7 @@ describe("the M0 loop, without a model", () => {
 
 		// --- phase 2: the probe ------------------------------------------------
 		const work = await call({ verb: "work.next" });
-		expect(work.total).toBe(2);
+		expect(work.returned).toBe(2);
 		expect(work.remaining).toBe(0);
 
 		const cmdi = await call({

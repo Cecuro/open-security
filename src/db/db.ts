@@ -254,23 +254,87 @@ export class Ledger {
 	}
 
 	/**
-	 * The worklist. Every probe gets the same one — the whole repository — so
-	 * there is nothing to scope it by.
+	 * The worklist: in-scope files that have not been read through.
+	 *
+	 * There is no cursor, because a cursor is a way to page past work you did
+	 * not do — which is what a probe handed 427 files did, reaching the end of
+	 * the list having read a fifth of it. A file leaves this list by being read,
+	 * or not at all.
+	 *
+	 * `bytes_read < bytes_total`, not `bytes_read = 0`: pi truncates a read at
+	 * 50KB, so one whole-file read of a 190KB file sees a quarter of it. Under
+	 * the weaker test that file was done, and the tail of every large file in
+	 * the repository went unreviewed — which is where the findings that need
+	 * following a function to its end happen to live.
+	 *
+	 * `bytes_read`, not `first_touched_at`: a grep marks a file touched without
+	 * reading it, and one repo-wide grep would otherwise empty the worklist for
+	 * free. Searched is not reviewed.
 	 */
-	listWork(scanId: string, limit: number, cursor: number): { files: ScanFile[]; total: number } {
-		const total = (
+	listWork(
+		scanId: string,
+		limit: number,
+		worklist?: readonly string[],
+		readGroup?: string,
+	): { files: ScanFile[]; unread: number } {
+		// The partition arrives as the paths themselves rather than a column on
+		// files. It is derived per run and never read back, so persisting it would
+		// be a second bookkeeping path that only exists to drift.
+		if (worklist && worklist.length === 0) return { files: [], unread: 0 };
+		const scope = worklist ? ` AND f.path IN (${worklist.map(() => "?").join(",")})` : "";
+		const paths = worklist ? [...worklist] : [];
+
+		// Two shapes rather than one with a conditional expression spliced into it.
+		// The clever version put the read-group placeholder in the SELECT list and
+		// the scan id in the WHERE, and the arguments went in the other order — so
+		// every probe got an empty worklist, filed nothing, and the scan reported
+		// itself clean. Parameter order is not worth being clever about.
+		if (readGroup === undefined) {
+			const unread = (
+				this.db
+					.prepare(
+						`SELECT COUNT(*) AS n FROM files f
+						 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+						 AND f.bytes_read < f.bytes_total${scope}`,
+					)
+					.get(scanId, ...paths) as { n: number }
+			).n;
+			const files = this.db
+				.prepare(
+					`SELECT f.path, f.sha, f.bytes_total, f.bytes_read, f.excluded_reason,
+					        f.first_touched_at
+					 FROM files f WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+					 AND f.bytes_read < f.bytes_total${scope}
+					 ORDER BY f.path LIMIT ?`,
+				)
+				.all(scanId, ...paths, limit) as ScanFile[];
+			return { files, unread };
+		}
+
+		// "Read" means read by this pass. Without that, a second pass opens on an
+		// empty worklist and its silence reads as agreement with the first.
+		const join = `LEFT JOIN file_reads r
+			 ON r.scan_id = f.scan_id AND r.path = f.path AND r.read_group = ?`;
+		const unread = (
 			this.db
-				.prepare("SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND excluded_reason IS NULL")
-				.get(scanId) as { n: number }
+				.prepare(
+					`SELECT COUNT(*) AS n FROM files f ${join}
+					 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+					 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}`,
+				)
+				.get(readGroup, scanId, ...paths) as { n: number }
 		).n;
-		const rows = this.db
+		const files = this.db
 			.prepare(
-				`SELECT path, sha, bytes_total, bytes_read, excluded_reason, first_touched_at
-				 FROM files WHERE scan_id = ? AND excluded_reason IS NULL
-				 ORDER BY path LIMIT ? OFFSET ?`,
+				`SELECT f.path, f.sha, f.bytes_total, COALESCE(r.bytes_read, 0) AS bytes_read,
+				        f.excluded_reason, f.first_touched_at
+				 FROM files f ${join}
+				 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+				 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}
+				 ORDER BY f.path LIMIT ?`,
 			)
-			.all(scanId, limit, cursor) as ScanFile[];
-		return { files: rows, total };
+			.all(readGroup, scanId, ...paths, limit) as ScanFile[];
+		return { files, unread };
 	}
 
 	/** Whether inventory ran at all for this scan, excluded files included. */
@@ -290,7 +354,12 @@ export class Ledger {
 		return rows.map((r) => r.path);
 	}
 
-	fileInScope(scanId: string, path: string): boolean {
+	/**
+	 * In scope, and — when the caller owns a slice — inside it. Ownership is what
+	 * ties a finding to the probe that filed it.
+	 */
+	fileInScope(scanId: string, path: string, worklist?: readonly string[]): boolean {
+		if (worklist && !worklist.includes(path)) return false;
 		const row = this.db
 			.prepare(
 				"SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL",
@@ -299,14 +368,51 @@ export class Ledger {
 		return row !== undefined;
 	}
 
-	recordTouch(scanId: string, path: string, bytesRead: number): void {
+	/**
+	 * `continued` is a read that carried an offset — the agent asking for more of
+	 * a file it has already seen part of. Those add up; everything else is a
+	 * high-water mark.
+	 *
+	 * The distinction exists because pi truncates a read at 50KB. Under plain
+	 * MAX, a 190KB file reads once, records 51,200, and can never record more no
+	 * matter how much of it is paged through — so coverage silently ceilings at
+	 * 50KB per file and the worklist calls the file done. That is how a probe
+	 * reached 100% of files while the tail of every large one went unread, which
+	 * is exactly where the deep findings live.
+	 *
+	 * Adding only offset reads keeps the accounting honest in the direction that
+	 * matters: re-reading a file from the top cannot inflate it, because that is
+	 * the read with no offset.
+	 */
+	recordTouch(
+		scanId: string,
+		path: string,
+		bytesRead: number,
+		continued = false,
+		readGroup?: string,
+	): void {
+		// files.bytes_read stays the union across every pass, because coverage is a
+		// claim about the scan. file_reads is what each pass has seen on its own.
 		this.db
 			.prepare(
-				`UPDATE files SET bytes_read = MAX(bytes_read, ?),
-				 first_touched_at = COALESCE(first_touched_at, ?)
-				 WHERE scan_id = ? AND path = ?`,
+				continued
+					? `UPDATE files SET bytes_read = MIN(bytes_total, bytes_read + ?),
+					   first_touched_at = COALESCE(first_touched_at, ?)
+					   WHERE scan_id = ? AND path = ?`
+					: `UPDATE files SET bytes_read = MAX(bytes_read, ?),
+					   first_touched_at = COALESCE(first_touched_at, ?)
+					   WHERE scan_id = ? AND path = ?`,
 			)
 			.run(bytesRead, now(), scanId, path);
+
+		if (readGroup === undefined) return;
+		this.db
+			.prepare(
+				`INSERT INTO file_reads (scan_id, read_group, path, bytes_read) VALUES (?, ?, ?, ?)
+				 ON CONFLICT(scan_id, read_group, path) DO UPDATE SET
+				   bytes_read = ${continued ? "file_reads.bytes_read + excluded.bytes_read" : "MAX(file_reads.bytes_read, excluded.bytes_read)"}`,
+			)
+			.run(scanId, readGroup, path, bytesRead);
 	}
 
 	coverage(scanId: string): Coverage {

@@ -50,22 +50,57 @@ beforeEach(() => {
 });
 
 describe("work.next is the worklist, and excluded files are not in it", () => {
-	it("returns in-scope files with a total and a cursor", async () => {
+	it("returns in-scope files, and never an excluded one", async () => {
 		const out = JSON.parse(await env.call({ verb: "work.next" }));
-		expect(out.total).toBe(2);
+		expect(out.returned).toBe(2);
 		expect(out.remaining).toBe(0);
 		expect(out.files.join(" ")).toContain("app.js");
 		expect(out.files.join(" ")).not.toContain("secret.txt");
 	});
 
-	it("pages", async () => {
+	it("hands out the same files again until they are actually read", async () => {
+		// The load-bearing one. A cursor let a probe page to the end of a 427-file
+		// worklist having read a fifth of it, and report itself done. There is no
+		// cursor now: the list is what nothing has read, so asking again without
+		// reading gets the same answer.
 		const first = JSON.parse(await env.call({ verb: "work.next", limit: 1 }));
 		expect(first.returned).toBe(1);
 		expect(first.remaining).toBe(1);
-		const second = JSON.parse(
-			await env.call({ verb: "work.next", limit: 1, cursor: first.cursor }),
-		);
-		expect(second.remaining).toBe(0);
+
+		const again = JSON.parse(await env.call({ verb: "work.next", limit: 1 }));
+		expect(again.files).toEqual(first.files);
+		expect(again.remaining).toBe(1);
+
+		await env.call({ verb: "work.next", limit: 1 });
+		env.ctx.ledger.recordTouch(SCAN, "app.js", 30);
+		const after = JSON.parse(await env.call({ verb: "work.next", limit: 1 }));
+		expect(after.files.join(" ")).toContain("other.js");
+		expect(after.remaining).toBe(0);
+	});
+
+	it("does not count a grep as reading", async () => {
+		// recordTouch with zero bytes is what a grep hit does. Otherwise one
+		// repo-wide grep empties the worklist without a file being reviewed.
+		env.ctx.ledger.recordTouch(SCAN, "app.js", 0);
+		const out = JSON.parse(await env.call({ verb: "work.next" }));
+		expect(out.files.join(" ")).toContain("app.js");
+		expect(out.returned).toBe(2);
+	});
+
+	it("caps the batch, and says so rather than capping silently", async () => {
+		// A silent cap is the tool lying about what it did: an agent that asked
+		// for 200 and got 2 could reasonably read that as a nearly-empty worklist.
+		const out = JSON.parse(await env.call({ verb: "work.next", limit: 200 }));
+		expect(out.returned).toBeLessThanOrEqual(50);
+		expect(out.asked).toBe(200);
+		expect(out.capped_to).toBe(50);
+		expect(out.note).toMatch(/capped at 50/);
+	});
+
+	it("says nothing about the cap when the request was within it", async () => {
+		const out = JSON.parse(await env.call({ verb: "work.next", limit: 10 }));
+		expect(out.asked).toBeUndefined();
+		expect(out.note).not.toMatch(/capped/);
 	});
 });
 
@@ -374,7 +409,7 @@ describe("the threat-model phase is a map, not a findings list", () => {
 
 	it("can read the worklist and record what it could not settle", async () => {
 		const t = threatModelTool();
-		expect(JSON.parse(await t.call({ verb: "work.next" })).total).toBe(2);
+		expect(JSON.parse(await t.call({ verb: "work.next" })).returned).toBe(2);
 		await t.call({ verb: "lead.record", text: "could not find the route table", status: "open" });
 		expect(env.ctx.ledger.listLeads(SCAN)).toHaveLength(1);
 	});
@@ -391,5 +426,55 @@ describe("the threat-model phase is a map, not a findings list", () => {
 				locations: [{ path: "app.js", start_line: 1, end_line: 2 }],
 			}),
 		).rejects.toThrow(/not available to threat-model/);
+	});
+});
+
+describe("what ties a finding to your worklist", () => {
+	const base = {
+		verb: "candidate.create",
+		title: "t",
+		cwe: ["CWE-78"],
+		summary: "s",
+		evidence: "e",
+	};
+
+	it("refuses a finding anchored only by an evidence mention", async () => {
+		// The real case: README.md is in scope and merely mentions a route; the
+		// entrypoint, broken control and sink are all in files the user excluded.
+		// Allowing it lets a passing mention pull out-of-scope code into a report.
+		await expect(
+			env.call({
+				...base,
+				locations: [
+					{ path: "app.js", start_line: 1, end_line: 1, role: "evidence" },
+					{ path: "secret.txt", start_line: 1, end_line: 1, role: "root_control" },
+				],
+			}),
+		).rejects.toThrow(/evidence location does not tie a finding to you/);
+	});
+
+	it("accepts it when a substantive location is in scope", async () => {
+		const out = JSON.parse(
+			await env.call({
+				...base,
+				locations: [
+					{ path: "other.js", start_line: 1, end_line: 1, role: "evidence" },
+					{ path: "app.js", start_line: 1, end_line: 1, role: "sink" },
+				],
+			}),
+		);
+		expect(out.status).toMatch(/recorded|merged_into_existing/);
+	});
+
+	it("falls back to any location when no roles were given at all", async () => {
+		// Nothing to discriminate on, so the older rule stands rather than
+		// refusing every finding from an agent that omits roles.
+		const out = JSON.parse(
+			await env.call({
+				...base,
+				locations: [{ path: "app.js", start_line: 2, end_line: 2 }],
+			}),
+		);
+		expect(out.status).toMatch(/recorded|merged_into_existing/);
 	});
 });
