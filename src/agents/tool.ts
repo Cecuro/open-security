@@ -32,12 +32,17 @@ export interface RunContext {
 	verbs?: Verb[];
 	depth?: number;
 	overflowDir?: string;
+	/** The files this worker owns. Undefined means the whole repository. */
+	worklist?: readonly string[];
+	/** Which pass this worker belongs to. Reads are counted per group. */
+	readGroup?: string;
 	resolvableIds?: string[];
 	dispositions?: Disposition[];
 }
 
 export type Verb =
 	| "work.next"
+	| "work.complete"
 	| "candidate.create"
 	| "candidate.validate"
 	| "candidate.assess"
@@ -47,7 +52,7 @@ export type Verb =
 // tool must not advertise candidate.create to it. Without this it fell through
 // to ALL_VERBS and offered three verbs the phase has no use for.
 export const THREAT_MODEL_VERBS: Verb[] = ["work.next", "lead.record"];
-export const PROBE_VERBS: Verb[] = ["work.next", "candidate.create", "lead.record"];
+export const PROBE_VERBS: Verb[] = ["work.next", "work.complete", "candidate.create", "lead.record"];
 export const VALIDATE_VERBS: Verb[] = ["work.next", "candidate.validate", "lead.record"];
 export const ASSESS_VERBS: Verb[] = ["work.next", "candidate.assess", "lead.record"];
 export const REDUCE_VERBS: Verb[] = ["candidate.validate"];
@@ -97,7 +102,6 @@ const paramsSchema = (verbs: Verb[]) =>
 		verb: Type.Union(verbs.map((v) => Type.Literal(v))),
 
 		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
-		cursor: Type.Optional(Type.Integer({ minimum: 0 })),
 
 		title: Type.Optional(Type.String()),
 		cwe: Type.Optional(
@@ -190,6 +194,7 @@ const paramsSchema = (verbs: Verb[]) =>
 
 const ALL_VERBS: Verb[] = [
 	"work.next",
+	"work.complete",
 	"candidate.create",
 	"candidate.validate",
 	"candidate.assess",
@@ -200,7 +205,10 @@ const ALL_VERBS: Verb[] = [
 // advertises a verb the worker cannot use is an instruction to make an error.
 const VERB_DOC: Record<Verb, string> = {
 	"work.next":
-		"- work.next({ limit, cursor }) — the files you are accountable for, and the total.",
+		"- work.next({ limit }) — the next batch of files nothing has read yet, and how\n" +
+		"  many are left after it. Call it again until remaining is 0.",
+	"work.complete":
+		"- work.complete({ summary }) — after work.next says remaining is 0, record what you reviewed, found, and could not settle.",
 	"candidate.create":
 		"- candidate.create({ title, cwe, locations, summary, evidence, instance }) — a\n" +
 		"  suspected flaw. locations must cite real line ranges in files inside the repo.",
@@ -263,6 +271,8 @@ function run(ctx: RunContext, p: Params): string {
 	switch (p.verb) {
 		case "work.next":
 			return workNext(ctx, p);
+		case "work.complete":
+			return workComplete(ctx, p);
 		case "candidate.create":
 			return candidateCreate(ctx, p);
 		case "candidate.validate":
@@ -276,27 +286,51 @@ function run(ctx: RunContext, p: Params): string {
 	}
 }
 
+const WORK_BATCH_MAX = 50;
+
 function workNext(ctx: RunContext, p: Params): string {
-	const limit = (p.limit as number | undefined) ?? 40;
-	const cursor = (p.cursor as number | undefined) ?? 0;
-	const { files, total } = ctx.ledger.listWork(ctx.scanId, limit, cursor);
-	const next = cursor + files.length;
-	const lines = files.map((f) => `${f.path} (${f.bytes_total} bytes)`);
+	// Capped: a batch large enough to page the whole repository in three calls is
+	// a batch nobody reads. The cap is what makes `remaining` mean anything.
+	const asked = (p.limit as number | undefined) ?? 25;
+	const limit = Math.min(Math.max(1, asked), WORK_BATCH_MAX);
+	const capped = asked > WORK_BATCH_MAX;
+	const { files, unread } = ctx.ledger.listWork(ctx.scanId, limit, ctx.worklist, ctx.readGroup);
+	// A partially-read file says so, with what is left. pi truncates a read at
+	// 50KB, so on a large file the agent has to come back with an offset, and it
+	// can only know that if the worklist tells it.
+	const lines = files.map((f) =>
+		f.bytes_read > 0
+			? `${f.path} (${f.bytes_total} bytes, ${f.bytes_read} read — continue with an offset)`
+			: `${f.path} (${f.bytes_total} bytes)`,
+	);
 	return JSON.stringify(
 		{
 			files: lines,
 			returned: files.length,
-			cursor: next,
-			total,
-			remaining: Math.max(0, total - next),
+			remaining: Math.max(0, unread - files.length),
+			// A silent cap is the tool lying about what it did. Say it, so an agent
+			// that asked for 200 knows why it got 50 and does not read a short batch
+			// as a nearly-empty worklist.
+			...(capped ? { asked, capped_to: WORK_BATCH_MAX } : {}),
+			// "no files but work remaining" is not a state the worklist can be in.
+			// Saying so is cheaper than a probe quietly concluding it is done.
 			note:
-				next < total
-					? `call work.next again with cursor=${next} for the rest`
-					: "end of worklist",
+				files.length > 0
+					? `these are unread. read them, then call work.next for the next batch` +
+						(capped ? ` (batches are capped at ${WORK_BATCH_MAX})` : "")
+					: unread === 0
+						? "end of worklist"
+						: `worklist bug: ${unread} unread but none returned — report this rather than stopping`,
 		},
 		null,
 		1,
 	);
+}
+
+function workComplete(ctx: RunContext, p: Params): string {
+	const summary = sanitize(ctx, requireText(p.summary, "summary")).slice(0, 2000);
+	ctx.ledger.completeWorkerWork(ctx.scanId, ctx.workerId, ctx.worklist ?? [], ctx.readGroup, summary);
+	return JSON.stringify({ status: "complete", note: "worklist read" });
 }
 
 function candidateCreate(ctx: RunContext, p: Params): string {
@@ -310,10 +344,26 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 
 	const locations = rawLocations.map((l) => validateLocation(ctx, l));
 
-	if (!locations.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path))) {
+	// What ties a finding to you has to be the finding, not a mention of it.
+	//
+	// A probe once cited README.md:30 as `evidence`, with the entrypoint, the
+	// broken control and the sink all in files the user had excluded, and filed
+	// four findings about code nobody asked it to review. Evidence is supporting
+	// material by definition; the finding *is* its entrypoint, control and sink.
+	// So when roles are given, one of those has to be in scope. When none are
+	// given there is nothing to discriminate on, and any location will do.
+	const substantive = locations.filter((l) => l.role !== undefined && l.role !== "evidence");
+	const anchors = substantive.length > 0 ? substantive : locations;
+	if (!anchors.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path, ctx.worklist))) {
 		throw new Error(
-			`no location is in your worklist — cite at least one file from work.next. ` +
-				`Got: ${locations.map((l) => l.path).join(", ")}`,
+			(substantive.length > 0
+				? `no entrypoint, source, root_control or sink is in your worklist — an evidence ` +
+					`location does not tie a finding to you. Cite a file from work.next, or, if ` +
+					`the flaw really lives outside your list, record it with lead.record so it is ` +
+					`not lost. `
+				: `no location is in your worklist — cite at least one file from work.next, or ` +
+					`record it with lead.record. `) +
+				`Got: ${anchors.map((l) => `${l.path}${l.role ? ` (${l.role})` : ""}`).join(", ")}`,
 		);
 	}
 

@@ -25,9 +25,17 @@ import { createOpensecTool, type RunContext } from "./tool.js";
 
 export interface AgentRunResult {
 	text: string;
+	/** All prompt tokens, including the provider's cache read/write buckets. */
 	tokensIn: number;
 	tokensOut: number;
 	costUsd: number;
+	/** PI reports these separately from ordinary input. */
+	inputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	cacheCostUsd: number;
+	/** What cache reads saved relative to the same tokens at the input rate. */
+	cacheSavingsUsd: number;
 	stoppedAtTurnLimit?: boolean;
 }
 
@@ -35,6 +43,11 @@ export interface UsageDelta {
 	tokensIn: number;
 	tokensOut: number;
 	costUsd: number;
+	inputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	cacheCostUsd: number;
+	cacheSavingsUsd: number;
 }
 
 // Not redundant with --max-cost: the budget is only checked between agent runs,
@@ -158,7 +171,7 @@ export class AgentRunner {
 		});
 
 		const failures: string[] = [];
-		let reported: UsageDelta = { tokensIn: 0, tokensOut: 0, costUsd: 0 };
+		let reported: UsageDelta = emptyUsage();
 		let stoppedAtBudget = false;
 		const reportUsage = (usage: UsageDelta): void => {
 			if (usage.tokensIn === 0 && usage.tokensOut === 0 && usage.costUsd === 0) return;
@@ -166,6 +179,11 @@ export class AgentRunner {
 				tokensIn: reported.tokensIn + usage.tokensIn,
 				tokensOut: reported.tokensOut + usage.tokensOut,
 				costUsd: reported.costUsd + usage.costUsd,
+				inputTokens: reported.inputTokens + usage.inputTokens,
+				cacheReadTokens: reported.cacheReadTokens + usage.cacheReadTokens,
+				cacheWriteTokens: reported.cacheWriteTokens + usage.cacheWriteTokens,
+				cacheCostUsd: reported.cacheCostUsd + usage.cacheCostUsd,
+				cacheSavingsUsd: reported.cacheSavingsUsd + usage.cacheSavingsUsd,
 			};
 			if (args.onUsage?.(usage) === false && !stoppedAtBudget) {
 				stoppedAtBudget = true;
@@ -190,7 +208,7 @@ export class AgentRunner {
 
 		const unsubscribe = session.subscribe((event) => {
 			if (event.type === "turn_end") {
-				const usage = usageOf(event.message);
+				const usage = usageOf(event.message, resolved.model);
 				if (usage) reportUsage(usage);
 				for (const result of event.toolResults) {
 					if (!result.isError) continue;
@@ -236,16 +254,18 @@ export class AgentRunner {
 			}
 
 			const stats = session.getSessionStats();
+			const cache = cacheCosts(session.messages, resolved.model);
 			const total: UsageDelta = {
 				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
 				tokensOut: stats.tokens.output,
 				costUsd: stats.cost,
+				inputTokens: stats.tokens.input,
+				cacheReadTokens: stats.tokens.cacheRead,
+				cacheWriteTokens: stats.tokens.cacheWrite,
+				cacheCostUsd: cache.costUsd,
+				cacheSavingsUsd: cache.savingsUsd,
 			};
-			reportUsage({
-				tokensIn: Math.max(0, total.tokensIn - reported.tokensIn),
-				tokensOut: Math.max(0, total.tokensOut - reported.tokensOut),
-				costUsd: Math.max(0, total.costUsd - reported.costUsd),
-			});
+			reportUsage(subtractUsage(total, reported));
 			ctx.ledger.recordEvent(
 				ctx.scanId,
 				"agent_end",
@@ -257,6 +277,11 @@ export class AgentRunner {
 				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
 				tokensOut: stats.tokens.output,
 				costUsd: stats.cost,
+				inputTokens: stats.tokens.input,
+				cacheReadTokens: stats.tokens.cacheRead,
+				cacheWriteTokens: stats.tokens.cacheWrite,
+				cacheCostUsd: cache.costUsd,
+				cacheSavingsUsd: cache.savingsUsd,
 				...(stoppedAtTurnLimit ? { stoppedAtTurnLimit: true } : {}),
 			};
 		} catch (err) {
@@ -283,6 +308,60 @@ export class AgentRunner {
 			session.dispose();
 		}
 	}
+}
+
+interface PiUsage {
+	input: number;
+	cacheRead: number;
+	cost: { input: number; cacheRead: number; cacheWrite: number };
+}
+
+/**
+ * PI's session summary retains only the total cost. Sum the public messages to
+ * keep the cache cost and the saving from cache reads. The model rate is a
+ * fallback for a full cache hit, where a response has no ordinary input tokens
+ * from which to infer the input rate.
+ */
+function cacheCosts(
+	messages: readonly unknown[],
+	model: { cost?: { input?: number; cacheRead?: number } },
+): { costUsd: number; savingsUsd: number } {
+	let costUsd = 0;
+	let savingsUsd = 0;
+	for (const message of messages) {
+		const usage = piUsage(message);
+		if (!usage) continue;
+		costUsd += usage.cost.cacheRead + usage.cost.cacheWrite;
+		if (usage.cacheRead === 0) continue;
+		const inputRate =
+			usage.input > 0 ? usage.cost.input / usage.input : (model.cost?.input ?? 0) / 1_000_000;
+		const cacheReadRate =
+			usage.cacheRead > 0
+				? usage.cost.cacheRead / usage.cacheRead
+				: (model.cost?.cacheRead ?? 0) / 1_000_000;
+		savingsUsd += usage.cacheRead * Math.max(0, inputRate - cacheReadRate);
+	}
+	return { costUsd, savingsUsd };
+}
+
+function piUsage(message: unknown): PiUsage | undefined {
+	if (typeof message !== "object" || message === null || !("usage" in message)) return undefined;
+	const usage = (message as { usage?: unknown }).usage;
+	if (typeof usage !== "object" || usage === null || !("cost" in usage)) return undefined;
+	const cost = (usage as { cost?: unknown }).cost;
+	if (typeof cost !== "object" || cost === null) return undefined;
+	const tokens = usage as Partial<Pick<PiUsage, "input" | "cacheRead">>;
+	const costs = cost as Partial<PiUsage["cost"]>;
+	if (
+		typeof tokens.input !== "number" ||
+		typeof tokens.cacheRead !== "number" ||
+		typeof costs.input !== "number" ||
+		typeof costs.cacheRead !== "number" ||
+		typeof costs.cacheWrite !== "number"
+	) {
+		return undefined;
+	}
+	return { input: tokens.input, cacheRead: tokens.cacheRead, cost: costs as PiUsage["cost"] };
 }
 
 type AnyToolDef = ToolDefinition<TSchema, unknown, unknown>;
@@ -375,7 +454,18 @@ function instrumentRead(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			if (typeof path === "string") {
 				const rel = toRepoRelative(ctx.repoRoot, resolveToolPath(ctx, path));
 				if (rel) {
-					ctx.ledger.recordTouch(ctx.scanId, rel, Buffer.byteLength(resultText(result), "utf8"));
+					// A read with an offset is the agent continuing through a file it
+					// has already seen the start of, so it adds rather than replaces.
+					const offset = (params as { offset?: unknown } | undefined)?.offset;
+					const continued = typeof offset === "number" && offset > 1;
+					ctx.ledger.recordTouch(
+						ctx.scanId,
+						rel,
+						Buffer.byteLength(resultText(result), "utf8"),
+						continued,
+						ctx.readGroup,
+						ctx.workerId,
+					);
 				}
 			}
 			return result;
@@ -407,7 +497,7 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			if (isFile(searchRoot)) {
 				const rel = toRepoRelative(ctx.repoRoot, searchRoot);
 				if (rel && ctx.ledger.fileInScope(ctx.scanId, rel)) {
-					ctx.ledger.recordTouch(ctx.scanId, rel, 0);
+					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup, ctx.workerId);
 				}
 				return result;
 			}
@@ -415,7 +505,7 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			for (const hit of parseGrepPaths(resultText(result))) {
 				const rel = toRepoRelative(ctx.repoRoot, resolve(searchRoot, hit));
 				if (rel && ctx.ledger.fileInScope(ctx.scanId, rel)) {
-					ctx.ledger.recordTouch(ctx.scanId, rel, 0);
+					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup, ctx.workerId);
 				}
 			}
 			return rootRelativeResult(result, ctx.repoRoot, searchRoot, "grep");
@@ -480,15 +570,50 @@ function rootRelativeOutput(output: string, repoRoot: string, searchRoot: string
 		.join("\n");
 }
 
-function usageOf(message: unknown): UsageDelta | null {
+function emptyUsage(): UsageDelta {
+	return {
+		tokensIn: 0,
+		tokensOut: 0,
+		costUsd: 0,
+		inputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		cacheCostUsd: 0,
+		cacheSavingsUsd: 0,
+	};
+}
+
+function subtractUsage(total: UsageDelta, reported: UsageDelta): UsageDelta {
+	return {
+		tokensIn: Math.max(0, total.tokensIn - reported.tokensIn),
+		tokensOut: Math.max(0, total.tokensOut - reported.tokensOut),
+		costUsd: Math.max(0, total.costUsd - reported.costUsd),
+		inputTokens: Math.max(0, total.inputTokens - reported.inputTokens),
+		cacheReadTokens: Math.max(0, total.cacheReadTokens - reported.cacheReadTokens),
+		cacheWriteTokens: Math.max(0, total.cacheWriteTokens - reported.cacheWriteTokens),
+		cacheCostUsd: Math.max(0, total.cacheCostUsd - reported.cacheCostUsd),
+		cacheSavingsUsd: Math.max(0, total.cacheSavingsUsd - reported.cacheSavingsUsd),
+	};
+}
+
+function usageOf(
+	message: unknown,
+	model: { cost?: { input?: number; cacheRead?: number } },
+): UsageDelta | null {
 	const usage = (message as { usage?: Record<string, unknown> } | undefined)?.usage;
 	if (!usage) return null;
 	const number = (value: unknown): number => (typeof value === "number" ? value : 0);
 	const cost = usage.cost as Record<string, unknown> | undefined;
+	const cache = cacheCosts([message], model);
 	return {
 		tokensIn: number(usage.input) + number(usage.cacheRead) + number(usage.cacheWrite),
 		tokensOut: number(usage.output),
 		costUsd: number(cost?.total),
+		inputTokens: number(usage.input),
+		cacheReadTokens: number(usage.cacheRead),
+		cacheWriteTokens: number(usage.cacheWrite),
+		cacheCostUsd: cache.costUsd,
+		cacheSavingsUsd: cache.savingsUsd,
 	};
 }
 

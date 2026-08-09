@@ -14,9 +14,11 @@ import type {
 	Phase,
 	Profile,
 	Resolution,
+	ScanScope,
 	ScanFile,
 	ScanRecord,
 	ScanStatus,
+	WorkerCoverage,
 } from "../types.js";
 import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 
@@ -119,12 +121,13 @@ export class Ledger {
 		modelRef?: string;
 		promptHash?: string;
 		probes?: number;
+		scope?: ScanScope;
 	}): void {
 		this.db
 			.prepare(
 				`INSERT INTO scans (id, repo_id, revision, profile, status, phase, config_hash,
-				 model_ref, prompt_hash, probes, started_at)
-				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?, ?, ?, ?)`,
+				 model_ref, prompt_hash, probes, scope_kind, scope_base, started_at)
+				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				args.id,
@@ -135,6 +138,8 @@ export class Ledger {
 				args.modelRef ?? null,
 				args.promptHash ?? null,
 				args.probes ?? null,
+				args.scope?.kind ?? "repository",
+				args.scope?.kind === "diff" ? args.scope.base : null,
 				now(),
 			);
 	}
@@ -237,13 +242,38 @@ export class Ledger {
 		}
 	}
 
-	addUsage(scanId: string, tokensIn: number, tokensOut: number, costUsd: number): void {
+	addUsage(
+		scanId: string,
+		usage: {
+			tokensIn: number;
+			tokensOut: number;
+			costUsd: number;
+			inputTokens: number;
+			cacheReadTokens: number;
+			cacheWriteTokens: number;
+			cacheCostUsd: number;
+			cacheSavingsUsd: number;
+		},
+	): void {
 		this.db
 			.prepare(
-				`UPDATE scans SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?,
-				 cost_usd = cost_usd + ? WHERE id = ?`,
+				`UPDATE scans SET input_tokens = input_tokens + ?,
+				 cache_read_tokens = cache_read_tokens + ?, cache_write_tokens = cache_write_tokens + ?,
+				 tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, cost_usd = cost_usd + ?,
+				 cache_cost_usd = cache_cost_usd + ?, cache_savings_usd = cache_savings_usd + ?
+				 WHERE id = ?`,
 			)
-			.run(tokensIn, tokensOut, costUsd, scanId);
+			.run(
+				usage.inputTokens,
+				usage.cacheReadTokens,
+				usage.cacheWriteTokens,
+				usage.tokensIn,
+				usage.tokensOut,
+				usage.costUsd,
+				usage.cacheCostUsd,
+				usage.cacheSavingsUsd,
+				scanId,
+			);
 	}
 
 	getScan(scanId: string): ScanRecord | undefined {
@@ -263,11 +293,18 @@ export class Ledger {
 			prompt_hash: (row.prompt_hash as string | null) ?? null,
 			probes: (row.probes as number | null) ?? null,
 			threat_model_source: (row.threat_model_source as string | null) ?? null,
+			scope_kind: (row.scope_kind as ScanRecord["scope_kind"]) ?? null,
+			scope_base: (row.scope_base as string | null) ?? null,
 			started_at: row.started_at as string,
 			completed_at: row.completed_at as string | null,
+			input_tokens: row.input_tokens as number,
+			cache_read_tokens: row.cache_read_tokens as number,
+			cache_write_tokens: row.cache_write_tokens as number,
 			tokens_in: row.tokens_in as number,
 			tokens_out: row.tokens_out as number,
 			cost_usd: row.cost_usd as number,
+			cache_cost_usd: row.cache_cost_usd as number,
+			cache_savings_usd: row.cache_savings_usd as number,
 		};
 	}
 
@@ -286,23 +323,87 @@ export class Ledger {
 	}
 
 	/**
-	 * The worklist. Every probe gets the same one — the whole repository — so
-	 * there is nothing to scope it by.
+	 * The worklist: in-scope files that have not been read through.
+	 *
+	 * There is no cursor, because a cursor is a way to page past work you did
+	 * not do — which is what a probe handed 427 files did, reaching the end of
+	 * the list having read a fifth of it. A file leaves this list by being read,
+	 * or not at all.
+	 *
+	 * `bytes_read < bytes_total`, not `bytes_read = 0`: pi truncates a read at
+	 * 50KB, so one whole-file read of a 190KB file sees a quarter of it. Under
+	 * the weaker test that file was done, and the tail of every large file in
+	 * the repository went unreviewed — which is where the findings that need
+	 * following a function to its end happen to live.
+	 *
+	 * `bytes_read`, not `first_touched_at`: a grep marks a file touched without
+	 * reading it, and one repo-wide grep would otherwise empty the worklist for
+	 * free. Searched is not reviewed.
 	 */
-	listWork(scanId: string, limit: number, cursor: number): { files: ScanFile[]; total: number } {
-		const total = (
+	listWork(
+		scanId: string,
+		limit: number,
+		worklist?: readonly string[],
+		readGroup?: string,
+	): { files: ScanFile[]; unread: number } {
+		// The partition arrives as the paths themselves rather than a column on
+		// files. It is derived per run and never read back, so persisting it would
+		// be a second bookkeeping path that only exists to drift.
+		if (worklist && worklist.length === 0) return { files: [], unread: 0 };
+		const scope = worklist ? ` AND f.path IN (${worklist.map(() => "?").join(",")})` : "";
+		const paths = worklist ? [...worklist] : [];
+
+		// Two shapes rather than one with a conditional expression spliced into it.
+		// The clever version put the read-group placeholder in the SELECT list and
+		// the scan id in the WHERE, and the arguments went in the other order — so
+		// every probe got an empty worklist, filed nothing, and the scan reported
+		// itself clean. Parameter order is not worth being clever about.
+		if (readGroup === undefined) {
+			const unread = (
+				this.db
+					.prepare(
+						`SELECT COUNT(*) AS n FROM files f
+						 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+						 AND f.bytes_read < f.bytes_total${scope}`,
+					)
+					.get(scanId, ...paths) as { n: number }
+			).n;
+			const files = this.db
+				.prepare(
+					`SELECT f.path, f.sha, f.bytes_total, f.bytes_read, f.excluded_reason,
+					        f.first_touched_at
+					 FROM files f WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+					 AND f.bytes_read < f.bytes_total${scope}
+					 ORDER BY f.path LIMIT ?`,
+				)
+				.all(scanId, ...paths, limit) as ScanFile[];
+			return { files, unread };
+		}
+
+		// "Read" means read by this pass. Without that, a second pass opens on an
+		// empty worklist and its silence reads as agreement with the first.
+		const join = `LEFT JOIN file_reads r
+			 ON r.scan_id = f.scan_id AND r.path = f.path AND r.read_group = ?`;
+		const unread = (
 			this.db
-				.prepare("SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND excluded_reason IS NULL")
-				.get(scanId) as { n: number }
+				.prepare(
+					`SELECT COUNT(*) AS n FROM files f ${join}
+					 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+					 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}`,
+				)
+				.get(readGroup, scanId, ...paths) as { n: number }
 		).n;
-		const rows = this.db
+		const files = this.db
 			.prepare(
-				`SELECT path, sha, bytes_total, bytes_read, excluded_reason, first_touched_at
-				 FROM files WHERE scan_id = ? AND excluded_reason IS NULL
-				 ORDER BY path LIMIT ? OFFSET ?`,
+				`SELECT f.path, f.sha, f.bytes_total, COALESCE(r.bytes_read, 0) AS bytes_read,
+				        f.excluded_reason, f.first_touched_at
+				 FROM files f ${join}
+				 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+				 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}
+				 ORDER BY f.path LIMIT ?`,
 			)
-			.all(scanId, limit, cursor) as ScanFile[];
-		return { files: rows, total };
+			.all(readGroup, scanId, ...paths, limit) as ScanFile[];
+		return { files, unread };
 	}
 
 	/** Whether inventory ran at all for this scan, excluded files included. */
@@ -322,7 +423,12 @@ export class Ledger {
 		return rows.map((r) => r.path);
 	}
 
-	fileInScope(scanId: string, path: string): boolean {
+	/**
+	 * In scope, and — when the caller owns a slice — inside it. Ownership is what
+	 * ties a finding to the probe that filed it.
+	 */
+	fileInScope(scanId: string, path: string, worklist?: readonly string[]): boolean {
+		if (worklist && !worklist.includes(path)) return false;
 		const row = this.db
 			.prepare(
 				"SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL",
@@ -331,14 +437,124 @@ export class Ledger {
 		return row !== undefined;
 	}
 
-	recordTouch(scanId: string, path: string, bytesRead: number): void {
+	/**
+	 * `continued` is a read that carried an offset — the agent asking for more of
+	 * a file it has already seen part of. Those add up; everything else is a
+	 * high-water mark.
+	 *
+	 * The distinction exists because pi truncates a read at 50KB. Under plain
+	 * MAX, a 190KB file reads once, records 51,200, and can never record more no
+	 * matter how much of it is paged through — so coverage silently ceilings at
+	 * 50KB per file and the worklist calls the file done. That is how a probe
+	 * reached 100% of files while the tail of every large one went unread, which
+	 * is exactly where the deep findings live.
+	 *
+	 * Adding only offset reads keeps the accounting honest in the direction that
+	 * matters: re-reading a file from the top cannot inflate it, because that is
+	 * the read with no offset.
+	 */
+	recordTouch(
+		scanId: string,
+		path: string,
+		bytesRead: number,
+		continued = false,
+		readGroup?: string,
+		workerId?: string,
+	): void {
+		// files.bytes_read stays the union across every pass, because coverage is a
+		// claim about the scan. file_reads is what each pass has seen on its own.
 		this.db
 			.prepare(
-				`UPDATE files SET bytes_read = MAX(bytes_read, ?),
-				 first_touched_at = COALESCE(first_touched_at, ?)
-				 WHERE scan_id = ? AND path = ?`,
+				continued
+					? `UPDATE files SET bytes_read = MIN(bytes_total, bytes_read + ?),
+					   first_touched_at = COALESCE(first_touched_at, ?)
+					   WHERE scan_id = ? AND path = ?`
+					: `UPDATE files SET bytes_read = MAX(bytes_read, ?),
+					   first_touched_at = COALESCE(first_touched_at, ?)
+					   WHERE scan_id = ? AND path = ?`,
 			)
 			.run(bytesRead, now(), scanId, path);
+
+		if (readGroup !== undefined) {
+			this.db
+				.prepare(
+					`INSERT INTO file_reads (scan_id, read_group, path, bytes_read) VALUES (?, ?, ?, ?)
+					 ON CONFLICT(scan_id, read_group, path) DO UPDATE SET
+					   bytes_read = ${continued ? "file_reads.bytes_read + excluded.bytes_read" : "MAX(file_reads.bytes_read, excluded.bytes_read)"}`,
+				)
+				.run(scanId, readGroup, path, bytesRead);
+		}
+		if (workerId !== undefined) {
+			this.db
+				.prepare(
+					`INSERT INTO worker_file_reads (scan_id, worker_id, path, bytes_read) VALUES (?, ?, ?, ?)
+					 ON CONFLICT(scan_id, worker_id, path) DO UPDATE SET
+					   bytes_read = ${continued ? "worker_file_reads.bytes_read + excluded.bytes_read" : "MAX(worker_file_reads.bytes_read, excluded.bytes_read)"}`,
+				)
+				.run(scanId, workerId, path, bytesRead);
+		}
+	}
+
+	beginWorkerWork(scanId: string, workerId: string, paths: readonly string[]): void {
+		const files = paths.length;
+		const bytes = paths.reduce((sum, path) => {
+			const row = this.db
+				.prepare("SELECT bytes_total FROM files WHERE scan_id = ? AND path = ?")
+				.get(scanId, path) as { bytes_total: number } | undefined;
+			return sum + (row?.bytes_total ?? 0);
+		}, 0);
+		this.db
+			.prepare(
+				`INSERT OR IGNORE INTO worker_work (scan_id, worker_id, files_assigned, bytes_assigned)
+				 VALUES (?, ?, ?, ?)`,
+			)
+			.run(scanId, workerId, files, bytes);
+	}
+
+	completeWorkerWork(
+		scanId: string,
+		workerId: string,
+		worklist: readonly string[],
+		readGroup: string | undefined,
+		summary: string,
+	): void {
+		const { unread } = this.listWork(scanId, 1, worklist, readGroup);
+		if (unread !== 0) throw new Error(`work is not complete: ${unread} file(s) still need reading`);
+		const row = this.db
+			.prepare("SELECT completed_at FROM worker_work WHERE scan_id = ? AND worker_id = ?")
+			.get(scanId, workerId) as { completed_at: string | null } | undefined;
+		if (!row) throw new Error("worker was not registered for this worklist");
+		if (row.completed_at) throw new Error("work.complete was already recorded");
+		this.db
+			.prepare("UPDATE worker_work SET summary = ?, completed_at = ? WHERE scan_id = ? AND worker_id = ?")
+			.run(summary, now(), scanId, workerId);
+	}
+
+	workerCoverage(scanId: string): WorkerCoverage[] {
+		return this.db
+			.prepare(
+				`SELECT w.worker_id, w.files_assigned, w.bytes_assigned, w.summary, w.completed_at,
+				 COUNT(r.path) AS files_touched, COALESCE(SUM(MIN(r.bytes_read, f.bytes_total)), 0) AS bytes_read
+				 FROM worker_work w
+				 LEFT JOIN worker_file_reads r ON r.scan_id = w.scan_id AND r.worker_id = w.worker_id
+				 LEFT JOIN files f ON f.scan_id = r.scan_id AND f.path = r.path
+				 WHERE w.scan_id = ? GROUP BY w.worker_id ORDER BY w.worker_id`,
+			)
+			.all(scanId)
+			.map((row) => {
+				const r = row as Record<string, string | number | null>;
+				return {
+					worker_id: r.worker_id as string,
+					files_assigned: r.files_assigned as number,
+					files_in_scope: r.files_assigned as number,
+					files_touched: r.files_touched as number,
+					bytes_assigned: r.bytes_assigned as number,
+					bytes_in_scope: r.bytes_assigned as number,
+					bytes_read: r.bytes_read as number,
+					completed: r.completed_at !== null,
+					...(r.summary ? { summary: r.summary as string } : {}),
+				};
+			});
 	}
 
 	coverage(scanId: string): Coverage {

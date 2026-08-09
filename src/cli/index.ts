@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { Ledger } from "../db/db.js";
 import { describeEnv, loadEnv, piAuthPath } from "../env.js";
+import { renderExport, type ExportFormat } from "../scan/export.js";
 import { reportScan, type ScanResult, Scanner } from "../sdk/scanner.js";
 import { stripControlChars } from "../text.js";
+import { policyExitCode } from "../scan/policy.js";
 import { renderMatrix } from "../scan/severity.js";
-import type { Profile } from "../types.js";
+import type { Profile, ScanScope, Severity } from "../types.js";
 
 const USAGE = `opensec — point it at a repository, get findings you can defend.
 
@@ -19,6 +24,9 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
   opensec resume <scanId> [options]   pick a failed or interrupted scan back up
                                       at the phase it stopped in. Spend so far
                                       still counts against --max-cost.
+
+  opensec export <scanId> --format <format> --output <path>
+                                      write sarif, csv, or json from the ledger
   opensec models                      models with a price, so budgets are enforceable
   opensec env                         which credentials are configured, by name
   opensec help severity               how severity is computed
@@ -29,17 +37,26 @@ Options
   --db <path>          ledger location (default ~/.opensec/opensec.db)
   --prompts <dir>      override the prompt pack
   --max-files <n>      refuse rather than run away on a monorepo
+  --exclude <globs>    comma-separated repo-relative globs to leave out, e.g.
+                       "vendor/**,**/examples/**". Excluded files are counted
+                       and given this reason in the report, not dropped silently.
+  --diff <base>        scan source files changed from merge-base(base, HEAD)
+  --working-tree       scan staged, unstaged, and untracked source files against HEAD
+  --fail-on-severity <severity>
+                       CI policy: critical | high | medium | low | info. A partial
+                       scan exits 2; a completed policy violation exits 1.
   --max-cost <usd>     spend ceiling, or "none" (default). Refuses to start if
                        the model has no price, since that budget is unenforceable.
   --concurrency <n>    agents in flight at once (default 4)
   --max-turns <n>      turns one agent may take before it is stopped (default 80).
                        --max-cost is only checked between agents, so this is what
                        bounds a single agent that loops.
-  --probes <n>         how many probes review the repository (default 1). Each
-                       one is accountable for every file, so they overlap
-                       completely and duplicate each other on purpose: this
-                       buys independent looks, and costs roughly n times the
-                       reading.
+  --probes <n>         independent passes over the repository (default 1). Each
+                       pass reviews every file with its own agents and its own
+                       read state, so it is a second opinion rather than more
+                       hands: n passes cost about n times the reading. Measured
+                       on one repo, findings went 6 / 10 / 12 / 13 for passes
+                       1 / 2 / 3 / 4, so a fixed setup is close to spent by 4.
   --refresh-threat-model     rewrite the stored threat model instead of reusing it
   --json               print the findings JSON path only
 
@@ -100,6 +117,10 @@ async function main(argv: string[]): Promise<number> {
 		const opts = parseFlags(rest);
 		const bad = rejectMissingValues(opts);
 		if (bad) return fail(bad);
+		const unknownValue = unknownValueFlag(opts, ["db"]);
+		if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
+		const unknown = unknownBool(opts, ["json"]);
+		if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
 		const id = opts.positional[0];
 		const ledger = Ledger.open(opts.flags.db);
 		try {
@@ -130,6 +151,10 @@ async function main(argv: string[]): Promise<number> {
 		if (!id) return fail("events needs a scan id — 'opensec report' lists them");
 		const bad = rejectMissingValues(opts);
 		if (bad) return fail(bad);
+		const unknownValue = unknownValueFlag(opts, ["db"]);
+		if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
+		const unknown = unknownBool(opts, []);
+		if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
 		const ledger = Ledger.open(opts.flags.db);
 		try {
 			if (!ledger.getScan(id)) return fail(`no scan '${id}' in this ledger`);
@@ -145,6 +170,38 @@ async function main(argv: string[]): Promise<number> {
 		}
 	}
 
+	if (command === "export") {
+		const opts = parseFlags(rest);
+		const id = opts.positional[0];
+		if (!id) return fail("export needs a scan id — 'opensec report' lists them");
+		const bad = rejectMissingValues(opts);
+		if (bad) return fail(bad);
+		const unknownValue = unknownValueFlag(opts, ["db", "format", "output"]);
+		if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
+		const unknown = unknownBool(opts, []);
+		if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
+		const format = opts.flags.format as ExportFormat | undefined;
+		if (format !== "sarif" && format !== "csv" && format !== "json") {
+			return fail("--format must be sarif, csv, or json");
+		}
+		if (!opts.flags.output) return fail("export needs --output <path>");
+		const ledger = Ledger.open(opts.flags.db);
+		try {
+			const scan = ledger.getScan(id);
+			if (!scan) return fail(`no scan '${id}' in this ledger. 'opensec report' lists the scans it knows.`);
+			const output = resolve(opts.flags.output);
+			writeFileSync(
+				output,
+				renderExport({ scan, coverage: ledger.coverage(id), candidates: ledger.listCandidates(id) }, format),
+				{ encoding: "utf8", flag: "wx", mode: 0o600 },
+			);
+			await flushed(`${output}\n`);
+			return 0;
+		} finally {
+			ledger.close();
+		}
+	}
+
 	if (command === "resume") {
 		const opts = parseFlags(rest);
 		const id = opts.positional[0];
@@ -153,6 +210,10 @@ async function main(argv: string[]): Promise<number> {
 		if (bad) return fail(bad);
 		const parsed = parseScanNumbers(opts);
 		if (typeof parsed === "string") return fail(parsed);
+		const failSeverity = parseFailSeverity(opts.flags["fail-on-severity"]);
+		if (typeof failSeverity === "string") return fail(failSeverity);
+		const unknownValue = unknownValueFlag(opts, ["model", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns", "exclude", "fail-on-severity"]);
+		if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
 		const unknown = unknownBool(opts, ["json", "refresh-threat-model"]);
 		if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
 
@@ -165,7 +226,7 @@ async function main(argv: string[]): Promise<number> {
 			onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
 		});
 		try {
-			return await emit(await scanner.run(), opts.bools.json === true);
+			return await emit(await scanner.run(), opts.bools.json === true, failSeverity);
 		} finally {
 			scanner.close();
 		}
@@ -190,12 +251,23 @@ async function main(argv: string[]): Promise<number> {
 	}
 	const parsed = parseScanNumbers(opts);
 	if (typeof parsed === "string") return fail(parsed);
+	const scope = parseScope(opts);
+	if (typeof scope === "string") return fail(scope);
+	const failSeverity = parseFailSeverity(opts.flags["fail-on-severity"]);
+	if (typeof failSeverity === "string") return fail(failSeverity);
 
-	const unknown = unknownBool(opts, ["estimate", "json", "refresh-threat-model"]);
+	const unknownValue = unknownValueFlag(opts, ["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns", "exclude", "diff", "fail-on-severity"]);
+	if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
+	const unknown = unknownBool(opts, ["estimate", "json", "refresh-threat-model", "working-tree"]);
 	if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
 
 	if (opts.bools.estimate) {
-		const e = await Scanner.estimate({ repo: target, maxFiles: parsed.maxFiles });
+		const e = await Scanner.estimate({
+			repo: target,
+			maxFiles: parsed.maxFiles,
+			exclude: (opts.flags.exclude ?? "").split(",").map((g) => g.trim()).filter(Boolean),
+			scope,
+		});
 		process.stdout.write(
 			`${e.files} files, ${(e.bytes / 1024).toFixed(0)} KB, ~${e.approxTokens.toLocaleString()} tokens of source.\n` +
 				`Extensions: ${e.extensions.map((x) => `.${x}`).join(" ") || "none"}\n` +
@@ -204,11 +276,18 @@ async function main(argv: string[]): Promise<number> {
 		return 0;
 	}
 
+	const exclude = (opts.flags.exclude ?? "")
+		.split(",")
+		.map((g) => g.trim())
+		.filter(Boolean);
+
 	const scanner = await Scanner.open({
 		repo: target,
+		exclude,
 		model: opts.flags.model,
 		db: opts.flags.db,
 		profile: (profileFlag as Profile | undefined) ?? "static",
+		scope,
 		promptsDir: opts.flags.prompts,
 		...parsed,
 		refreshThreatModel: opts.bools["refresh-threat-model"] === true,
@@ -216,7 +295,7 @@ async function main(argv: string[]): Promise<number> {
 	});
 
 	try {
-		return await emit(await scanner.run(), opts.bools.json === true);
+		return await emit(await scanner.run(), opts.bools.json === true, failSeverity);
 	} finally {
 		scanner.close();
 	}
@@ -239,6 +318,11 @@ function rejectMissingValues(opts: Parsed): string | null {
 function unknownBool(opts: Parsed, known: string[]): string | undefined {
 	const set = new Set(known);
 	return Object.keys(opts.bools).find((b) => !set.has(b));
+}
+
+function unknownValueFlag(opts: Parsed, known: string[]): string | undefined {
+	const set = new Set(known);
+	return Object.keys(opts.flags).find((name) => !set.has(name));
 }
 
 interface ScanNumbers {
@@ -269,7 +353,7 @@ function parseScanNumbers(opts: Parsed): ScanNumbers | string {
 	return out;
 }
 
-async function emit(result: ScanResult, json: boolean): Promise<number> {
+async function emit(result: ScanResult, json: boolean, failSeverity?: Severity): Promise<number> {
 	if (json) {
 		await flushed(`${result.jsonPath}\n`);
 	} else {
@@ -279,10 +363,11 @@ async function emit(result: ScanResult, json: boolean): Promise<number> {
 		await flushed(`${safe(result.markdown)}\n`);
 		process.stderr.write(`\nreport: ${result.reportPath}\n`);
 	}
-	const confirmed = result.candidates.filter(
-		(c) => c.resolution?.disposition === "confirmed" && !c.merged_into,
-	);
-	return confirmed.length > 0 ? 1 : 0;
+	const code = policyExitCode(result, failSeverity);
+	if (code === 2) {
+		process.stderr.write("opensec: scan coverage is incomplete; CI policy cannot pass\n");
+	}
+	return code;
 }
 
 interface Parsed {
@@ -295,7 +380,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns", "exclude", "diff", "fail-on-severity", "format", "output"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
@@ -311,6 +396,23 @@ function parseFlags(argv: string[]): Parsed {
 		}
 	}
 	return { flags, bools, positional };
+}
+
+function parseScope(opts: Parsed): ScanScope | string {
+	if (opts.flags.diff !== undefined && opts.bools["working-tree"]) {
+		return "--diff and --working-tree are mutually exclusive";
+	}
+	if (opts.flags.diff !== undefined) return { kind: "diff", base: opts.flags.diff };
+	if (opts.bools["working-tree"]) return { kind: "working_tree" };
+	return { kind: "repository" };
+}
+
+function parseFailSeverity(value: string | undefined): Severity | string | undefined {
+	if (value === undefined) return undefined;
+	const values: Severity[] = ["critical", "high", "medium", "low", "info"];
+	return values.includes(value as Severity)
+		? (value as Severity)
+		: "--fail-on-severity must be critical, high, medium, low, or info";
 }
 
 function intFlag(name: string, v: string | undefined): number | undefined {

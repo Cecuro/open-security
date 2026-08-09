@@ -134,31 +134,62 @@ describe("identical findings collapse without a model", () => {
 	});
 });
 
-describe("only real collisions reach a model", () => {
-	const c = (id: string, cwe: string[], path: string) => ({
+describe("what reaches the reducer is keyed on the broken control", () => {
+	const at = (id: string, cwe: string[], locs: Array<[string, string?]>) => ({
 		id,
 		cwe_ids: cwe,
-		locations: [{ path, start_line: 1, end_line: 1 }],
+		locations: locs.map(([path, role]) => ({
+			path,
+			start_line: 1,
+			end_line: 1,
+			...(role ? { role: role as "root_control" | "entrypoint" | "sink" } : {}),
+		})),
 	});
 
-	it("sends nothing when every finding stands alone", () => {
+	it("leaves findings in unrelated files alone", () => {
 		expect(
-			collisionGroups([c("c1", ["CWE-89"], "a.js"), c("c2", ["CWE-78"], "b.js")]),
+			collisionGroups([at("c1", ["CWE-89"], [["a.js"]]), at("c2", ["CWE-78"], [["b.js"]])]),
 		).toEqual([]);
 	});
 
-	it("groups same class and same file, and not same class alone", () => {
+	it("groups two descriptions of one bug that agree on nothing but the broken control", () => {
+		// The case that reached a real report twice: same liquidation flaw, filed
+		// once from the implementation with no CWE and once from the entry point
+		// with CWE-682, root_control lines 44 apart in the same file. Keying on
+		// the primary location and the CWE family missed it three separate ways.
 		const groups = collisionGroups([
-			c("c1", ["CWE-89"], "a.js"),
-			c("c2", ["CWE-89"], "a.js"),
-			c("c3", ["CWE-89"], "b.js"),
+			at("c1", [], [["perps.rs", "entrypoint"], ["perps.rs", "root_control"]]),
+			at("c6", ["CWE-682"], [["contract.rs", "entrypoint"], ["perps.rs", "root_control"]]),
 		]);
 		expect(groups).toHaveLength(1);
-		expect(groups[0]?.map((g) => g.id)).toEqual(["c1", "c2"]);
+		expect(groups[0]?.map((g) => g.id)).toEqual(["c1", "c6"]);
 	});
 
-	it("groups across an aliased CWE, which is the case a string match misses", () => {
-		const groups = collisionGroups([c("c1", ["CWE-22"], "a.js"), c("c2", ["CWE-36"], "a.js")]);
+	it("prefers root_control over the primary location", () => {
+		// Two findings sharing a primary file but breaking different controls are
+		// not the same finding, and asking about them is not free.
+		const groups = collisionGroups([
+			at("c1", ["CWE-89"], [["route.ts", "entrypoint"], ["db.ts", "root_control"]]),
+			at("c2", ["CWE-89"], [["route.ts", "entrypoint"], ["auth.ts", "root_control"]]),
+		]);
+		expect(groups).toEqual([]);
+	});
+
+	it("falls back to the primary location when no root_control was given", () => {
+		const groups = collisionGroups([
+			at("c1", ["CWE-22"], [["a.js"]]),
+			at("c2", ["CWE-36"], [["a.js"]]),
+		]);
+		expect(groups).toHaveLength(1);
+	});
+
+	it("groups regardless of class, because the reducer is what decides", () => {
+		// Recall-first on purpose: an unnecessary group costs one reducer call it
+		// is free to refuse, while a missed one is a duplicate nothing catches.
+		const groups = collisionGroups([
+			at("c1", ["CWE-89"], [["x.rs", "root_control"]]),
+			at("c2", ["CWE-682"], [["x.rs", "root_control"]]),
+		]);
 		expect(groups).toHaveLength(1);
 	});
 });

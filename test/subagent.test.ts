@@ -157,7 +157,7 @@ describe("verb scoping", () => {
 		).rejects.toThrow(/not available to probe-1\/sub-1/);
 
 		// It can still page the worklist and record what it ruled out.
-		expect(JSON.parse(await run({ verb: "work.next" })).total).toBe(1);
+		expect(JSON.parse(await run({ verb: "work.next" })).returned).toBe(1);
 		await run({ verb: "lead.record", text: "checked, nothing there", status: "dead_end" });
 		expect(env.ledger.listLeads("s")).toHaveLength(1);
 	});

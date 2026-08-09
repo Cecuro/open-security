@@ -1,4 +1,4 @@
-import type { Candidate, Coverage, ScanRecord } from "../types.js";
+import type { Candidate, Coverage, ScanRecord, WorkerCoverage } from "../types.js";
 import { formatSeverity, renderMatrix, severityRank } from "./severity.js";
 
 export interface ReportInput {
@@ -7,6 +7,7 @@ export interface ReportInput {
 	repoPath: string;
 	candidates: Candidate[];
 	coverage: Coverage;
+	probeCoverage?: WorkerCoverage[];
 	leads: Array<{ worker_id: string; text: string; status: string }>;
 	/** File extensions in scope, without the dot. */
 	extensions: string[];
@@ -14,6 +15,8 @@ export interface ReportInput {
 	modelRef: string;
 	promptHash: string;
 	ownership?: string;
+	/** Independent passes that ran. Undefined when the caller does not track it. */
+	passes?: number;
 	threatModel?: string;
 }
 
@@ -40,12 +43,34 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push("| | |", "|---|---|");
 	out.push(`| repository | ${codeSpan(r.repoPath)} |`);
 	out.push(`| revision | ${r.scan.revision ? codeSpan(r.scan.revision) : "_not a git repo_"} |`);
+	if (r.scan.scope_kind === "diff") out.push(`| scope | diff from ${codeSpan(r.scan.scope_base ?? "(unknown)")} to \`HEAD\` |`);
+	if (r.scan.scope_kind === "working_tree") out.push("| scope | staged, unstaged, and untracked files against `HEAD` |");
 	out.push(`| profile | **${r.scan.profile}**${r.scan.profile === "static" ? " — nothing was executed" : ""} |`);
 	out.push(`| model | ${codeSpan(r.modelRef)} |`);
 	out.push(`| prompts | ${codeSpan(r.promptHash)} |`);
 	if (r.threatModel) out.push(`| threat model | ${esc(r.threatModel)} |`);
 	out.push(`| started | ${r.scan.started_at} |`);
-	out.push(`| tokens | ${r.scan.tokens_in.toLocaleString()} in / ${r.scan.tokens_out.toLocaleString()} out |`);
+	const inputTokens = r.scan.input_tokens ?? 0;
+	const cacheReadTokens = r.scan.cache_read_tokens ?? 0;
+	const cacheWriteTokens = r.scan.cache_write_tokens ?? 0;
+	const cacheCostUsd = r.scan.cache_cost_usd ?? 0;
+	const cacheSavingsUsd = r.scan.cache_savings_usd ?? 0;
+	const cachePromptTokens = inputTokens + cacheReadTokens + cacheWriteTokens;
+	if (cachePromptTokens > 0 || r.scan.tokens_in === 0) {
+		out.push(
+			`| tokens | ${inputTokens.toLocaleString()} input / ` +
+				`${cacheReadTokens.toLocaleString()} cache read / ` +
+				`${cacheWriteTokens.toLocaleString()} cache write / ` +
+				`${r.scan.tokens_out.toLocaleString()} out |`,
+		);
+		out.push(`| cache hit rate | ${percent(cacheReadTokens, inputTokens + cacheReadTokens)} |`);
+		out.push(`| cache cost | ${usd(cacheCostUsd)} |`);
+		out.push(`| cache savings | ${usd(cacheSavingsUsd)} |`);
+	} else {
+		// Scans written before cache accounting only have the aggregate total.
+		out.push(`| tokens | ${r.scan.tokens_in.toLocaleString()} prompt / ${r.scan.tokens_out.toLocaleString()} out |`);
+		out.push("| cache | _not recorded by this version of opensec_ |");
+	}
 	out.push(`| cost | ${r.scan.cost_usd > 0 ? `$${r.scan.cost_usd.toFixed(4)}` : "_not priced_"} |`);
 	out.push("");
 
@@ -63,6 +88,34 @@ export function renderMarkdown(r: ReportInput): string {
 		"> review**: a file that was read is not thereby a file that was understood.",
 		"",
 	);
+	if (r.probeCoverage && r.probeCoverage.length > 0) {
+		const complete = r.probeCoverage.filter((p) => p.completed).length;
+		out.push("## Probe coverage", "");
+		out.push(`${complete} / ${r.probeCoverage.length} probe(s) completed their worklist.`, "");
+		out.push("| probe | files read | bytes read | status |", "|---|---|---|---|");
+		for (const p of r.probeCoverage) {
+			out.push(
+				`| ${codeSpan(p.worker_id)} | ${p.files_touched} / ${p.files_assigned} | ` +
+				`${pct(p.bytes_read, p.bytes_assigned)} | ${p.completed ? "complete" : "incomplete"} |`,
+			);
+		}
+		for (const p of r.probeCoverage) if (p.summary) out.push(`- ${codeSpan(p.worker_id)}: ${esc(p.summary)}`);
+		out.push("");
+	}
+	// Coverage says what was read. It says nothing about what was noticed, and
+	// what gets noticed varies a lot: repeated scans of the same code at the same
+	// revision, reading all of it, return overlapping but different findings —
+	// including runs that miss what an earlier one found. A report that presents
+	// one pass as the answer is overstating itself, so it says so.
+	if (r.passes !== undefined && r.passes < 2) {
+		out.push(
+			"> This was **one pass**. Reading everything is not noticing everything: a",
+			"> second pass over the same code, at the same revision, finds an overlapping",
+			"> but different set — in both directions, including findings this one made.",
+			"> Treat this as one sample, not the finding list. Raise `--probes` for more.",
+			"",
+		);
+	}
 	if (r.extensions.length > 0) {
 		out.push(`Extensions in scope: ${r.extensions.map((e) => codeSpan(`.${e}`)).join(", ")}.`, "");
 	}
@@ -86,7 +139,7 @@ export function renderMarkdown(r: ReportInput): string {
 			);
 		}
 		out.push("");
-		for (const c of confirmed) out.push(...renderFinding(c));
+		for (const c of confirmed) out.push(...renderFinding(c, mergedInto(r.candidates, c.id)));
 	}
 
 	if (followUp.length > 0) {
@@ -184,7 +237,18 @@ export function renderMarkdown(r: ReportInput): string {
 	return out.join("\n");
 }
 
-function renderFinding(c: Candidate): string[] {
+/**
+ * How many separate filings collapsed into this one.
+ *
+ * Only interesting above 1, and only really above 1 once more than one pass is
+ * running. It is deliberately not an input to anything: see the note this puts
+ * in the report.
+ */
+function mergedInto(candidates: Candidate[], id: string): number {
+	return candidates.filter((c) => c.merged_into === id).length;
+}
+
+function renderFinding(c: Candidate, mergedCount = 0): string[] {
 	const comp = c.resolution?.computed;
 	const inputs = c.resolution?.inputs;
 	const out: string[] = [];
@@ -198,6 +262,17 @@ function renderFinding(c: Candidate): string[] {
 	);
 	if (comp?.proof_gap) {
 		out.push(`> \`proof_gap: ${comp.proof_gap}\` — this severity is asserted from code, not demonstrated.`, "");
+	}
+	if (mergedCount > 0) {
+		// Said plainly because the temptation is to read it as corroboration. Two
+		// agents agreeing is a property of the search — they read the same code
+		// under the same instructions — and severity and confidence are computed
+		// from the evidence either way. A finding filed once is not weaker for it.
+		out.push(
+			`> Filed ${mergedCount + 1} times independently and merged. That is a fact about ` +
+				`the search, not evidence about the finding.`,
+			"",
+		);
 	}
 
 	out.push("**Locations**", "");
@@ -266,6 +341,15 @@ function esc(s: string): string {
 		.replaceAll("[", "\\[")
 		.replaceAll("]", "\\]")
 		.replaceAll("!", "\\!");
+}
+
+function percent(n: number, total: number): string {
+	if (total === 0) return "_not reported by provider_";
+	return `${((n / total) * 100).toFixed(1)}%`;
+}
+
+function usd(value: number): string {
+	return value > 0 ? `$${value.toFixed(4)}` : "$0.0000";
 }
 
 function escInline(s: string): string {

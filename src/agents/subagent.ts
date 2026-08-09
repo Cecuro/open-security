@@ -10,7 +10,7 @@ import { type RunContext, sanitize, SUBAGENT_VERBS } from "./tool.js";
 
 export const MAX_DEPTH = 1;
 export const MAX_CONCURRENT = 4;
-export const MAX_PER_PARENT = 8;
+export const MAX_PER_PARENT = 24;
 
 export const MAX_INLINE_REPORT_BYTES = 16 * 1024;
 

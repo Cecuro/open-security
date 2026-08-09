@@ -1,5 +1,10 @@
 export type Profile = "static" | "container";
 
+export type ScanScope =
+	| { kind: "repository" }
+	| { kind: "diff"; base: string }
+	| { kind: "working_tree" };
+
 export type ScanStatus = "running" | "completed" | "failed";
 
 export type Phase =
@@ -146,11 +151,19 @@ export interface ScanRecord {
 	prompt_hash: string | null;
 	probes: number | null;
 	threat_model_source: string | null;
+	scope_kind?: ScanScope["kind"] | null;
+	scope_base?: string | null;
 	started_at: string;
 	completed_at: string | null;
+	/** Uncached prompt tokens. `tokens_in` remains the total prompt-token count. */
+	input_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
 	tokens_in: number;
 	tokens_out: number;
 	cost_usd: number;
+	cache_cost_usd: number;
+	cache_savings_usd: number;
 }
 
 export interface Coverage {
@@ -158,4 +171,12 @@ export interface Coverage {
 	files_touched: number;
 	bytes_in_scope: number;
 	bytes_read: number;
+}
+
+export interface WorkerCoverage extends Coverage {
+	worker_id: string;
+	files_assigned: number;
+	bytes_assigned: number;
+	completed: boolean;
+	summary?: string;
 }
