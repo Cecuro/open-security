@@ -19,6 +19,7 @@ import { loadEnv } from "../env.js";
 import { collisionGroups } from "../scan/identity.js";
 import { ext, inventory, type InventoryResult } from "../scan/inventory.js";
 import { mapConcurrent } from "../scan/concurrency.js";
+import { describeDistribution, partition, type Partition } from "../scan/partition.js";
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
 import { redactSecrets, stripControlChars } from "../text.js";
@@ -31,12 +32,15 @@ export interface ScannerOptions {
 	profile?: Profile;
 	promptsDir?: string;
 	maxFiles?: number;
+	/** Repo-relative globs the user does not want reviewed. */
+	exclude?: readonly string[];
 	maxCostUsd?: number | null;
+	partitionMaxFiles?: number;
 	/**
-	 * How many probes run. Each is accountable for every in-scope file, so this
-	 * buys independent looks at the whole repository rather than dividing it up:
-	 * n probes cost roughly n times the reading and are expected to duplicate
-	 * each other. Defaults to one.
+	 * How many independent passes run over the repository. Each pass reviews
+	 * every file, by a fresh set of agents that never see the other passes'
+	 * findings — so this buys independent looks, and costs roughly n times the
+	 * reading. Defaults to one.
 	 */
 	probes?: number;
 	concurrency?: number;
@@ -73,6 +77,8 @@ export function phaseBefore(a: Phase, b: Phase): boolean {
 }
 
 export class Scanner {
+	private inv?: InventoryResult;
+	private partitions?: Partition[];
 	private constructor(
 		readonly scanId: string,
 		private readonly opts: ScannerOptions,
@@ -243,11 +249,11 @@ export class Scanner {
 	}
 
 	/**
-	 * One by default. Every probe reads the whole repository, so this multiplies
-	 * the cost of discovery rather than dividing it — the default is the cheap
-	 * end, and raising it buys independent looks.
+	 * Independent passes over the whole repository. One by default: each extra
+	 * pass re-reviews every file with fresh agents, so it multiplies cost rather
+	 * than dividing it, and what it buys is a second opinion.
 	 */
-	private get probeCount(): number {
+	private get passes(): number {
 		return Math.max(1, this.opts.probes ?? 1);
 	}
 
@@ -305,7 +311,10 @@ export class Scanner {
 
 	async inventory(): Promise<InventoryResult> {
 		this.ledger.setPhase(this.scanId, "inventory");
-		const inv = await inventory(this.repoRoot, { maxFiles: this.opts.maxFiles });
+		const inv = await inventory(this.repoRoot, {
+			maxFiles: this.opts.maxFiles,
+			exclude: this.opts.exclude,
+		});
 		this.ledger.insertFiles(
 			this.scanId,
 			inv.entries.map((e) => ({
@@ -315,9 +324,21 @@ export class Scanner {
 				excludedReason: e.excludedReason,
 			})),
 		);
+		this.partitions = partition(
+			inv.inScope.map((f) => ({ path: f.path, bytes: f.bytes })),
+			{ maxFiles: this.opts.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
+		);
+
+		this.inv = inv;
 		this.say(
 			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded`,
 		);
+		for (const glob of inv.unusedExcludes) {
+			// `--exclude peridot-dashboard` matches nothing, because entries are
+			// files: it needed `peridot-dashboard/**`. Saying so beats scanning what
+			// they meant to leave out and billing them for it.
+			this.say(`  --exclude '${glob}' matched no file — check the pattern`);
+		}
 		return inv;
 	}
 
@@ -339,13 +360,39 @@ export class Scanner {
 					`  it was written at ${wroteAt.slice(0, 8)}, the repo is at ${this.revision.slice(0, 8)}`,
 				);
 			}
+			// A threat model can also go stale sideways. It is stored per repository,
+			// but scope is per run, so --exclude can leave one whose highest-risk
+			// areas are all files this scan will not review — pointing every probe
+			// at code it cannot file against. Say so rather than orient them wrongly.
+			// Only when there is an inventory to compare against. Phases are
+			// individually callable, and `new Set(undefined)` is empty — which would
+			// report every file the model cites as out of scope, confidently and
+			// wrongly, to anyone calling threatModel() on its own.
+			const drift = this.inv
+				? citedOutOfScope(stored, new Set(this.inv.inScope.map((f) => f.path)))
+				: { cited: 0, outOfScope: 0 };
+			if (drift.outOfScope > 0) {
+				// Stated, not thresholded. A share is the wrong summary anyway — this
+				// model spent its top two highest-risk areas on excluded files while
+				// only 8 of 29 citations were out of scope, so any cutoff that keeps
+				// quiet about a dependency mention also keeps quiet about that.
+				this.say(
+					`  ${drift.outOfScope} of the ${drift.cited} files it points at are outside ` +
+						`this scan's scope`,
+				);
+			}
 			return stored;
 		}
 
 		this.checkBudget();
 		this.say("threat model: 1 agent");
 
-		const { files, total } = this.ledger.listWork(this.scanId, 200, 0);
+		// The inventory, not the worklist: the threat model wants the shape of the
+		// repository, and work.next now hands out unread files in batches, which
+		// is a different question.
+		const inScope = this.inv?.inScope ?? [];
+		const files = inScope.slice(0, 200);
+		const total = inScope.length;
 		const result = await this.runAgent({
 			ctx: { ...this.ctx("threat-model"), verbs: THREAT_MODEL_VERBS },
 			onEvent: (m) => this.say(m),
@@ -356,8 +403,7 @@ export class Scanner {
 				`Repository: ${this.repoName}`,
 				`Files in scope: ${total}`,
 				"",
-				`Here are the first ${files.length} paths. Call opensec({ verb: "work.next", cursor: N })`,
-				"to page through the rest, and read whatever you need.",
+				`Here are the first ${files.length} paths of ${total}. Read whatever you need.`,
 				"",
 				wrapUntrusted(this.nonce, "file-listing", files.map((f) => f.path).join("\n")),
 				"",
@@ -399,24 +445,34 @@ export class Scanner {
 			throw new Error("discover() before inventory(): nothing is in scope yet. run() orders the phases.");
 		}
 
-		const probes = this.probeCount;
-		const inScope = this.ledger.coverage(this.scanId).files_in_scope;
+		const parts = this.partitions ?? [];
+		const passes = this.passes;
 		this.say(
-			`discovery: ${probes} probe(s) over all ${inScope} files, ` +
-				`${this.concurrency} at a time`,
+			`discovery: ${describeDistribution(parts)}` +
+				(passes > 1 ? ` × ${passes} independent pass(es)` : "") +
+				`, ${this.concurrency} at a time`,
 		);
 
-		const plan = Array.from({ length: probes }, (_, i) => `probe-${i + 1}`);
-		await mapConcurrent(plan, this.concurrency, async (workerId) => {
+		// One agent per partition. The partition is the unit that fits in a
+		// context; that is the whole reason it exists.
+		const plan = parts.flatMap((part) =>
+			Array.from({ length: passes }, (_, pass) => ({
+				workerId: passes > 1 ? `probe-${part.id + 1}-p${pass + 1}` : `probe-${part.id + 1}`,
+				paths: part.paths,
+				readGroup: `pass-${pass + 1}`,
+			})),
+		);
+
+		await mapConcurrent(plan, this.concurrency, async ({ workerId, paths, readGroup }) => {
 			this.checkBudget();
 			await this.runAgent({
-				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS },
+				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS, worklist: paths, readGroup },
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				systemPrompt: this.prompts.get("probe.md"),
 				prompt: [
-					`You are ${workerId}. ${describeCompany(probes)}`,
+					`You are ${workerId}. ${describeCompany(parts.length, passes)}`,
 					"",
 					"A threat model for this repository was written first. It was derived from",
 					"the code under review, so treat it as orientation, not as fact:",
@@ -596,6 +652,10 @@ export class Scanner {
 		const skip = (p: Phase) => phaseBefore(p, this.startPhase);
 		try {
 			if (skip("inventory")) {
+				this.partitions = partition(
+					this.ledger.listInScopePaths(this.scanId).map((path) => ({ path, bytes: 0 })),
+					{ maxFiles: this.opts.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
+				);
 				this.say(
 					`inventory: kept from the interrupted run — ` +
 						`${this.ledger.coverage(this.scanId).files_in_scope} files in scope`,
@@ -626,8 +686,12 @@ export class Scanner {
 	static async estimate(opts: {
 		repo: string;
 		maxFiles?: number;
+		exclude?: readonly string[];
 	}): Promise<{ files: number; bytes: number; approxTokens: number; extensions: string[] }> {
-		const inv = await inventory(resolve(opts.repo), { maxFiles: opts.maxFiles });
+		const inv = await inventory(resolve(opts.repo), {
+			maxFiles: opts.maxFiles,
+			exclude: opts.exclude,
+		});
 		const bytes = inv.inScope.reduce((n, f) => n + f.bytes, 0);
 		return {
 			files: inv.inScope.length,
@@ -742,14 +806,45 @@ function describeCandidate(c: Candidate): string {
  * property of the search, not evidence about the finding, and nothing
  * downstream treats it as such.
  */
-function describeCompany(count: number): string {
-	if (count <= 1) return "";
-	return (
-		`There are ${count} probes on this repository and every one of you is accountable for ` +
-		`all of it. You work independently and will find some of the same things — file them ` +
-		`anyway. Duplicates are merged, and two probes agreeing is not evidence that a finding ` +
-		`is real.`
+function describeCompany(parts: number, passes: number): string {
+	const bits: string[] = [];
+	if (parts > 1) {
+		bits.push(
+			`There are ${parts} probes on this repository; you are accountable for your own ` +
+				`worklist only, but you may read anything.`,
+		);
+	}
+	if (passes > 1) {
+		// Passes overlap completely, so a probe needs to hear that filing what a
+		// sibling probably also found is correct. The converse matters too:
+		// agreement is a property of the search, not evidence about the finding.
+		bits.push(
+			`This repository is being reviewed ${passes} times over, independently. Someone else ` +
+				`may file what you file — do it anyway. Duplicates are merged, and two probes ` +
+				`agreeing is not evidence that a finding is real.`,
+		);
+	}
+	return bits.join(" ");
+}
+
+/**
+ * How much of a stored threat model points outside this scan.
+ *
+ * Paths are pulled out of the prose rather than tracked, because the file is
+ * the user's to edit and anything we required them to maintain would rot.
+ */
+export function citedOutOfScope(
+	text: string,
+	inScope: ReadonlySet<string>,
+): { cited: number; outOfScope: number } {
+	const paths = new Set(
+		(text.match(/[A-Za-z0-9_@./-]+\.[A-Za-z0-9]{1,5}(?=[:`\s,)]|$)/g) ?? [])
+			.map((p) => p.replace(/^[./]+/, ""))
+			.filter((p) => p.includes("/")),
 	);
+	let outOfScope = 0;
+	for (const p of paths) if (!inScope.has(p)) outOfScope++;
+	return { cited: paths.size, outOfScope };
 }
 
 function git(root: string, args: string[]): string | null {

@@ -18,6 +18,12 @@ export interface InventoryResult {
 	inScope: InventoryEntry[];
 	/** File extensions in scope, without the dot. Not language detection. */
 	extensions: string[];
+	/**
+	 * `--exclude` globs that matched no file. An exclusion that excluded nothing
+	 * is indistinguishable from one that worked, and the user has already paid
+	 * for the wider scan by the time the findings say otherwise.
+	 */
+	unusedExcludes: string[];
 }
 
 const EXCLUDED_DIRS = [
@@ -56,13 +62,30 @@ const MAX_FILE_BYTES = 512 * 1024;
 
 export async function inventory(
 	repoRoot: string,
-	opts: { maxFiles?: number } = {},
+	opts: { maxFiles?: number; exclude?: readonly string[] } = {},
 ): Promise<InventoryResult> {
 	const root = resolve(repoRoot);
 	const paths = await listFiles(root);
 
+	const excluders = (opts.exclude ?? []).map((g) => ({ glob: g, re: globToRegExp(g), hits: 0 }));
+
 	const entries: InventoryEntry[] = [];
 	for (const rel of paths) {
+		// User exclusions win over everything else, and are recorded with the glob
+		// that did it. A file dropped without a reason is indistinguishable from a
+		// file nobody thought about — the excluded count is part of the report for
+		// the same reason coverage is.
+		const hit = excluders.find((e) => e.re.test(rel));
+		if (hit) {
+			hit.hits++;
+			entries.push({
+				path: rel,
+				sha: "",
+				bytes: 0,
+				excludedReason: `excluded by --exclude '${hit.glob}'`,
+			});
+			continue;
+		}
 		entries.push(classify(root, rel));
 	}
 
@@ -76,7 +99,39 @@ export async function inventory(
 	}
 
 	const extensions = [...new Set(inScope.map((e) => ext(e.path)).filter(Boolean))].sort();
-	return { entries, inScope, extensions };
+	return {
+		entries,
+		inScope,
+		extensions,
+		unusedExcludes: excluders.filter((e) => e.hits === 0).map((e) => e.glob),
+	};
+}
+
+/**
+ * `*` stops at a path separator, `**` does not. Small on purpose: this reads a
+ * pattern the user typed on their own command line, not a shell dialect.
+ */
+export function globToRegExp(glob: string): RegExp {
+	let out = "";
+	for (let i = 0; i < glob.length; i++) {
+		const c = glob[i] as string;
+		if (c === "*") {
+			if (glob[i + 1] === "*") {
+				out += ".*";
+				i++;
+				if (glob[i + 1] === "/") i++;
+			} else {
+				out += "[^/]*";
+			}
+			continue;
+		}
+		if (c === "?") {
+			out += "[^/]";
+			continue;
+		}
+		out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+	}
+	return new RegExp(`^${out}$`);
 }
 
 async function listFiles(root: string): Promise<string[]> {

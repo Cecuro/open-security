@@ -51,13 +51,28 @@ export function identityHash(c: Identity): string {
 	return createHash("sha256").update(identityOf(c)).digest("hex").slice(0, 16);
 }
 
+/**
+ * Which candidates are worth asking the reducer about.
+ *
+ * Keyed on the file holding `root_control` — the check that is missing or
+ * wrong, which is to say the line a patch would touch. Two agents describing
+ * one bug rarely agree on anything else: the same liquidation flaw arrived once
+ * as `perps.rs` with no CWE and once as `contract.rs` with CWE-682, citing
+ * root_control lines 44 apart. Grouping on the primary location and the CWE
+ * family missed it three times over, and it reached the report twice.
+ *
+ * Deliberately recall-first, and deliberately not the identity hash. Grouping
+ * two unrelated findings costs one reducer call, which is cheap and which the
+ * reducer is there to refuse. Failing to group two descriptions of one bug puts
+ * both in the report, which nothing downstream ever catches.
+ */
 export function collisionGroups<T extends { cwe_ids: string[]; locations: Location[] }>(
 	candidates: T[],
 ): T[][] {
 	const groups = new Map<string, T[]>();
 	for (const c of candidates) {
-		const primary = c.locations[0]?.path ?? "";
-		const key = `${cweFamily(c.cwe_ids)}|${primary}`;
+		const root = c.locations.find((l) => l.role === "root_control")?.path;
+		const key = root ?? c.locations[0]?.path ?? "";
 		const bucket = groups.get(key);
 		if (bucket) bucket.push(c);
 		else groups.set(key, [c]);
