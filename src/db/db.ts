@@ -17,6 +17,7 @@ import type {
 	ScanFile,
 	ScanRecord,
 	ScanStatus,
+	WorkerCoverage,
 } from "../types.js";
 import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 
@@ -390,6 +391,7 @@ export class Ledger {
 		bytesRead: number,
 		continued = false,
 		readGroup?: string,
+		workerId?: string,
 	): void {
 		// files.bytes_read stays the union across every pass, because coverage is a
 		// claim about the scan. file_reads is what each pass has seen on its own.
@@ -405,14 +407,86 @@ export class Ledger {
 			)
 			.run(bytesRead, now(), scanId, path);
 
-		if (readGroup === undefined) return;
+		if (readGroup !== undefined) {
+			this.db
+				.prepare(
+					`INSERT INTO file_reads (scan_id, read_group, path, bytes_read) VALUES (?, ?, ?, ?)
+					 ON CONFLICT(scan_id, read_group, path) DO UPDATE SET
+					   bytes_read = ${continued ? "file_reads.bytes_read + excluded.bytes_read" : "MAX(file_reads.bytes_read, excluded.bytes_read)"}`,
+				)
+				.run(scanId, readGroup, path, bytesRead);
+		}
+		if (workerId !== undefined) {
+			this.db
+				.prepare(
+					`INSERT INTO worker_file_reads (scan_id, worker_id, path, bytes_read) VALUES (?, ?, ?, ?)
+					 ON CONFLICT(scan_id, worker_id, path) DO UPDATE SET
+					   bytes_read = ${continued ? "worker_file_reads.bytes_read + excluded.bytes_read" : "MAX(worker_file_reads.bytes_read, excluded.bytes_read)"}`,
+				)
+				.run(scanId, workerId, path, bytesRead);
+		}
+	}
+
+	beginWorkerWork(scanId: string, workerId: string, paths: readonly string[]): void {
+		const files = paths.length;
+		const bytes = paths.reduce((sum, path) => {
+			const row = this.db
+				.prepare("SELECT bytes_total FROM files WHERE scan_id = ? AND path = ?")
+				.get(scanId, path) as { bytes_total: number } | undefined;
+			return sum + (row?.bytes_total ?? 0);
+		}, 0);
 		this.db
 			.prepare(
-				`INSERT INTO file_reads (scan_id, read_group, path, bytes_read) VALUES (?, ?, ?, ?)
-				 ON CONFLICT(scan_id, read_group, path) DO UPDATE SET
-				   bytes_read = ${continued ? "file_reads.bytes_read + excluded.bytes_read" : "MAX(file_reads.bytes_read, excluded.bytes_read)"}`,
+				`INSERT OR IGNORE INTO worker_work (scan_id, worker_id, files_assigned, bytes_assigned)
+				 VALUES (?, ?, ?, ?)`,
 			)
-			.run(scanId, readGroup, path, bytesRead);
+			.run(scanId, workerId, files, bytes);
+	}
+
+	completeWorkerWork(
+		scanId: string,
+		workerId: string,
+		worklist: readonly string[],
+		readGroup: string | undefined,
+		summary: string,
+	): void {
+		const { unread } = this.listWork(scanId, 1, worklist, readGroup);
+		if (unread !== 0) throw new Error(`work is not complete: ${unread} file(s) still need reading`);
+		const row = this.db
+			.prepare("SELECT completed_at FROM worker_work WHERE scan_id = ? AND worker_id = ?")
+			.get(scanId, workerId) as { completed_at: string | null } | undefined;
+		if (!row) throw new Error("worker was not registered for this worklist");
+		if (row.completed_at) throw new Error("work.complete was already recorded");
+		this.db
+			.prepare("UPDATE worker_work SET summary = ?, completed_at = ? WHERE scan_id = ? AND worker_id = ?")
+			.run(summary, now(), scanId, workerId);
+	}
+
+	workerCoverage(scanId: string): WorkerCoverage[] {
+		return this.db
+			.prepare(
+				`SELECT w.worker_id, w.files_assigned, w.bytes_assigned, w.summary, w.completed_at,
+				 COUNT(r.path) AS files_touched, COALESCE(SUM(MIN(r.bytes_read, f.bytes_total)), 0) AS bytes_read
+				 FROM worker_work w
+				 LEFT JOIN worker_file_reads r ON r.scan_id = w.scan_id AND r.worker_id = w.worker_id
+				 LEFT JOIN files f ON f.scan_id = r.scan_id AND f.path = r.path
+				 WHERE w.scan_id = ? GROUP BY w.worker_id ORDER BY w.worker_id`,
+			)
+			.all(scanId)
+			.map((row) => {
+				const r = row as Record<string, string | number | null>;
+				return {
+					worker_id: r.worker_id as string,
+					files_assigned: r.files_assigned as number,
+					files_in_scope: r.files_assigned as number,
+					files_touched: r.files_touched as number,
+					bytes_assigned: r.bytes_assigned as number,
+					bytes_in_scope: r.bytes_assigned as number,
+					bytes_read: r.bytes_read as number,
+					completed: r.completed_at !== null,
+					...(r.summary ? { summary: r.summary as string } : {}),
+				};
+			});
 	}
 
 	coverage(scanId: string): Coverage {
