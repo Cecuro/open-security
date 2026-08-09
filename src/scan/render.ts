@@ -1,4 +1,4 @@
-import type { Candidate, Coverage, ScanRecord } from "../types.js";
+import type { Candidate, Coverage, ScanRecord, WorkerCoverage } from "../types.js";
 import { formatSeverity, renderMatrix, severityRank } from "./severity.js";
 
 export interface ReportInput {
@@ -7,6 +7,7 @@ export interface ReportInput {
 	repoPath: string;
 	candidates: Candidate[];
 	coverage: Coverage;
+	probeCoverage?: WorkerCoverage[];
 	leads: Array<{ worker_id: string; text: string; status: string }>;
 	/** File extensions in scope, without the dot. */
 	extensions: string[];
@@ -67,6 +68,20 @@ export function renderMarkdown(r: ReportInput): string {
 		"> review**: a file that was read is not thereby a file that was understood.",
 		"",
 	);
+	if (r.probeCoverage && r.probeCoverage.length > 0) {
+		const complete = r.probeCoverage.filter((p) => p.completed).length;
+		out.push("## Probe coverage", "");
+		out.push(`${complete} / ${r.probeCoverage.length} probe(s) completed their worklist.`, "");
+		out.push("| probe | files read | bytes read | status |", "|---|---|---|---|");
+		for (const p of r.probeCoverage) {
+			out.push(
+				`| ${codeSpan(p.worker_id)} | ${p.files_touched} / ${p.files_assigned} | ` +
+				`${pct(p.bytes_read, p.bytes_assigned)} | ${p.completed ? "complete" : "incomplete"} |`,
+			);
+		}
+		for (const p of r.probeCoverage) if (p.summary) out.push(`- ${codeSpan(p.worker_id)}: ${esc(p.summary)}`);
+		out.push("");
+	}
 	// Coverage says what was read. It says nothing about what was noticed, and
 	// what gets noticed varies a lot: repeated scans of the same code at the same
 	// revision, reading all of it, return overlapping but different findings —

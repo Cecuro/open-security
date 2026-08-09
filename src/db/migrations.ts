@@ -62,6 +62,28 @@ export const MIGRATIONS: Migration[] = [
 	},
 	{
 		version: 8,
+		note: "per-worker read coverage and completion",
+		sql: `
+			CREATE TABLE worker_work (
+			  scan_id TEXT NOT NULL REFERENCES scans(id),
+			  worker_id TEXT NOT NULL,
+			  files_assigned INTEGER NOT NULL,
+			  bytes_assigned INTEGER NOT NULL,
+			  summary TEXT,
+			  completed_at TEXT,
+			  PRIMARY KEY (scan_id, worker_id)
+			);
+			CREATE TABLE worker_file_reads (
+			  scan_id TEXT NOT NULL REFERENCES scans(id),
+			  worker_id TEXT NOT NULL,
+			  path TEXT NOT NULL,
+			  bytes_read INTEGER NOT NULL DEFAULT 0,
+			  PRIMARY KEY (scan_id, worker_id, path)
+			);
+		`,
+	},
+	{
+		version: 9,
 		note: "scan scope, so diff and working-tree reports remain reproducible",
 		sql: `
 			ALTER TABLE scans ADD COLUMN scope_kind TEXT;

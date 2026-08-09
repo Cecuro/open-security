@@ -42,6 +42,7 @@ export interface RunContext {
 
 export type Verb =
 	| "work.next"
+	| "work.complete"
 	| "candidate.create"
 	| "candidate.validate"
 	| "candidate.assess"
@@ -51,7 +52,7 @@ export type Verb =
 // tool must not advertise candidate.create to it. Without this it fell through
 // to ALL_VERBS and offered three verbs the phase has no use for.
 export const THREAT_MODEL_VERBS: Verb[] = ["work.next", "lead.record"];
-export const PROBE_VERBS: Verb[] = ["work.next", "candidate.create", "lead.record"];
+export const PROBE_VERBS: Verb[] = ["work.next", "work.complete", "candidate.create", "lead.record"];
 export const VALIDATE_VERBS: Verb[] = ["work.next", "candidate.validate", "lead.record"];
 export const ASSESS_VERBS: Verb[] = ["work.next", "candidate.assess", "lead.record"];
 export const REDUCE_VERBS: Verb[] = ["candidate.validate"];
@@ -193,6 +194,7 @@ const paramsSchema = (verbs: Verb[]) =>
 
 const ALL_VERBS: Verb[] = [
 	"work.next",
+	"work.complete",
 	"candidate.create",
 	"candidate.validate",
 	"candidate.assess",
@@ -205,6 +207,8 @@ const VERB_DOC: Record<Verb, string> = {
 	"work.next":
 		"- work.next({ limit }) — the next batch of files nothing has read yet, and how\n" +
 		"  many are left after it. Call it again until remaining is 0.",
+	"work.complete":
+		"- work.complete({ summary }) — after work.next says remaining is 0, record what you reviewed, found, and could not settle.",
 	"candidate.create":
 		"- candidate.create({ title, cwe, locations, summary, evidence, instance }) — a\n" +
 		"  suspected flaw. locations must cite real line ranges in files inside the repo.",
@@ -267,6 +271,8 @@ function run(ctx: RunContext, p: Params): string {
 	switch (p.verb) {
 		case "work.next":
 			return workNext(ctx, p);
+		case "work.complete":
+			return workComplete(ctx, p);
 		case "candidate.create":
 			return candidateCreate(ctx, p);
 		case "candidate.validate":
@@ -319,6 +325,12 @@ function workNext(ctx: RunContext, p: Params): string {
 		null,
 		1,
 	);
+}
+
+function workComplete(ctx: RunContext, p: Params): string {
+	const summary = sanitize(ctx, requireText(p.summary, "summary")).slice(0, 2000);
+	ctx.ledger.completeWorkerWork(ctx.scanId, ctx.workerId, ctx.worklist ?? [], ctx.readGroup, summary);
+	return JSON.stringify({ status: "complete", note: "worklist read" });
 }
 
 function candidateCreate(ctx: RunContext, p: Params): string {

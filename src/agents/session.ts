@@ -289,6 +289,7 @@ function instrumentRead(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 						Buffer.byteLength(resultText(result), "utf8"),
 						continued,
 						ctx.readGroup,
+						ctx.workerId,
 					);
 				}
 			}
@@ -312,7 +313,7 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			if (isFile(searchRoot)) {
 				const rel = toRepoRelative(ctx.repoRoot, searchRoot);
 				if (rel && ctx.ledger.fileInScope(ctx.scanId, rel)) {
-					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup);
+					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup, ctx.workerId);
 				}
 				return result;
 			}
@@ -320,7 +321,7 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			for (const hit of parseGrepPaths(resultText(result))) {
 				const rel = toRepoRelative(ctx.repoRoot, resolve(searchRoot, hit));
 				if (rel && ctx.ledger.fileInScope(ctx.scanId, rel)) {
-					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup);
+					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup, ctx.workerId);
 				}
 			}
 			return result;

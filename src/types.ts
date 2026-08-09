@@ -166,3 +166,11 @@ export interface Coverage {
 	bytes_in_scope: number;
 	bytes_read: number;
 }
+
+export interface WorkerCoverage extends Coverage {
+	worker_id: string;
+	files_assigned: number;
+	bytes_assigned: number;
+	completed: boolean;
+	summary?: string;
+}

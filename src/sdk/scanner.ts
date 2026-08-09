@@ -483,6 +483,7 @@ export class Scanner {
 
 		await mapConcurrent(plan, this.concurrency, async ({ workerId, paths, readGroup }) => {
 			this.checkBudget();
+			this.ledger.beginWorkerWork(this.scanId, workerId, paths);
 			await this.runAgent({
 				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS, worklist: paths, readGroup },
 				onEvent: (m) => this.say(m),
@@ -503,7 +504,11 @@ export class Scanner {
 					"already recorded, then report.",
 				].join("\n"),
 			});
-			this.say(`  ${workerId} done`);
+			const progress = this.ledger.workerCoverage(this.scanId).find((p) => p.worker_id === workerId);
+			this.say(
+				`  ${workerId} ${progress?.completed ? "completed" : "stopped incomplete"} ` +
+				`(${progress?.files_touched ?? 0}/${progress?.files_assigned ?? paths.length} files touched)`,
+			);
 		});
 
 		const found = this.ledger.listCandidates(this.scanId);
@@ -746,6 +751,7 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 	const repo = ledger.getRepo(scan.repo_id);
 	const candidates = ledger.listCandidates(scanId);
 	const coverage = ledger.coverage(scanId);
+	const probeCoverage = ledger.workerCoverage(scanId);
 	const extensions = [
 		...new Set(ledger.listInScopePaths(scanId).map(ext).filter(Boolean)),
 	].sort();
@@ -756,6 +762,7 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 		repoPath: repo?.path ?? "(unknown)",
 		candidates,
 		coverage,
+		probeCoverage,
 		leads: ledger.listLeads(scanId),
 		extensions,
 		excludedFiles: ledger.excludedCount(scanId),
@@ -774,10 +781,23 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 	const reportPath = join(dir, "report.md");
 	const jsonPath = join(dir, "findings.json");
 	writeFileSync(reportPath, markdown, { encoding: "utf8", mode: 0o600 });
-	writeFileSync(jsonPath, JSON.stringify({ scan, coverage, candidates }, null, 2), {
+	writeFileSync(
+		jsonPath,
+		JSON.stringify(
+			{
+				scan,
+				coverage,
+				probeCoverage,
+				candidates,
+			},
+			null,
+			2,
+		),
+		{
 		encoding: "utf8",
 		mode: 0o600,
-	});
+		},
+	);
 
 	return { scanId, markdown, reportPath, jsonPath, candidates, coverage };
 }
