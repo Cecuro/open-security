@@ -19,6 +19,8 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
   opensec report [scanId]             re-render a scan's report from the ledger,
                                       no agents run. Works on failed scans; with
                                       no id it lists the scans it knows.
+  opensec events <scanId>             show recent durable lifecycle, usage and
+                                      tool-error events for a scan
   opensec resume <scanId> [options]   pick a failed or interrupted scan back up
                                       at the phase it stopped in. Spend so far
                                       still counts against --max-cost.
@@ -138,6 +140,31 @@ async function main(argv: string[]): Promise<number> {
 				return 0;
 			}
 			return await emit(reportScan(ledger, id), opts.bools.json === true);
+		} finally {
+			ledger.close();
+		}
+	}
+
+	if (command === "events") {
+		const opts = parseFlags(rest);
+		const id = opts.positional[0];
+		if (!id) return fail("events needs a scan id — 'opensec report' lists them");
+		const bad = rejectMissingValues(opts);
+		if (bad) return fail(bad);
+		const unknownValue = unknownValueFlag(opts, ["db"]);
+		if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
+		const unknown = unknownBool(opts, []);
+		if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
+		const ledger = Ledger.open(opts.flags.db);
+		try {
+			if (!ledger.getScan(id)) return fail(`no scan '${id}' in this ledger`);
+			for (const event of ledger.listEvents(id)) {
+				const detail = event.detail_json ? ` ${safe(event.detail_json)}` : "";
+				process.stdout.write(
+					`${event.at} ${event.type}${event.worker_id ? ` ${event.worker_id}` : ""}${detail}\n`,
+				);
+			}
+			return 0;
 		} finally {
 			ledger.close();
 		}

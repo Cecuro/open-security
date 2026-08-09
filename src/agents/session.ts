@@ -39,6 +39,17 @@ export interface AgentRunResult {
 	stoppedAtTurnLimit?: boolean;
 }
 
+export interface UsageDelta {
+	tokensIn: number;
+	tokensOut: number;
+	costUsd: number;
+	inputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	cacheCostUsd: number;
+	cacheSavingsUsd: number;
+}
+
 // Not redundant with --max-cost: the budget is only checked between agent runs,
 // so nothing else bounds a single agent that loops on grep.
 export const DEFAULT_MAX_TURNS = 80;
@@ -51,6 +62,9 @@ export interface RunArgs {
 	tracePath?: string;
 	subagents?: SubagentDeps;
 	onEvent?: (msg: string) => void;
+	/** Called after each completed model turn, and once more for any remainder. */
+	/** Return false to stop after this completed model turn. */
+	onUsage?: (usage: UsageDelta) => boolean | void;
 	maxTurns?: number;
 }
 
@@ -117,7 +131,13 @@ export class AgentRunner {
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
-			systemPrompt: args.systemPrompt,
+			systemPrompt: [
+				`Repository root: ${this.repoRoot}`,
+				"Use repository-relative paths for read, grep, find, and ls (for example, src/handler.ts).",
+				"Those tools return repository-relative paths too.",
+				"",
+				args.systemPrompt,
+			].join("\n"),
 			appendSystemPrompt: [],
 		});
 		await resourceLoader.reload();
@@ -125,8 +145,8 @@ export class AgentRunner {
 		const tools: AnyToolDef[] = [
 			instrumentRead(confine(createReadToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			instrumentGrep(confine(createGrepToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
-			confine(createFindToolDefinition(this.repoRoot) as AnyToolDef, ctx),
-			confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx),
+			rootRelativeResults(confine(createFindToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
+			rootRelativeResults(confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			createOpensecTool(ctx) as AnyToolDef,
 		];
 
@@ -136,23 +156,71 @@ export class AgentRunner {
 		}
 
 		const { session } = await createAgentSession({
-			cwd: workDir,
+			// The agent and every file tool share the scanned repository as their
+			// working directory. The resource loader above stays isolated so a
+			// repository cannot load its own PI configuration or prompts.
+			cwd: this.repoRoot,
 			model: resolved.model,
 			thinkingLevel: resolved.thinkingLevel,
 			modelRuntime: this.runtime,
 			resourceLoader,
 			settingsManager,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(this.repoRoot),
 			noTools: "builtin",
 			customTools: tools,
 		});
 
 		const failures: string[] = [];
+		let reported: UsageDelta = emptyUsage();
+		let stoppedAtBudget = false;
+		const reportUsage = (usage: UsageDelta): void => {
+			if (usage.tokensIn === 0 && usage.tokensOut === 0 && usage.costUsd === 0) return;
+			reported = {
+				tokensIn: reported.tokensIn + usage.tokensIn,
+				tokensOut: reported.tokensOut + usage.tokensOut,
+				costUsd: reported.costUsd + usage.costUsd,
+				inputTokens: reported.inputTokens + usage.inputTokens,
+				cacheReadTokens: reported.cacheReadTokens + usage.cacheReadTokens,
+				cacheWriteTokens: reported.cacheWriteTokens + usage.cacheWriteTokens,
+				cacheCostUsd: reported.cacheCostUsd + usage.cacheCostUsd,
+				cacheSavingsUsd: reported.cacheSavingsUsd + usage.cacheSavingsUsd,
+			};
+			if (args.onUsage?.(usage) === false && !stoppedAtBudget) {
+				stoppedAtBudget = true;
+				void session.abort().catch(() => {});
+			}
+			ctx.ledger.recordEvent(
+				ctx.scanId,
+				"model_usage",
+				{ ...usage, model: `${resolved.model.provider}/${resolved.model.id}` },
+				ctx.workerId,
+			);
+		};
+		ctx.ledger.recordEvent(
+			ctx.scanId,
+			"agent_start",
+			{ model: `${resolved.model.provider}/${resolved.model.id}`, thinking: resolved.thinkingLevel ?? "medium" },
+			ctx.workerId,
+		);
 		const maxTurns = args.maxTurns ?? DEFAULT_MAX_TURNS;
 		let turns = 0;
 		let stoppedAtTurnLimit = false;
 
 		const unsubscribe = session.subscribe((event) => {
+			if (event.type === "turn_end") {
+				const usage = usageOf(event.message, resolved.model);
+				if (usage) reportUsage(usage);
+				for (const result of event.toolResults) {
+					if (!result.isError) continue;
+					ctx.ledger.recordEvent(
+						ctx.scanId,
+						"tool_error",
+						{ tool: result.toolName, error: resultText(result).slice(0, 500) },
+						ctx.workerId,
+					);
+				}
+				return;
+			}
 			if (event.type === "turn_start") {
 				turns += 1;
 				if (turns > maxTurns && !stoppedAtTurnLimit) {
@@ -175,7 +243,10 @@ export class AgentRunner {
 				await session.prompt(args.prompt, { expandPromptTemplates: false });
 				await session.waitForIdle();
 			} catch (err) {
-				if (!stoppedAtTurnLimit) throw err;
+				if (!stoppedAtTurnLimit && !stoppedAtBudget) throw err;
+			}
+			if (stoppedAtBudget) {
+				throw new Error(`budget exhausted during ${ctx.workerId}; usage up to this response is recorded`);
 			}
 
 			if (failures.length > 0 && !stoppedAtTurnLimit) {
@@ -184,6 +255,23 @@ export class AgentRunner {
 
 			const stats = session.getSessionStats();
 			const cache = cacheCosts(session.messages, resolved.model);
+			const total: UsageDelta = {
+				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
+				tokensOut: stats.tokens.output,
+				costUsd: stats.cost,
+				inputTokens: stats.tokens.input,
+				cacheReadTokens: stats.tokens.cacheRead,
+				cacheWriteTokens: stats.tokens.cacheWrite,
+				cacheCostUsd: cache.costUsd,
+				cacheSavingsUsd: cache.savingsUsd,
+			};
+			reportUsage(subtractUsage(total, reported));
+			ctx.ledger.recordEvent(
+				ctx.scanId,
+				"agent_end",
+				{ stoppedAtTurnLimit, ...total },
+				ctx.workerId,
+			);
 			return {
 				text: session.getLastAssistantText() ?? "",
 				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
@@ -196,6 +284,14 @@ export class AgentRunner {
 				cacheSavingsUsd: cache.savingsUsd,
 				...(stoppedAtTurnLimit ? { stoppedAtTurnLimit: true } : {}),
 			};
+		} catch (err) {
+			ctx.ledger.recordEvent(
+				ctx.scanId,
+				"agent_error",
+				{ error: (err as Error).message, stoppedAtTurnLimit, stoppedAtBudget },
+				ctx.workerId,
+			);
+			throw err;
 		} finally {
 			if (args.tracePath) {
 				try {
@@ -276,16 +372,25 @@ function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 		...def,
 		async execute(id, params, signal, onUpdate, extCtx) {
 			const path = (params as { path?: unknown } | undefined)?.path;
-			if (typeof path === "string" && path.length > 0 && !readableFrom(ctx, path)) {
+			const resolvedPath = typeof path === "string" ? resolveToolPath(ctx, path) : path;
+			if (typeof resolvedPath === "string" && resolvedPath.length > 0 && !readableFrom(ctx, resolvedPath)) {
 				throw new Error(
 					`'${path}' is outside the repository under review. ` +
 						`This scan may only read inside ${ctx.repoRoot}` +
 						`${ctx.overflowDir ? ` and ${ctx.overflowDir}` : ""}.`,
 				);
 			}
-			return inner(id, params, signal, onUpdate, extCtx);
+			const next =
+				typeof resolvedPath === "string" ? { ...(params as object), path: resolvedPath } : params;
+			return inner(id, next, signal, onUpdate, extCtx);
 		},
 	} as AnyToolDef;
+}
+
+/** Resolve agent paths from the scanned repository's root. */
+export function resolveToolPath(ctx: Pick<RunContext, "repoRoot">, path: string): string {
+	const normalized = normalizeLikePi(path);
+	return isAbsolute(normalized) ? normalized : resolve(ctx.repoRoot, normalized);
 }
 
 export function readableFrom(
@@ -342,10 +447,12 @@ function instrumentRead(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 	return {
 		...def,
 		async execute(id, params, signal, onUpdate, extCtx) {
-			const result = await inner(id, params, signal, onUpdate, extCtx);
 			const path = (params as { path?: unknown } | undefined)?.path;
+			const next =
+				typeof path === "string" ? { ...(params as object), path: resolveToolPath(ctx, path) } : params;
+			const result = await inner(id, next, signal, onUpdate, extCtx);
 			if (typeof path === "string") {
-				const rel = toRepoRelative(ctx.repoRoot, path);
+				const rel = toRepoRelative(ctx.repoRoot, resolveToolPath(ctx, path));
 				if (rel) {
 					// A read with an offset is the agent continuing through a file it
 					// has already seen the start of, so it adds rather than replaces.
@@ -371,11 +478,20 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 	return {
 		...def,
 		async execute(id, params, signal, onUpdate, extCtx) {
-			const result = await inner(id, params, signal, onUpdate, extCtx);
 			const asked = (params as { path?: unknown } | undefined)?.path;
+			const normalizedAsked = typeof asked === "string" ? resolveToolPath(ctx, asked) : asked;
+			const next =
+				typeof normalizedAsked === "string"
+					? { ...(params as object), path: normalizedAsked }
+					: params;
+			const result = await inner(id, next, signal, onUpdate, extCtx);
 			const searchRoot = resolve(
 				ctx.repoRoot,
-				normalizeLikePi(typeof asked === "string" && asked.length > 0 ? asked : "."),
+				normalizeLikePi(
+					typeof normalizedAsked === "string" && normalizedAsked.length > 0
+						? normalizedAsked
+						: ".",
+				),
 			);
 
 			if (isFile(searchRoot)) {
@@ -392,9 +508,113 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup, ctx.workerId);
 				}
 			}
-			return result;
+			return rootRelativeResult(result, ctx.repoRoot, searchRoot, "grep");
 		},
 	} as AnyToolDef;
+}
+
+/**
+ * PI reports grep, find, and ls entries relative to the directory passed to
+ * that tool. That makes a scoped result ambiguous to the next tool call. Keep
+ * the agent-facing path format uniform: every returned path is repo-relative.
+ */
+export function rootRelativeResults(def: AnyToolDef, ctx: Pick<RunContext, "repoRoot">): AnyToolDef {
+	const inner = def.execute.bind(def);
+	return {
+		...def,
+		async execute(id, params, signal, onUpdate, extCtx) {
+			const path = (params as { path?: unknown } | undefined)?.path;
+			const searchRoot = resolveToolPath(ctx, typeof path === "string" && path.length > 0 ? path : ".");
+			const result = await inner(id, params, signal, onUpdate, extCtx);
+			return rootRelativeResult(result, ctx.repoRoot, searchRoot, def.name);
+		},
+	} as AnyToolDef;
+}
+
+function rootRelativeResult<T>(result: T, repoRoot: string, searchRoot: string, tool: string): T {
+	const withContent = result as T & {
+		content?: Array<{ type: string; text?: string; [key: string]: unknown }>;
+	};
+	if (!withContent.content) return result;
+
+	return {
+		...withContent,
+		content: withContent.content.map((block) => {
+			if (block.type !== "text" || block.text === undefined) return block;
+			return { ...block, text: rootRelativeOutput(block.text, repoRoot, searchRoot, tool) };
+		}),
+	} as T;
+}
+
+function rootRelativeOutput(output: string, repoRoot: string, searchRoot: string, tool: string): string {
+	if (tool === "grep") {
+		return output
+			.split("\n")
+			.map((line) => {
+				const match = /^(.*?)(?=:\d+:|-\d+-)/.exec(line);
+				if (!match?.[1]) return line;
+				const path = toRepoRelative(repoRoot, resolve(searchRoot, match[1]));
+				return path ? `${path}${line.slice(match[1].length)}` : line;
+			})
+			.join("\n");
+	}
+
+	return output
+		.split("\n")
+		.map((line) => {
+			if (!line || line.startsWith("[") || line.startsWith("(") || line.startsWith("No files")) return line;
+			const directory = line.endsWith("/");
+			const path = toRepoRelative(repoRoot, resolve(searchRoot, line));
+			return path ? `${path}${directory ? "/" : ""}` : line;
+		})
+		.join("\n");
+}
+
+function emptyUsage(): UsageDelta {
+	return {
+		tokensIn: 0,
+		tokensOut: 0,
+		costUsd: 0,
+		inputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		cacheCostUsd: 0,
+		cacheSavingsUsd: 0,
+	};
+}
+
+function subtractUsage(total: UsageDelta, reported: UsageDelta): UsageDelta {
+	return {
+		tokensIn: Math.max(0, total.tokensIn - reported.tokensIn),
+		tokensOut: Math.max(0, total.tokensOut - reported.tokensOut),
+		costUsd: Math.max(0, total.costUsd - reported.costUsd),
+		inputTokens: Math.max(0, total.inputTokens - reported.inputTokens),
+		cacheReadTokens: Math.max(0, total.cacheReadTokens - reported.cacheReadTokens),
+		cacheWriteTokens: Math.max(0, total.cacheWriteTokens - reported.cacheWriteTokens),
+		cacheCostUsd: Math.max(0, total.cacheCostUsd - reported.cacheCostUsd),
+		cacheSavingsUsd: Math.max(0, total.cacheSavingsUsd - reported.cacheSavingsUsd),
+	};
+}
+
+function usageOf(
+	message: unknown,
+	model: { cost?: { input?: number; cacheRead?: number } },
+): UsageDelta | null {
+	const usage = (message as { usage?: Record<string, unknown> } | undefined)?.usage;
+	if (!usage) return null;
+	const number = (value: unknown): number => (typeof value === "number" ? value : 0);
+	const cost = usage.cost as Record<string, unknown> | undefined;
+	const cache = cacheCosts([message], model);
+	return {
+		tokensIn: number(usage.input) + number(usage.cacheRead) + number(usage.cacheWrite),
+		tokensOut: number(usage.output),
+		costUsd: number(cost?.total),
+		inputTokens: number(usage.input),
+		cacheReadTokens: number(usage.cacheRead),
+		cacheWriteTokens: number(usage.cacheWrite),
+		cacheCostUsd: cache.costUsd,
+		cacheSavingsUsd: cache.savingsUsd,
+	};
 }
 
 function isFile(p: string): boolean {

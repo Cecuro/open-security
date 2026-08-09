@@ -299,12 +299,20 @@ export class Scanner {
 		});
 	}
 
+	private budgetAvailable(): boolean {
+		const max = this.opts.maxCostUsd;
+		return typeof max !== "number" || (this.ledger.getScan(this.scanId)?.cost_usd ?? 0) < max;
+	}
+
 	private async runAgent(args: RunArgs): Promise<AgentRunResult> {
 		const result = await this.runner.run({
 			...args,
 			maxTurns: args.maxTurns ?? this.opts.maxTurns,
+			onUsage: (usage) => {
+				this.bill(usage);
+				return this.budgetAvailable();
+			},
 		});
-		this.bill(result);
 		if (result.stoppedAtTurnLimit) {
 			this.say(
 				`  ${args.ctx.workerId} hit the turn limit and was stopped — its work so far is ` +
@@ -317,9 +325,16 @@ export class Scanner {
 	private subagentDeps(): SubagentDeps {
 		return {
 			prompts: this.prompts,
-			run: (a) => this.runner.run({ ...a, maxTurns: this.opts.maxTurns }),
+			run: (a) =>
+				this.runner.run({
+					...a,
+					maxTurns: this.opts.maxTurns,
+					onUsage: (usage) => {
+						this.bill(usage);
+						return this.budgetAvailable();
+					},
+				}),
 			checkBudget: () => this.checkBudget(),
-			bill: (r) => this.bill(r),
 			tracePath: (w) => this.tracePath(w),
 			onEvent: (m) => this.say(m),
 		};

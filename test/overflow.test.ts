@@ -56,7 +56,6 @@ function setup(reportText: string) {
 			return { text: reportText, tokensIn: 1, tokensOut: 1, costUsd: 0 };
 		},
 		checkBudget: () => {},
-		bill: () => {},
 		tracePath: (w) => join(base, `${w}.jsonl`),
 	};
 

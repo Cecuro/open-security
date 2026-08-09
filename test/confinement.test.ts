@@ -19,10 +19,20 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createGrepToolDefinition, createReadToolDefinition } from "@earendil-works/pi-coding-agent";
+import {
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createReadToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
-import { normalizeLikePi, withinRepo } from "../src/agents/session.js";
+import {
+	normalizeLikePi,
+	resolveToolPath,
+	rootRelativeResults,
+	withinRepo,
+} from "../src/agents/session.js";
 
 const repo = realpathSync(mkdtempSync(join(tmpdir(), "opensec-confine-")));
 mkdirSync(join(repo, "src", "handlers"), { recursive: true });
@@ -92,6 +102,20 @@ describe("withinRepo — the gate confine() gives the file tools", () => {
 	});
 });
 
+describe("resolveToolPath", () => {
+	it("makes ordinary repo-relative paths unambiguous to PI", () => {
+		expect(resolveToolPath({ repoRoot: repo }, "src/handlers/upload.ts")).toBe(
+			join(repo, "src/handlers/upload.ts"),
+		);
+	});
+
+	it("leaves absolute paths for the confinement gate to decide", () => {
+		const repoFile = join(repo, "src", "handlers", "upload.ts");
+		expect(resolveToolPath({ repoRoot: repo }, repoFile)).toBe(repoFile);
+		expect(resolveToolPath({ repoRoot: repo }, "/etc/passwd")).toBe("/etc/passwd");
+	});
+});
+
 describe("the escapes these normalizations close", () => {
 	// Guards the coupling: each of these is a path that resolve() alone places
 	// inside the repo while pi opens something else entirely.
@@ -132,5 +156,33 @@ describe("grep hits are reported relative to the search root, not the repo", () 
 		const text = await runTool(createGrepToolDefinition(repo), { pattern: "token", path: "src" });
 		expect(text).toContain("handlers/upload.ts:");
 		expect(text).not.toContain("src/handlers/upload.ts:");
+	});
+});
+
+describe("agent-visible tool results use repository-relative paths", () => {
+	const ctx = { repoRoot: repo };
+
+	it("prefixes scoped grep results", async () => {
+		const text = await runTool(
+			rootRelativeResults(createGrepToolDefinition(repo) as never, ctx),
+			{ pattern: "token", path: "src" },
+		);
+		expect(text).toContain("src/handlers/upload.ts:");
+	});
+
+	it("prefixes scoped find results", async () => {
+		const text = await runTool(
+			rootRelativeResults(createFindToolDefinition(repo) as never, ctx),
+			{ pattern: "*.ts", path: "src" },
+		);
+		expect(text).toContain("src/handlers/upload.ts");
+	});
+
+	it("prefixes scoped ls results", async () => {
+		const text = await runTool(
+			rootRelativeResults(createLsToolDefinition(repo) as never, ctx),
+			{ path: "src" },
+		);
+		expect(text).toContain("src/handlers/");
 	});
 });

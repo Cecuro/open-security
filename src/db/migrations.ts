@@ -101,6 +101,21 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE scans ADD COLUMN cache_savings_usd REAL NOT NULL DEFAULT 0;
 		`,
 	},
+	{
+		version: 11,
+		note: "scan_events — durable lifecycle, model-usage and tool-error observability",
+		sql: `
+			CREATE TABLE scan_events (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				scan_id     TEXT NOT NULL REFERENCES scans(id),
+				at          TEXT NOT NULL,
+				type        TEXT NOT NULL,
+				worker_id   TEXT,
+				detail_json TEXT
+			);
+			CREATE INDEX scan_events_scan_at ON scan_events(scan_id, at);
+		`,
+	},
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.reduce((v, m) => Math.max(v, m.version), 1);
