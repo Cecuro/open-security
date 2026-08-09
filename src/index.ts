@@ -18,6 +18,9 @@ export {
 	CONFIDENCE_BY_METHOD,
 } from "./scan/severity.js";
 export { renderMarkdown, type ReportInput } from "./scan/render.js";
+export { renderExport, type ExportFormat, type ExportInput } from "./scan/export.js";
+export { scopedPaths } from "./scan/target.js";
+export { policyExitCode } from "./scan/policy.js";
 export { loadEnv, describeEnv, piAuthPath, type EnvLoadResult } from "./env.js";
 export { loadPrompts, wrapUntrusted, type Prompts, PROMPT_NAMES } from "./scan/prompts.js";
 export { AgentRunner } from "./agents/session.js";

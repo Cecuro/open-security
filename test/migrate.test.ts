@@ -69,6 +69,8 @@ describe("schema migrations", () => {
 		expect(cols("candidates")).toContain("instance");
 		expect(cols("candidates")).toContain("identity_hash");
 		expect(cols("scans")).toContain("threat_model_source");
+		expect(cols("scans")).toContain("scope_kind");
+		expect(cols("scans")).toContain("scope_base");
 		// partition_id was added by migration 2 and taken away again by migration
 		// 5, once probes stopped owning slices. A database that predates both has
 		// to arrive at the same place as one that lived through them, which is the

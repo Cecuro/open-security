@@ -60,6 +60,14 @@ export const MIGRATIONS: Migration[] = [
 			);
 		`,
 	},
+	{
+		version: 8,
+		note: "scan scope, so diff and working-tree reports remain reproducible",
+		sql: `
+			ALTER TABLE scans ADD COLUMN scope_kind TEXT;
+			ALTER TABLE scans ADD COLUMN scope_base TEXT;
+		`,
+	},
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.reduce((v, m) => Math.max(v, m.version), 1);
