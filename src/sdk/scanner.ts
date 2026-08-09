@@ -276,8 +276,27 @@ export class Scanner {
 		this.opts.onEvent?.(msg);
 	}
 
-	private bill(r: { tokensIn: number; tokensOut: number; costUsd: number }): void {
-		this.ledger.addUsage(this.scanId, r.tokensIn, r.tokensOut, r.costUsd);
+	private bill(
+		r: Pick<AgentRunResult, "tokensIn" | "tokensOut" | "costUsd"> &
+			Partial<
+				Pick<
+					AgentRunResult,
+					"inputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "cacheCostUsd" | "cacheSavingsUsd"
+				>
+			>,
+	): void {
+		const cacheReadTokens = r.cacheReadTokens ?? 0;
+		const cacheWriteTokens = r.cacheWriteTokens ?? 0;
+		this.ledger.addUsage(this.scanId, {
+			tokensIn: r.tokensIn,
+			tokensOut: r.tokensOut,
+			costUsd: r.costUsd,
+			inputTokens: r.inputTokens ?? Math.max(0, r.tokensIn - cacheReadTokens - cacheWriteTokens),
+			cacheReadTokens,
+			cacheWriteTokens,
+			cacheCostUsd: r.cacheCostUsd ?? 0,
+			cacheSavingsUsd: r.cacheSavingsUsd ?? 0,
+		});
 	}
 
 	private async runAgent(args: RunArgs): Promise<AgentRunResult> {
