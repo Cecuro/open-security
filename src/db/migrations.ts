@@ -38,6 +38,15 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE files DROP COLUMN partition_id;
 		`,
 	},
+	{
+		version: 6,
+		note: "store model, prompt hash and probe count on the scan, so a report can be re-rendered from the ledger alone",
+		sql: `
+			ALTER TABLE scans ADD COLUMN model_ref TEXT;
+			ALTER TABLE scans ADD COLUMN prompt_hash TEXT;
+			ALTER TABLE scans ADD COLUMN probes INTEGER;
+		`,
+	},
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.reduce((v, m) => Math.max(v, m.version), 1);

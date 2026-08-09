@@ -157,7 +157,7 @@ function classify(root: string, rel: string): InventoryEntry {
 	};
 }
 
-function ext(p: string): string {
+export function ext(p: string): string {
 	const base = p.split("/").pop() ?? p;
 	const i = base.lastIndexOf(".");
 	return i <= 0 ? "" : base.slice(i + 1).toLowerCase();
