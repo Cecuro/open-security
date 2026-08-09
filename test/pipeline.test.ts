@@ -233,4 +233,26 @@ describe("the M0 loop, without a model", () => {
 		expect(md).toContain("Needs follow-up");
 		ledger.close();
 	});
+
+	it("shows each probe's own coverage and completion state", () => {
+		const md = renderMarkdown({
+			scan: {
+				id: "s3", repo_id: "r", revision: null, profile: "static", status: "completed", phase: "report",
+				config_hash: "c", model_ref: null, prompt_hash: null, probes: 2, threat_model_source: null,
+				started_at: "then", completed_at: "now", tokens_in: 0, tokens_out: 0, cost_usd: 0,
+			},
+			repoName: "r",
+			repoPath: "/tmp/r",
+			candidates: [],
+			coverage: { files_in_scope: 2, files_touched: 2, bytes_in_scope: 300, bytes_read: 300 },
+			probeCoverage: [
+				{ worker_id: "probe-1", files_in_scope: 2, files_assigned: 2, files_touched: 2, bytes_in_scope: 300, bytes_assigned: 300, bytes_read: 300, completed: true, summary: "Reviewed both files." },
+				{ worker_id: "probe-2", files_in_scope: 2, files_assigned: 2, files_touched: 0, bytes_in_scope: 300, bytes_assigned: 300, bytes_read: 0, completed: false },
+			],
+			leads: [], extensions: ["ts"], excludedFiles: 0, modelRef: "test/none", promptHash: "h",
+		});
+		expect(md).toContain("1 / 2 probe(s) completed their worklist");
+		expect(md).toContain("| `probe-1` | 2 / 2 | 100% | complete |");
+		expect(md).toContain("| `probe-2` | 0 / 2 | 0% | incomplete |");
+	});
 });

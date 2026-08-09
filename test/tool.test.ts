@@ -102,6 +102,21 @@ describe("work.next is the worklist, and excluded files are not in it", () => {
 		expect(out.asked).toBeUndefined();
 		expect(out.note).not.toMatch(/capped/);
 	});
+
+	it("requires work.complete after the final page", async () => {
+		env.ctx.worklist = ["app.js", "other.js"];
+		env.ctx.readGroup = "pass-1";
+		env.ctx.ledger.beginWorkerWork(SCAN, "probe-1", env.ctx.worklist);
+		await expect(
+			env.call({ verb: "work.complete", summary: "Reviewed one file" }),
+		).rejects.toThrow(/not complete/);
+		env.ctx.ledger.recordTouch(SCAN, "app.js", 30, false, "pass-1", "probe-1");
+		env.ctx.ledger.recordTouch(SCAN, "other.js", 4, false, "pass-1", "probe-1");
+		expect(JSON.parse(await env.call({
+			verb: "work.complete",
+			summary: "Reviewed both files; no further concerns.",
+		}))).toMatchObject({ status: "complete" });
+	});
 });
 
 describe("structural checks at the write boundary", () => {
