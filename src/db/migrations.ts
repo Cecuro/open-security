@@ -90,6 +90,17 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE scans ADD COLUMN scope_base TEXT;
 		`,
 	},
+	{
+		version: 10,
+		note: "cache usage and economics, so reports can show prompt-cache effectiveness",
+		sql: `
+			ALTER TABLE scans ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE scans ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE scans ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE scans ADD COLUMN cache_cost_usd REAL NOT NULL DEFAULT 0;
+			ALTER TABLE scans ADD COLUMN cache_savings_usd REAL NOT NULL DEFAULT 0;
+		`,
+	},
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.reduce((v, m) => Math.max(v, m.version), 1);

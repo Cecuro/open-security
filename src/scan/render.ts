@@ -50,7 +50,27 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push(`| prompts | ${codeSpan(r.promptHash)} |`);
 	if (r.threatModel) out.push(`| threat model | ${esc(r.threatModel)} |`);
 	out.push(`| started | ${r.scan.started_at} |`);
-	out.push(`| tokens | ${r.scan.tokens_in.toLocaleString()} in / ${r.scan.tokens_out.toLocaleString()} out |`);
+	const inputTokens = r.scan.input_tokens ?? 0;
+	const cacheReadTokens = r.scan.cache_read_tokens ?? 0;
+	const cacheWriteTokens = r.scan.cache_write_tokens ?? 0;
+	const cacheCostUsd = r.scan.cache_cost_usd ?? 0;
+	const cacheSavingsUsd = r.scan.cache_savings_usd ?? 0;
+	const cachePromptTokens = inputTokens + cacheReadTokens + cacheWriteTokens;
+	if (cachePromptTokens > 0 || r.scan.tokens_in === 0) {
+		out.push(
+			`| tokens | ${inputTokens.toLocaleString()} input / ` +
+				`${cacheReadTokens.toLocaleString()} cache read / ` +
+				`${cacheWriteTokens.toLocaleString()} cache write / ` +
+				`${r.scan.tokens_out.toLocaleString()} out |`,
+		);
+		out.push(`| cache hit rate | ${percent(cacheReadTokens, inputTokens + cacheReadTokens)} |`);
+		out.push(`| cache cost | ${usd(cacheCostUsd)} |`);
+		out.push(`| cache savings | ${usd(cacheSavingsUsd)} |`);
+	} else {
+		// Scans written before cache accounting only have the aggregate total.
+		out.push(`| tokens | ${r.scan.tokens_in.toLocaleString()} prompt / ${r.scan.tokens_out.toLocaleString()} out |`);
+		out.push("| cache | _not recorded by this version of opensec_ |");
+	}
 	out.push(`| cost | ${r.scan.cost_usd > 0 ? `$${r.scan.cost_usd.toFixed(4)}` : "_not priced_"} |`);
 	out.push("");
 
@@ -321,6 +341,15 @@ function esc(s: string): string {
 		.replaceAll("[", "\\[")
 		.replaceAll("]", "\\]")
 		.replaceAll("!", "\\!");
+}
+
+function percent(n: number, total: number): string {
+	if (total === 0) return "_not reported by provider_";
+	return `${((n / total) * 100).toFixed(1)}%`;
+}
+
+function usd(value: number): string {
+	return value > 0 ? `$${value.toFixed(4)}` : "$0.0000";
 }
 
 function escInline(s: string): string {

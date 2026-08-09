@@ -210,13 +210,38 @@ export class Ledger {
 		}
 	}
 
-	addUsage(scanId: string, tokensIn: number, tokensOut: number, costUsd: number): void {
+	addUsage(
+		scanId: string,
+		usage: {
+			tokensIn: number;
+			tokensOut: number;
+			costUsd: number;
+			inputTokens: number;
+			cacheReadTokens: number;
+			cacheWriteTokens: number;
+			cacheCostUsd: number;
+			cacheSavingsUsd: number;
+		},
+	): void {
 		this.db
 			.prepare(
-				`UPDATE scans SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?,
-				 cost_usd = cost_usd + ? WHERE id = ?`,
+				`UPDATE scans SET input_tokens = input_tokens + ?,
+				 cache_read_tokens = cache_read_tokens + ?, cache_write_tokens = cache_write_tokens + ?,
+				 tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, cost_usd = cost_usd + ?,
+				 cache_cost_usd = cache_cost_usd + ?, cache_savings_usd = cache_savings_usd + ?
+				 WHERE id = ?`,
 			)
-			.run(tokensIn, tokensOut, costUsd, scanId);
+			.run(
+				usage.inputTokens,
+				usage.cacheReadTokens,
+				usage.cacheWriteTokens,
+				usage.tokensIn,
+				usage.tokensOut,
+				usage.costUsd,
+				usage.cacheCostUsd,
+				usage.cacheSavingsUsd,
+				scanId,
+			);
 	}
 
 	getScan(scanId: string): ScanRecord | undefined {
@@ -240,9 +265,14 @@ export class Ledger {
 			scope_base: (row.scope_base as string | null) ?? null,
 			started_at: row.started_at as string,
 			completed_at: row.completed_at as string | null,
+			input_tokens: row.input_tokens as number,
+			cache_read_tokens: row.cache_read_tokens as number,
+			cache_write_tokens: row.cache_write_tokens as number,
 			tokens_in: row.tokens_in as number,
 			tokens_out: row.tokens_out as number,
 			cost_usd: row.cost_usd as number,
+			cache_cost_usd: row.cache_cost_usd as number,
+			cache_savings_usd: row.cache_savings_usd as number,
 		};
 	}
 

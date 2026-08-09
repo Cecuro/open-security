@@ -25,9 +25,17 @@ import { createOpensecTool, type RunContext } from "./tool.js";
 
 export interface AgentRunResult {
 	text: string;
+	/** All prompt tokens, including the provider's cache read/write buckets. */
 	tokensIn: number;
 	tokensOut: number;
 	costUsd: number;
+	/** PI reports these separately from ordinary input. */
+	inputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	cacheCostUsd: number;
+	/** What cache reads saved relative to the same tokens at the input rate. */
+	cacheSavingsUsd: number;
 	stoppedAtTurnLimit?: boolean;
 }
 
@@ -175,11 +183,17 @@ export class AgentRunner {
 			}
 
 			const stats = session.getSessionStats();
+			const cache = cacheCosts(session.messages, resolved.model);
 			return {
 				text: session.getLastAssistantText() ?? "",
 				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
 				tokensOut: stats.tokens.output,
 				costUsd: stats.cost,
+				inputTokens: stats.tokens.input,
+				cacheReadTokens: stats.tokens.cacheRead,
+				cacheWriteTokens: stats.tokens.cacheWrite,
+				cacheCostUsd: cache.costUsd,
+				cacheSavingsUsd: cache.savingsUsd,
 				...(stoppedAtTurnLimit ? { stoppedAtTurnLimit: true } : {}),
 			};
 		} finally {
@@ -198,6 +212,60 @@ export class AgentRunner {
 			session.dispose();
 		}
 	}
+}
+
+interface PiUsage {
+	input: number;
+	cacheRead: number;
+	cost: { input: number; cacheRead: number; cacheWrite: number };
+}
+
+/**
+ * PI's session summary retains only the total cost. Sum the public messages to
+ * keep the cache cost and the saving from cache reads. The model rate is a
+ * fallback for a full cache hit, where a response has no ordinary input tokens
+ * from which to infer the input rate.
+ */
+function cacheCosts(
+	messages: readonly unknown[],
+	model: { cost?: { input?: number; cacheRead?: number } },
+): { costUsd: number; savingsUsd: number } {
+	let costUsd = 0;
+	let savingsUsd = 0;
+	for (const message of messages) {
+		const usage = piUsage(message);
+		if (!usage) continue;
+		costUsd += usage.cost.cacheRead + usage.cost.cacheWrite;
+		if (usage.cacheRead === 0) continue;
+		const inputRate =
+			usage.input > 0 ? usage.cost.input / usage.input : (model.cost?.input ?? 0) / 1_000_000;
+		const cacheReadRate =
+			usage.cacheRead > 0
+				? usage.cost.cacheRead / usage.cacheRead
+				: (model.cost?.cacheRead ?? 0) / 1_000_000;
+		savingsUsd += usage.cacheRead * Math.max(0, inputRate - cacheReadRate);
+	}
+	return { costUsd, savingsUsd };
+}
+
+function piUsage(message: unknown): PiUsage | undefined {
+	if (typeof message !== "object" || message === null || !("usage" in message)) return undefined;
+	const usage = (message as { usage?: unknown }).usage;
+	if (typeof usage !== "object" || usage === null || !("cost" in usage)) return undefined;
+	const cost = (usage as { cost?: unknown }).cost;
+	if (typeof cost !== "object" || cost === null) return undefined;
+	const tokens = usage as Partial<Pick<PiUsage, "input" | "cacheRead">>;
+	const costs = cost as Partial<PiUsage["cost"]>;
+	if (
+		typeof tokens.input !== "number" ||
+		typeof tokens.cacheRead !== "number" ||
+		typeof costs.input !== "number" ||
+		typeof costs.cacheRead !== "number" ||
+		typeof costs.cacheWrite !== "number"
+	) {
+		return undefined;
+	}
+	return { input: tokens.input, cacheRead: tokens.cacheRead, cost: costs as PiUsage["cost"] };
 }
 
 type AnyToolDef = ToolDefinition<TSchema, unknown, unknown>;

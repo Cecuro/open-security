@@ -155,9 +155,15 @@ export interface ScanRecord {
 	scope_base?: string | null;
 	started_at: string;
 	completed_at: string | null;
+	/** Uncached prompt tokens. `tokens_in` remains the total prompt-token count. */
+	input_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
 	tokens_in: number;
 	tokens_out: number;
 	cost_usd: number;
+	cache_cost_usd: number;
+	cache_savings_usd: number;
 }
 
 export interface Coverage {
