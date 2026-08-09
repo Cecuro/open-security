@@ -22,8 +22,9 @@ import { mapConcurrent } from "../scan/concurrency.js";
 import { describeDistribution, partition, type Partition } from "../scan/partition.js";
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
+import { scopedPaths } from "../scan/target.js";
 import { redactSecrets, stripControlChars } from "../text.js";
-import type { Candidate, Coverage, Phase, Profile } from "../types.js";
+import type { Candidate, Coverage, Phase, Profile, ScanScope } from "../types.js";
 
 export interface ScannerOptions {
 	repo: string;
@@ -46,6 +47,8 @@ export interface ScannerOptions {
 	concurrency?: number;
 	maxTurns?: number;
 	refreshThreatModel?: boolean;
+	/** Limit candidate anchors to a Git diff or the current working tree. */
+	scope?: ScanScope;
 	onEvent?: (msg: string) => void;
 }
 
@@ -90,6 +93,7 @@ export class Scanner {
 		private readonly repoId: string,
 		private readonly revision: string | null,
 		private readonly profile: Profile,
+		private readonly scope: ScanScope,
 		private readonly nonce: string,
 		private readonly startPhase: Phase = "inventory",
 	) {}
@@ -98,6 +102,7 @@ export class Scanner {
 		const repoRoot = resolve(opts.repo);
 		const repoName = basename(repoRoot);
 		const profile = opts.profile ?? "static";
+		const scope = opts.scope ?? { kind: "repository" };
 
 		if (profile === "container") {
 			throw new Error(
@@ -118,7 +123,7 @@ export class Scanner {
 		const revision = git(repoRoot, ["rev-parse", "HEAD"]);
 		const scanId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${shortHash(repoRoot + Math.random()).slice(0, 6)}`;
 		const configHash = shortHash(
-			JSON.stringify({ prompts: prompts.hash, model: opts.model, profile }),
+			JSON.stringify({ prompts: prompts.hash, model: opts.model, profile, scope }),
 		);
 
 		ledger.createScan({
@@ -130,6 +135,7 @@ export class Scanner {
 			modelRef: `${model.provider}/${model.id}`,
 			promptHash: prompts.hash,
 			probes: Math.max(1, opts.probes ?? 1),
+			scope,
 		});
 
 		return new Scanner(
@@ -143,6 +149,7 @@ export class Scanner {
 			repoId,
 			revision,
 			profile,
+			scope,
 			randomBytes(9).toString("hex"),
 		);
 	}
@@ -193,6 +200,13 @@ export class Scanner {
 			ledger.reopenScan(scanId);
 			opts.onEvent?.(`resuming ${scanId} at phase '${scan.phase}'`);
 
+			const scope: ScanScope =
+				scan.scope_kind === "diff" && scan.scope_base
+					? { kind: "diff", base: scan.scope_base }
+					: scan.scope_kind === "working_tree"
+						? { kind: "working_tree" }
+						: { kind: "repository" };
+
 			return new Scanner(
 				scanId,
 				{ ...opts, repo: repo.path },
@@ -204,6 +218,7 @@ export class Scanner {
 				scan.repo_id,
 				scan.revision,
 				scan.profile,
+				scope,
 				randomBytes(9).toString("hex"),
 				scan.phase,
 			);
@@ -311,9 +326,11 @@ export class Scanner {
 
 	async inventory(): Promise<InventoryResult> {
 		this.ledger.setPhase(this.scanId, "inventory");
+		const include = await scopedPaths(this.repoRoot, this.scope);
 		const inv = await inventory(this.repoRoot, {
 			maxFiles: this.opts.maxFiles,
 			exclude: this.opts.exclude,
+			include,
 		});
 		this.ledger.insertFiles(
 			this.scanId,
@@ -331,7 +348,8 @@ export class Scanner {
 
 		this.inv = inv;
 		this.say(
-			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded`,
+			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded` +
+				(this.scope.kind === "diff" ? ` (diff from ${this.scope.base})` : this.scope.kind === "working_tree" ? " (working tree)" : ""),
 		);
 		for (const glob of inv.unusedExcludes) {
 			// `--exclude peridot-dashboard` matches nothing, because entries are
@@ -668,6 +686,12 @@ export class Scanner {
 			} else {
 				await this.inventory();
 			}
+			if (this.ledger.coverage(this.scanId).files_in_scope === 0) {
+				this.say("inventory: no source files in scope — writing an empty report without calling agents");
+				const result = this.report();
+				this.ledger.finishScan(this.scanId, "completed");
+				return result;
+			}
 			let tm: string | undefined;
 			if (!skip("threat_model")) tm = await this.threatModel();
 			if (!skip("discovery")) await this.discover(tm);
@@ -692,10 +716,13 @@ export class Scanner {
 		repo: string;
 		maxFiles?: number;
 		exclude?: readonly string[];
+		scope?: ScanScope;
 	}): Promise<{ files: number; bytes: number; approxTokens: number; extensions: string[] }> {
-		const inv = await inventory(resolve(opts.repo), {
+		const root = resolve(opts.repo);
+		const inv = await inventory(root, {
 			maxFiles: opts.maxFiles,
 			exclude: opts.exclude,
+			include: await scopedPaths(root, opts.scope ?? { kind: "repository" }),
 		});
 		const bytes = inv.inScope.reduce((n, f) => n + f.bytes, 0);
 		return {

@@ -1,5 +1,10 @@
 export type Profile = "static" | "container";
 
+export type ScanScope =
+	| { kind: "repository" }
+	| { kind: "diff"; base: string }
+	| { kind: "working_tree" };
+
 export type ScanStatus = "running" | "completed" | "failed";
 
 export type Phase =
@@ -146,6 +151,8 @@ export interface ScanRecord {
 	prompt_hash: string | null;
 	probes: number | null;
 	threat_model_source: string | null;
+	scope_kind?: ScanScope["kind"] | null;
+	scope_base?: string | null;
 	started_at: string;
 	completed_at: string | null;
 	tokens_in: number;

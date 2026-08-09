@@ -43,6 +43,8 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push("| | |", "|---|---|");
 	out.push(`| repository | ${codeSpan(r.repoPath)} |`);
 	out.push(`| revision | ${r.scan.revision ? codeSpan(r.scan.revision) : "_not a git repo_"} |`);
+	if (r.scan.scope_kind === "diff") out.push(`| scope | diff from ${codeSpan(r.scan.scope_base ?? "(unknown)")} to \`HEAD\` |`);
+	if (r.scan.scope_kind === "working_tree") out.push("| scope | staged, unstaged, and untracked files against `HEAD` |");
 	out.push(`| profile | **${r.scan.profile}**${r.scan.profile === "static" ? " — nothing was executed" : ""} |`);
 	out.push(`| model | ${codeSpan(r.modelRef)} |`);
 	out.push(`| prompts | ${codeSpan(r.promptHash)} |`);

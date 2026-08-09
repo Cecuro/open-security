@@ -62,10 +62,11 @@ const MAX_FILE_BYTES = 512 * 1024;
 
 export async function inventory(
 	repoRoot: string,
-	opts: { maxFiles?: number; exclude?: readonly string[] } = {},
+	opts: { maxFiles?: number; exclude?: readonly string[]; include?: readonly string[] } = {},
 ): Promise<InventoryResult> {
 	const root = resolve(repoRoot);
-	const paths = await listFiles(root);
+	const included = opts.include ? new Set(opts.include) : null;
+	const paths = (await listFiles(root)).filter((path) => included === null || included.has(path));
 
 	const excluders = (opts.exclude ?? []).map((g) => ({ glob: g, re: globToRegExp(g), hits: 0 }));
 

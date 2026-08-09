@@ -14,6 +14,7 @@ import type {
 	Phase,
 	Profile,
 	Resolution,
+	ScanScope,
 	ScanFile,
 	ScanRecord,
 	ScanStatus,
@@ -120,12 +121,13 @@ export class Ledger {
 		modelRef?: string;
 		promptHash?: string;
 		probes?: number;
+		scope?: ScanScope;
 	}): void {
 		this.db
 			.prepare(
 				`INSERT INTO scans (id, repo_id, revision, profile, status, phase, config_hash,
-				 model_ref, prompt_hash, probes, started_at)
-				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?, ?, ?, ?)`,
+				 model_ref, prompt_hash, probes, scope_kind, scope_base, started_at)
+				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				args.id,
@@ -136,6 +138,8 @@ export class Ledger {
 				args.modelRef ?? null,
 				args.promptHash ?? null,
 				args.probes ?? null,
+				args.scope?.kind ?? "repository",
+				args.scope?.kind === "diff" ? args.scope.base : null,
 				now(),
 			);
 	}
@@ -232,6 +236,8 @@ export class Ledger {
 			prompt_hash: (row.prompt_hash as string | null) ?? null,
 			probes: (row.probes as number | null) ?? null,
 			threat_model_source: (row.threat_model_source as string | null) ?? null,
+			scope_kind: (row.scope_kind as ScanRecord["scope_kind"]) ?? null,
+			scope_base: (row.scope_base as string | null) ?? null,
 			started_at: row.started_at as string,
 			completed_at: row.completed_at as string | null,
 			tokens_in: row.tokens_in as number,
