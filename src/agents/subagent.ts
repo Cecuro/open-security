@@ -35,7 +35,6 @@ export interface SubagentDeps {
 		tracePath?: string;
 	}) => Promise<{ text: string; tokensIn: number; tokensOut: number; costUsd: number }>;
 	checkBudget: () => void;
-	bill: (r: { tokensIn: number; tokensOut: number; costUsd: number }) => void;
 	tracePath: (workerId: string) => string;
 	onEvent?: (msg: string) => void;
 }
@@ -116,7 +115,6 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 					tracePath: deps.tracePath(workerId.replaceAll("/", "_")),
 				});
 
-				deps.bill(result);
 				const answer = sanitize(parent, result.text, Number.POSITIVE_INFINITY).trim();
 				const report =
 					answer ||

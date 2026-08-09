@@ -169,6 +169,23 @@ export class Ledger {
 		}>;
 	}
 
+	listEvents(
+		scanId: string,
+		limit = 200,
+	): Array<{ at: string; type: string; worker_id: string | null; detail_json: string | null }> {
+		return this.db
+			.prepare(
+				`SELECT at, type, worker_id, detail_json FROM scan_events
+				 WHERE scan_id = ? ORDER BY id DESC LIMIT ?`,
+			)
+			.all(scanId, limit) as Array<{
+				at: string;
+				type: string;
+				worker_id: string | null;
+				detail_json: string | null;
+			}>;
+	}
+
 	/** Put a failed or interrupted scan back into 'running' so it can be resumed. */
 	reopenScan(scanId: string): void {
 		this.db
@@ -178,6 +195,21 @@ export class Ledger {
 
 	setPhase(scanId: string, phase: Phase): void {
 		this.db.prepare("UPDATE scans SET phase = ? WHERE id = ?").run(phase, scanId);
+		this.recordEvent(scanId, "phase", { phase });
+	}
+
+	/** Small, structured events for live progress and post-run diagnosis. */
+	recordEvent(
+		scanId: string,
+		type: string,
+		detail?: Record<string, unknown>,
+		workerId?: string,
+	): void {
+		this.db
+			.prepare(
+				"INSERT INTO scan_events (scan_id, at, type, worker_id, detail_json) VALUES (?, ?, ?, ?, ?)",
+			)
+			.run(scanId, now(), type, workerId ?? null, detail ? JSON.stringify(detail) : null);
 	}
 
 	setThreatModel(scanId: string, text: string, source: string): void {

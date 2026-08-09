@@ -43,7 +43,6 @@ function setup(over: Partial<RunContext> = {}) {
 			return { text: "child report", tokensIn: 10, tokensOut: 5, costUsd: 0.01 };
 		},
 		checkBudget: () => {},
-		bill: () => {},
 		tracePath: (w) => join(base, `${w}.jsonl`),
 	};
 
