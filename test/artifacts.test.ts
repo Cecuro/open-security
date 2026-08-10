@@ -105,7 +105,7 @@ describe("user exclusions", () => {
 
 describe("a stored threat model can go stale sideways", () => {
 	it("counts how much of it points outside this scan's scope", async () => {
-		const { citedOutOfScope } = await import("../src/sdk/scanner.js");
+		const { citedOutOfScope } = await import("../src/scan/threat-model.js");
 		const tm = [
 			"1. **Dashboard shell paths:** `dashboard/src/api/deposit/route.ts:29-42`.",
 			"2. **Vault custody:** `contracts/receipt-vault/src/contract.rs:956-1130`.",
@@ -118,14 +118,14 @@ describe("a stored threat model can go stale sideways", () => {
 	it("ignores bare words and keeps repo-relative paths", async () => {
 		// The threat model is prose the user may edit, so this reads it loosely
 		// rather than requiring them to maintain a machine-readable list.
-		const { citedOutOfScope } = await import("../src/sdk/scanner.js");
+		const { citedOutOfScope } = await import("../src/scan/threat-model.js");
 		const d = citedOutOfScope("Review the vault. See a/b.rs and c/d.ts", new Set(["a/b.rs"]));
 		expect(d.cited).toBe(2);
 		expect(d.outOfScope).toBe(1);
 	});
 
 	it("says nothing when it cites no files at all", async () => {
-		const { citedOutOfScope } = await import("../src/sdk/scanner.js");
+		const { citedOutOfScope } = await import("../src/scan/threat-model.js");
 		expect(citedOutOfScope("prose with no paths", new Set())).toEqual({
 			cited: 0,
 			outOfScope: 0,
@@ -165,7 +165,7 @@ describe("independent filings are reported as search, not as evidence", () => {
 				id: "s",
 				repo_id: "r",
 				revision: null,
-				profile: "static",
+				profile: "local",
 				status: "completed",
 				phase: "report",
 				config_hash: "h",
@@ -202,7 +202,7 @@ describe("a one-pass report says it is one sample", () => {
 	function md(passes?: number) {
 		return renderMarkdown({
 			scan: {
-				id: "s", repo_id: "r", revision: null, profile: "static", status: "completed",
+				id: "s", repo_id: "r", revision: null, profile: "local", status: "completed",
 				phase: "report", config_hash: "h", started_at: "x", completed_at: null,
 				tokens_in: 0, tokens_out: 0, cost_usd: 0,
 			},

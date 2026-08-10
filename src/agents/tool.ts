@@ -249,7 +249,7 @@ export function createOpensecTool(ctx: RunContext) {
 		// Two calls in one tool batch must not interleave a create and a validate.
 		executionMode: "sequential",
 		async execute(_id, params) {
-			const output = run(ctx, params as Params);
+			const output = runOpensec(ctx, params as Params);
 			return { content: [{ type: "text", text: output }], details: undefined };
 		},
 	});
@@ -260,7 +260,9 @@ type Params = {
 	[k: string]: unknown;
 };
 
-function run(ctx: RunContext, p: Params): string {
+/** Execute one ledger command for either the PI tool or the sandbox CLI bridge. */
+export function runOpensec(ctx: RunContext, p: Params): string {
+	validateCommandFields(p);
 	const allowed = ctx.verbs ?? ALL_VERBS;
 	if (!allowed.includes(p.verb)) {
 		throw new Error(
@@ -284,6 +286,38 @@ function run(ctx: RunContext, p: Params): string {
 		default:
 			throw new Error(`unknown verb: ${String(p.verb)}`);
 	}
+}
+
+const FIELDS_BY_VERB: Record<Verb, readonly string[]> = {
+	"work.next": ["limit"],
+	"work.complete": ["summary"],
+	"candidate.create": ["title", "cwe", "locations", "summary", "evidence", "instance"],
+	"candidate.validate": ["id", "disposition", "rationale", "duplicate_of"],
+	"candidate.assess": [
+		"id",
+		"entry_point",
+		"path",
+		"controls",
+		"rationale",
+		"impact",
+		"vector",
+		"auth_required",
+		"network_reachable",
+		"cross_tenant",
+		"code_execution_proven",
+		"traced_path_no_control",
+		"method",
+		"suppression",
+	],
+	"lead.record": ["text", "status"],
+};
+
+/** The bridge shares this check with the PI tool so misspelled JSON never becomes a silent no-op. */
+function validateCommandFields(p: Params): void {
+	const fields = FIELDS_BY_VERB[p.verb];
+	if (!fields) return;
+	const unknown = Object.keys(p).filter((key) => key !== "verb" && !fields.includes(key));
+	if (unknown.length > 0) throw new Error(`${p.verb} does not accept: ${unknown.join(", ")}`);
 }
 
 const WORK_BATCH_MAX = 50;
@@ -514,7 +548,7 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 		}
 	}
 
-	const computed = computeSeverity(inputs, ctx.profile);
+	const computed = computeSeverity(inputs);
 	const resolution: Resolution = {
 		...candidate.resolution,
 		disposition: computed.reportable ? "confirmed" : "suppressed",

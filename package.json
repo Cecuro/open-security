@@ -24,7 +24,7 @@
     "node": ">=20.11"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && node scripts/check-agent-cli.mjs",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest --run",

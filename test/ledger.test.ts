@@ -8,7 +8,7 @@ import { Ledger } from "../src/db/db.js";
 function ledger(): Ledger {
 	const l = Ledger.open(join(mkdtempSync(join(tmpdir(), "opensec-ledger-")), "l.db"));
 	const repoId = l.upsertRepo("/tmp/fake-repo", "fake", null);
-	l.createScan({ id: "s", repoId, revision: null, profile: "static", configHash: "c" });
+	l.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
 	return l;
 }
 

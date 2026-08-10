@@ -28,14 +28,14 @@ function setup() {
 
   const ledger = Ledger.open(join(base, "l.db"));
   const repoId = ledger.upsertRepo(root, "r", null);
-  ledger.createScan({ id: "s", repoId, revision: null, profile: "static", configHash: "c" });
+  ledger.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
   ledger.insertFiles("s", [
     { path: "src/handlers/upload.ts", sha: "1", bytes: 21, excludedReason: null },
     { path: "top.ts", sha: "2", bytes: 21, excludedReason: null },
   ]);
 
   const ctx: RunContext = {
-    scanId: "s", workerId: "probe-1", repoRoot: root, profile: "static", ledger, nonce: "N",
+    scanId: "s", workerId: "probe-1", repoRoot: root, profile: "local", ledger, nonce: "N",
   };
   const tool = instrumentGrep(createGrepToolDefinition(root) as never, ctx) as never as {
     execute: (i: string, p: unknown, s?: unknown, u?: unknown, c?: unknown) => Promise<unknown>;

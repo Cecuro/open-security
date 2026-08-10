@@ -3,7 +3,6 @@ import type {
 	Impact,
 	Likelihood,
 	Method,
-	Profile,
 	Severity,
 	SeverityInputs,
 	SeverityResult,
@@ -59,29 +58,11 @@ export function reportabilityGate(s: Suppression | undefined): string | null {
 	return claim;
 }
 
-export function computeSeverity(
-	inputs: SeverityInputs,
-	profile: Profile = "static",
-): SeverityResult {
+export function computeSeverity(inputs: SeverityInputs): SeverityResult {
 	const rationale: string[] = [];
 
-	let executionProven = inputs.code_execution_proven;
-	if (executionProven && profile !== "container") {
-		executionProven = false;
-		rationale.push(
-			"code_execution_proven ignored: nothing executes under the static profile",
-		);
-	}
-
-	let confidence = CONFIDENCE_BY_METHOD[inputs.method];
-	if (
-		EXECUTION_METHODS.has(inputs.method) && profile !== "container"
-	) {
-		confidence = CONFIDENCE_BY_METHOD.code_reading;
-		rationale.push(
-			`method '${inputs.method}' downgraded to code_reading confidence under the static profile`,
-		);
-	}
+	const executionProven = inputs.code_execution_proven;
+	const confidence = CONFIDENCE_BY_METHOD[inputs.method];
 
 	const blocked = reportabilityGate(inputs.suppression);
 

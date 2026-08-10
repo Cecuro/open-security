@@ -45,7 +45,7 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push(`| revision | ${r.scan.revision ? codeSpan(r.scan.revision) : "_not a git repo_"} |`);
 	if (r.scan.scope_kind === "diff") out.push(`| scope | diff from ${codeSpan(r.scan.scope_base ?? "(unknown)")} to \`HEAD\` |`);
 	if (r.scan.scope_kind === "working_tree") out.push("| scope | staged, unstaged, and untracked files against `HEAD` |");
-	out.push(`| profile | **${r.scan.profile}**${r.scan.profile === "static" ? " — nothing was executed" : ""} |`);
+	out.push(`| profile | **${r.scan.profile}** |`);
 	out.push(`| model | ${codeSpan(r.modelRef)} |`);
 	out.push(`| prompts | ${codeSpan(r.promptHash)} |`);
 	if (r.threatModel) out.push(`| threat model | ${esc(r.threatModel)} |`);
@@ -226,14 +226,6 @@ export function renderMarkdown(r: ReportInput): string {
 		"code understanding alone 0.3, counterevidence 0.0.",
 		"",
 	);
-	if (r.scan.profile === "static") {
-		out.push(
-			"This scan ran under the **static** profile. Nothing was executed, so no finding",
-			"here carries execution proof, and any critical is marked `(unproven)`.",
-			"",
-		);
-	}
-
 	return out.join("\n");
 }
 

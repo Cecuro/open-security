@@ -20,7 +20,7 @@ function setup(): { ctx: RunContext; call: (p: Record<string, unknown>) => Promi
 
 	const ledger = Ledger.open(join(root, "ledger.db"));
 	const repoId = ledger.upsertRepo(root, "fixture", null);
-	ledger.createScan({ id: SCAN, repoId, revision: null, profile: "static", configHash: "h" });
+	ledger.createScan({ id: SCAN, repoId, revision: null, profile: "local", configHash: "h" });
 	ledger.insertFiles(SCAN, [
 		{ path: "app.js", sha: "x", bytes: 30, excludedReason: null },
 		{ path: "other.js", sha: "y", bytes: 4, excludedReason: null },
@@ -31,7 +31,7 @@ function setup(): { ctx: RunContext; call: (p: Record<string, unknown>) => Promi
 		scanId: SCAN,
 		workerId: "probe-1",
 		repoRoot: root,
-		profile: "static",
+		profile: "local",
 		ledger,
 		nonce: "NONCE123",
 	};

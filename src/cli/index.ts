@@ -3,6 +3,7 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { isAgentCliCommand, runAgentCli } from "./agent.js";
 import { Ledger } from "../db/db.js";
 import { describeEnv, loadEnv, piAuthPath } from "../env.js";
 import { renderExport, type ExportFormat } from "../scan/export.js";
@@ -33,9 +34,9 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
 
 Options
   --model <ref>        provider/model, e.g. azure-openai-responses/gpt-5.4
-  --profile <p>        static (default) | container (Docker sandbox with bash)
+  --profile <p>        container (default, isolated) | local (Bash on the host)
                        Container requires Docker. Set OPENSEC_SANDBOX_IMAGE and
-                       OPENSEC_SANDBOX_USER for a custom image and its unprivileged user.
+                       OPENSEC_SANDBOX_USER for a custom image, which must include Bash and Node 20+.
   --db <path>          ledger location (default ~/.opensec/opensec.db)
   --prompts <dir>      override the prompt pack
   --max-files <n>      refuse rather than run away on a monorepo
@@ -69,6 +70,9 @@ written, and only --refresh-threat-model overwrites it.
 
 async function main(argv: string[]): Promise<number> {
 	const [command, ...rest] = argv;
+	if (isAgentCliCommand(command) || (command === "help" && isAgentCliCommand(rest[0]))) {
+		return runAgentCli(argv);
+	}
 
 	// Before anything resolves a model. Values already in the environment win, so
 	// this only fills gaps.
@@ -245,7 +249,7 @@ async function main(argv: string[]): Promise<number> {
 	const bad = rejectMissingValues(opts);
 	if (bad) return fail(bad);
 
-	const PROFILES: Profile[] = ["static", "container"];
+	const PROFILES: Profile[] = ["container", "local"];
 	const profileFlag = opts.flags.profile;
 	if (profileFlag !== undefined && !PROFILES.includes(profileFlag as Profile)) {
 		process.stderr.write(`opensec: unknown profile '${profileFlag}'. Use: ${PROFILES.join(" | ")}\n`);
@@ -288,7 +292,7 @@ async function main(argv: string[]): Promise<number> {
 		exclude,
 		model: opts.flags.model,
 		db: opts.flags.db,
-		profile: (profileFlag as Profile | undefined) ?? "static",
+		profile: (profileFlag as Profile | undefined) ?? "container",
 		scope,
 		promptsDir: opts.flags.prompts,
 		...parsed,
