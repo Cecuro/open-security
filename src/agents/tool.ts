@@ -249,7 +249,7 @@ export function createOpensecTool(ctx: RunContext) {
 		// Two calls in one tool batch must not interleave a create and a validate.
 		executionMode: "sequential",
 		async execute(_id, params) {
-			const output = run(ctx, params as Params);
+			const output = runOpensec(ctx, params as Params);
 			return { content: [{ type: "text", text: output }], details: undefined };
 		},
 	});
@@ -260,7 +260,8 @@ type Params = {
 	[k: string]: unknown;
 };
 
-function run(ctx: RunContext, p: Params): string {
+/** Execute one ledger command for either the PI tool or the sandbox CLI bridge. */
+export function runOpensec(ctx: RunContext, p: Params): string {
 	const allowed = ctx.verbs ?? ALL_VERBS;
 	if (!allowed.includes(p.verb)) {
 		throw new Error(

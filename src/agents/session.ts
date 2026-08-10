@@ -20,6 +20,7 @@ import {
 import type { TSchema } from "typebox";
 
 import { opensecDir } from "../db/db.js";
+import { OpensecBridge } from "./bridge.js";
 import { createSubagentTool, type SubagentDeps } from "./subagent.js";
 import { createBashTool, DockerSandbox } from "./docker.js";
 import { createOpensecTool, type RunContext } from "./tool.js";
@@ -124,6 +125,7 @@ export class AgentRunner {
 		const resolved = this.resolveModel(args.modelRef);
 		const workDir = agentWorkDir();
 		let sandbox: DockerSandbox | undefined;
+		let bridge: OpensecBridge | undefined;
 
 		// Load-bearing, and nothing tests it: pi trusts <project>/.pi/settings.json
 		// and spawns its npmCommand, and splices .pi/APPEND_SYSTEM.md above our
@@ -147,7 +149,7 @@ export class AgentRunner {
 				...(this.sandbox === "docker"
 					? [
 						"",
-						"You also have an isolated `bash` tool. Use it for targeted builds, tests and reproductions. It runs in a disposable Docker container with no network access. Files you create there exist only in that container; inspect them with bash.",
+						"You also have an isolated `bash` tool. Use it for targeted builds, tests and reproductions. It runs in a disposable Docker container with no network access. Files you create there exist only in that container; inspect them with bash. Record review work through the `opensec` CLI in bash: `opensec work.next`; use `--json-file` for non-trivial command input. The `opensec({...})` notation in older prompt text means the equivalent CLI command.",
 					]
 					: []),
 			].join("\n"),
@@ -156,13 +158,16 @@ export class AgentRunner {
 		await resourceLoader.reload();
 
 		try {
-			if (this.sandbox === "docker") sandbox = await DockerSandbox.create(this.repoRoot);
+			if (this.sandbox === "docker") {
+				bridge = await OpensecBridge.create(ctx);
+				sandbox = await DockerSandbox.create(this.repoRoot, { bridge: bridge.mount });
+			}
 		const tools: AnyToolDef[] = [
 			instrumentRead(confine(createReadToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			instrumentGrep(confine(createGrepToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			rootRelativeResults(confine(createFindToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			rootRelativeResults(confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
-			createOpensecTool(ctx) as AnyToolDef,
+			...(sandbox ? [] : [createOpensecTool(ctx) as AnyToolDef]),
 			...(sandbox ? [createBashTool(sandbox) as AnyToolDef] : []),
 		];
 
@@ -331,6 +336,7 @@ export class AgentRunner {
 					args.onEvent?.(`  warning: could not remove Docker sandbox — ${(err as Error).message}`);
 				}
 			}
+			if (bridge) await bridge.dispose();
 		}
 	}
 }

@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import type { SandboxBridgeMount } from "./bridge.js";
+
 const DEFAULT_IMAGE = "node:20-bookworm-slim";
 const MAX_TIMEOUT_MS = 10 * 60_000;
 const SANDBOX_LIFETIME = "2h";
@@ -29,7 +31,11 @@ export class DockerSandbox {
 		readonly repoDir = "/workspace/repo",
 	) {}
 
-	static async create(repoRoot: string, image = process.env.OPENSEC_SANDBOX_IMAGE ?? DEFAULT_IMAGE) {
+	static async create(
+		repoRoot: string,
+		opts: { image?: string; bridge?: SandboxBridgeMount } = {},
+	) {
+		const image = opts.image ?? process.env.OPENSEC_SANDBOX_IMAGE ?? DEFAULT_IMAGE;
 		const name = `opensec-${randomBytes(9).toString("hex")}`;
 		const user = process.env.OPENSEC_SANDBOX_USER ?? "node";
 		const sandbox = new DockerSandbox(name, user);
@@ -60,6 +66,16 @@ export class DockerSandbox {
 				"no-new-privileges",
 				"--tmpfs",
 				"/tmp:rw,noexec,nosuid,size=512m",
+				...(opts.bridge
+					? [
+						"--mount",
+						`type=bind,src=${opts.bridge.mountDir},dst=/run/opensec,readonly`,
+						"--env",
+						"OPENSEC_SOCKET=/run/opensec/opensec.sock",
+						"--env",
+						`OPENSEC_TOKEN=${opts.bridge.token}`,
+					]
+					: []),
 				image,
 				"sh",
 				"-c",
@@ -79,6 +95,16 @@ export class DockerSandbox {
 					`Docker image '${image}' must provide sandbox user '${user}'. ` +
 						"Set OPENSEC_SANDBOX_USER to the image's unprivileged user.",
 				);
+			}
+			if (opts.bridge) {
+				const installed = await command("docker", [
+					"exec",
+					name,
+					"sh",
+					"-c",
+					'printf "#!/bin/sh\\nexec node /run/opensec/opensec-cli.js \\\"$@\\\"\\n" > /usr/local/bin/opensec && chmod 755 /usr/local/bin/opensec',
+				]);
+				if (installed.exitCode !== 0) throw new Error(dockerError("install the OpenSec CLI", installed));
 			}
 			return sandbox;
 		} catch (err) {
