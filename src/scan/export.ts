@@ -1,4 +1,13 @@
-import type { Candidate, Coverage, ScanRecord, Severity } from "../types.js";
+import {
+	candidateComputed,
+	candidateDescription,
+	candidateDuplicateOf,
+	candidateStatus,
+	type Candidate,
+	type Coverage,
+	type ScanRecord,
+	type Severity,
+} from "../types.js";
 
 export type ExportFormat = "csv" | "json" | "sarif";
 
@@ -22,9 +31,9 @@ export function renderExport(input: ExportInput, format: ExportFormat): string {
 function reportable(input: ExportInput): Candidate[] {
 	return input.candidates.filter(
 		(candidate) =>
-			candidate.merged_into == null &&
-			candidate.resolution?.disposition === "confirmed" &&
-			candidate.resolution.computed?.reportable !== false,
+			candidateDuplicateOf(candidate) == null &&
+			candidateStatus(candidate) === "confirmed" &&
+			candidateComputed(candidate)?.reportable !== false,
 	);
 }
 
@@ -38,12 +47,11 @@ function renderCsv(input: ExportInput): string {
 		"path",
 		"start_line",
 		"end_line",
-		"summary",
-		"evidence",
+		"description",
 	];
 	const rows = reportable(input).map((candidate) => {
 		const location = candidate.locations[0];
-		const computed = candidate.resolution?.computed;
+		const computed = candidateComputed(candidate);
 		return [
 			candidate.id,
 			computed?.severity ?? "info",
@@ -53,8 +61,7 @@ function renderCsv(input: ExportInput): string {
 			location?.path ?? "",
 			location?.start_line ?? "",
 			location?.end_line ?? "",
-			candidate.summary,
-			candidate.evidence,
+			candidateDescription(candidate),
 		];
 	});
 	return [header, ...rows].map((row) => row.map(csv).join(",")).join("\n") + "\n";
@@ -64,7 +71,7 @@ function renderSarif(input: ExportInput) {
 	const findings = reportable(input);
 	const rules = new Map<string, { id: string; name: string; shortDescription: { text: string } }>();
 	const results = findings.map((candidate) => {
-		const computed = candidate.resolution?.computed;
+		const computed = candidateComputed(candidate);
 		const ruleId = candidate.cwe_ids[0] ?? "opensec-security-finding";
 		if (!rules.has(ruleId)) {
 			rules.set(ruleId, {
@@ -76,7 +83,7 @@ function renderSarif(input: ExportInput) {
 		return {
 			ruleId,
 			level: sarifLevel(computed?.severity ?? "info"),
-			message: { text: candidate.summary },
+			message: { text: candidateDescription(candidate) },
 			locations: candidate.locations.map((location) => ({
 				physicalLocation: {
 					artifactLocation: { uri: location.path },

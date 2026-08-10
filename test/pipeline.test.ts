@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { createOpensecTool, type RunContext } from "../src/agents/tool.js";
+import { runOpensec, type RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { inventory } from "../src/scan/inventory.js";
 import { renderMarkdown } from "../src/scan/render.js";
@@ -53,10 +53,8 @@ describe("the M0 loop, without a model", () => {
 			ledger,
 			nonce: "N0NCE",
 		};
-		const tool = createOpensecTool(ctx);
 		const call = async (p: Record<string, unknown>) => {
-			const r = await tool.execute("t", p as never, undefined, undefined, {} as never);
-			return JSON.parse(r.content.map((c) => ("text" in c ? c.text : "")).join(""));
+			return JSON.parse(runOpensec(ctx, p as never));
 		};
 
 		// --- phase 2: the probe ------------------------------------------------
@@ -68,8 +66,7 @@ describe("the M0 loop, without a model", () => {
 			verb: "candidate.create",
 			title: "Command injection in /api/ping",
 			cwe: ["CWE-78"],
-			summary: "req.query.host reaches exec() unquoted, so a shell metacharacter runs commands.",
-			evidence: "server.js:18 exec(`ping -c 1 ${host}`) with host from req.query at server.js:17",
+			description: "req.query.host reaches exec() unquoted, so a shell metacharacter runs commands.\n\nserver.js:18 exec(`ping -c 1 ${host}`) with host from req.query at server.js:17",
 			locations: [{ path: "server.js", start_line: 16, end_line: 22, symbol: "GET /api/ping" }],
 		});
 		expect(cmdi.id).toBe("c1");
@@ -78,17 +75,10 @@ describe("the M0 loop, without a model", () => {
 			verb: "candidate.create",
 			title: "SQL injection in getUser",
 			cwe: ["CWE-89"],
-			summary: "The id path parameter is interpolated into a SELECT.",
-			evidence: "db.js:9 conn.get(`... WHERE id = '${id}'`), reached from server.js:37",
+			description: "The id path parameter is interpolated into a SELECT.\n\ndb.js:9 conn.get(`... WHERE id = '${id}'`), reached from server.js:37",
 			locations: [{ path: "db.js", start_line: 8, end_line: 10, symbol: "getUser" }],
 		});
 		expect(sqli.id).toBe("c2");
-
-		await call({
-			verb: "lead.record",
-			text: "Checked /api/admin/reset for auth bypass — constant-time comparison is missing but the token is not attacker-observable here.",
-			status: "dead_end",
-		});
 
 		// Coverage comes from reads, so simulate the reads the probe made.
 		ledger.recordTouch(SCAN, "server.js", 1200);
@@ -153,7 +143,6 @@ describe("the M0 loop, without a model", () => {
 			repoPath: FIXTURE,
 			candidates: ledger.listCandidates(SCAN),
 			coverage: ledger.coverage(SCAN),
-			leads: ledger.listLeads(SCAN),
 			extensions: inv.extensions,
 			excludedFiles: ledger.excludedCount(SCAN),
 			modelRef: "test/none",
@@ -170,7 +159,6 @@ describe("the M0 loop, without a model", () => {
 		expect(md).toContain("Command injection in /api/ping");
 		expect(md).toContain("2 / 2 files touched");
 		expect(md).toContain("laziness detector");
-		expect(md).toContain("Leads that went nowhere");
 		ledger.close();
 	});
 
@@ -190,19 +178,12 @@ describe("the M0 loop, without a model", () => {
 			ledger,
 			nonce: "n",
 		};
-		const tool = createOpensecTool(ctx);
-		const call = async (p: Record<string, unknown>) =>
-			JSON.parse(
-				(await tool.execute("t", p as never, undefined, undefined, {} as never)).content
-					.map((c) => ("text" in c ? c.text : ""))
-					.join(""),
-			);
+		const call = async (p: Record<string, unknown>) => JSON.parse(runOpensec(ctx, p as never));
 
 		await call({
 			verb: "candidate.create",
 			title: "Unsettled thing",
-			summary: "s",
-			evidence: "e",
+			description: "s\n\ne",
 			locations: [{ path: "server.js", start_line: 1, end_line: 1 }],
 		});
 		await call({
@@ -218,7 +199,6 @@ describe("the M0 loop, without a model", () => {
 			repoPath: FIXTURE,
 			candidates: ledger.listCandidates("s2"),
 			coverage: ledger.coverage("s2"),
-			leads: [],
 			extensions: ["js"],
 			excludedFiles: 0,
 			modelRef: "test/none",
@@ -242,14 +222,14 @@ describe("the M0 loop, without a model", () => {
 			repoPath: "/tmp/r",
 			candidates: [],
 			coverage: { files_in_scope: 2, files_touched: 2, bytes_in_scope: 300, bytes_read: 300 },
-			probeCoverage: [
-				{ worker_id: "probe-1", files_in_scope: 2, files_assigned: 2, files_touched: 2, bytes_in_scope: 300, bytes_assigned: 300, bytes_read: 300, completed: true, summary: "Reviewed both files." },
-				{ worker_id: "probe-2", files_in_scope: 2, files_assigned: 2, files_touched: 0, bytes_in_scope: 300, bytes_assigned: 300, bytes_read: 0, completed: false },
+			passCoverage: [
+				{ pass: 1, files_in_scope: 2, files_touched: 2, bytes_in_scope: 300, bytes_read: 300, completed: true },
+				{ pass: 2, files_in_scope: 2, files_touched: 0, bytes_in_scope: 300, bytes_read: 0, completed: false },
 			],
-			leads: [], extensions: ["ts"], excludedFiles: 0, modelRef: "test/none", promptHash: "h",
+			extensions: ["ts"], excludedFiles: 0, modelRef: "test/none", promptHash: "h",
 		});
-		expect(md).toContain("1 / 2 probe(s) completed their worklist");
-		expect(md).toContain("| `probe-1` | 2 / 2 | 100% | complete |");
-		expect(md).toContain("| `probe-2` | 0 / 2 | 0% | incomplete |");
+		expect(md).toContain("1 / 2 probe pass(es) completed");
+		expect(md).toContain("| 1 | 2 / 2 | 100% | complete |");
+		expect(md).toContain("| 2 | 0 / 2 | 0% | incomplete |");
 	});
 });

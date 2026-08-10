@@ -154,7 +154,11 @@ export class AgentRunner {
 					]
 					: ["Bash runs on the host in the checked-out repository. Any file changes persist in the user's working tree."]),
 				"Use bash for compound searches, builds, tests, and reproductions. Keep read for assigned-file review because read records coverage.",
-				"Record work with the opensec CLI in bash. Start with `opensec work next`; run `opensec help` for the commands in this pass. For complex records, write JSON to a file and pass it with `--input`. There is no opensec function tool.",
+				"Record work with the opensec CLI in bash. Run `opensec help` for the commands in this pass.",
+				...(ctx.verbs?.includes("work.next")
+					? ["Start with `opensec work next` and page until remaining is 0."]
+					: []),
+				"Pass JSON with `--input -` using a single-quoted heredoc (`<<'JSON'`), or use a temporary file outside the repository. Never put repository or finding text in shell arguments. There is no opensec function tool.",
 			].join("\n"),
 			appendSystemPrompt: [],
 		});
@@ -528,7 +532,7 @@ function instrumentRead(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			const result = await inner(id, next, signal, onUpdate, extCtx);
 			if (typeof path === "string") {
 				const rel = toRepoRelative(ctx.repoRoot, resolveToolPath(ctx, path));
-				if (rel) {
+				if (rel && ctx.readGroup !== undefined) {
 					// A read with an offset is the agent continuing through a file it
 					// has already seen the start of, so it adds rather than replaces.
 					const offset = (params as { offset?: unknown } | undefined)?.offset;
@@ -582,7 +586,7 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 
 			if (isFile(searchRoot)) {
 				const rel = toRepoRelative(ctx.repoRoot, searchRoot);
-				if (rel && ctx.ledger.fileInScope(ctx.scanId, rel)) {
+				if (rel && ctx.readGroup !== undefined && ctx.ledger.fileInScope(ctx.scanId, rel)) {
 					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup, ctx.workerId);
 				}
 				return result;
@@ -590,7 +594,7 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 
 			for (const hit of parseGrepPaths(resultText(result))) {
 				const rel = toRepoRelative(ctx.repoRoot, resolve(searchRoot, hit));
-				if (rel && ctx.ledger.fileInScope(ctx.scanId, rel)) {
+			if (rel && ctx.readGroup !== undefined && ctx.ledger.fileInScope(ctx.scanId, rel)) {
 					ctx.ledger.recordTouch(ctx.scanId, rel, 0, false, ctx.readGroup, ctx.workerId);
 				}
 			}

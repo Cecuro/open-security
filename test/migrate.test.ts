@@ -37,11 +37,61 @@ function makeV1(file: string): void {
 		`INSERT INTO candidates (id, scan_id, worker_id, title, cwe_ids, locations_json, summary, evidence, created_at)
 		 VALUES ('c1', 'old', 'probe-1', 'an old finding', '[]', '[]', 's', 'e', 'then')`,
 	).run();
+	db.prepare(
+		`INSERT INTO candidates
+		 (id, scan_id, worker_id, title, cwe_ids, locations_json, summary, evidence, resolution_json, created_at)
+		 VALUES ('c2', 'old', 'probe-1', 'a resolved finding', '[]', '[]', 's2', 'e2', ?, 'then')`,
+	).run(
+		JSON.stringify({
+			disposition: "confirmed",
+			rationale: "rated",
+			validation: { disposition: "confirmed", rationale: "validated", at: "validate-time" },
+			attack_path: {
+				reachability: { entry_point: "x.ts:1", path: ["x.ts:1"], controls: [] },
+				rationale: "assessed",
+				at: "assess-time",
+			},
+			inputs: {
+				impact: "low",
+				vector: "localhost",
+				auth_required: "user",
+				network_reachable: false,
+				cross_tenant: false,
+				code_execution_proven: false,
+				traced_path_no_control: false,
+				method: "code_reading",
+			},
+			computed: {
+				severity: "low",
+				likelihood: "low",
+				confidence: 0.3,
+				reportable: true,
+				rationale: ["rated"],
+			},
+		}),
+	);
+	db.prepare(
+		`INSERT INTO files
+		 (scan_id, path, sha, bytes_total, bytes_read, excluded_reason, first_touched_at)
+		 VALUES ('old', 'x.ts', 'sha', 10, 10, NULL, 'read-time')`,
+	).run();
 	db.close();
 }
 
 function tmpFile(name: string): string {
 	return join(mkdtempSync(join(tmpdir(), "opensec-mig-")), name);
+}
+
+function makeVersion(file: string, version: number): void {
+	makeV1(file);
+	const db = new Database(file);
+	for (const migration of MIGRATIONS.filter((item) => item.version <= version)) {
+		db.exec(migration.sql);
+		db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, 'then')").run(
+			migration.version,
+		);
+	}
+	db.close();
 }
 
 describe("schema migrations", () => {
@@ -52,7 +102,23 @@ describe("schema migrations", () => {
 		const ledger = Ledger.open(file);
 		// The old scan and its finding are still there.
 		expect(ledger.getScan("old")?.status).toBe("completed");
-		expect(ledger.getCandidate("old", "c1")?.title).toBe("an old finding");
+		const candidate = ledger.getCandidate("old", "c1");
+		expect(candidate?.title).toBe("an old finding");
+		expect(candidate?.description).toBe("s\n\ne");
+		expect(candidate?.status).toBe("open");
+		const resolved = ledger.getCandidate("old", "c2");
+		expect(resolved?.activities.map((activity) => activity.kind)).toEqual([
+			"validation",
+			"assessment",
+		]);
+		expect(resolved?.activities[0]?.body).toBe("validated");
+		expect(resolved?.activities[1]?.body).toBe("assessed");
+		expect(ledger.coverage("old")).toEqual({
+			files_in_scope: 1,
+			files_touched: 1,
+			bytes_in_scope: 10,
+			bytes_read: 10,
+		});
 		ledger.close();
 
 		const db = new Database(file);
@@ -61,13 +127,19 @@ describe("schema migrations", () => {
 		}).v;
 		expect(version).toBe(SCHEMA_VERSION);
 
-		// The columns every migration claimed to add are actually present.
+		// The current compact schema is present after the historical migrations.
 		const cols = (table: string) =>
 			(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
 				(c) => c.name,
 			);
 		expect(cols("candidates")).toContain("instance");
 		expect(cols("candidates")).toContain("identity_hash");
+		expect(cols("candidates")).toEqual(
+			expect.arrayContaining(["description", "status", "duplicate_of"]),
+		);
+		expect(cols("candidates")).not.toEqual(
+			expect.arrayContaining(["summary", "evidence", "resolution_json", "merged_into"]),
+		);
 		expect(cols("scans")).toContain("threat_model_source");
 		expect(cols("scans")).toContain("scope_kind");
 		expect(cols("scans")).toContain("scope_base");
@@ -85,6 +157,16 @@ describe("schema migrations", () => {
 		// to arrive at the same place as one that lived through them, which is the
 		// only reason the add is still in the list at all.
 		expect(cols("files")).not.toContain("partition_id");
+		expect(cols("files")).not.toContain("bytes_read");
+		expect(cols("files")).not.toContain("first_touched_at");
+		expect(cols("file_reads")).toEqual(
+			expect.arrayContaining(["bytes_read", "first_touched_at", "last_worker_id"]),
+		);
+		const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name);
+		expect(tables).not.toContain("worker_work");
+		expect(tables).not.toContain("worker_file_reads");
+		expect(tables).not.toContain("leads");
+		expect(tables).toContain("candidate_activity");
 		const indexes = (
 			db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{
 				name: string;
@@ -154,6 +236,32 @@ describe("schema migrations", () => {
 			(db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as { v: number }).v,
 		).toBe(SCHEMA_VERSION);
 		db.close();
+	});
+
+	it("keeps per-pass reads authoritative and preserves grep-only touches", () => {
+		const file = tmpFile("v12-coverage.db");
+		makeVersion(file, 12);
+		const old = new Database(file);
+		old.prepare(
+			"UPDATE files SET bytes_total = 100, bytes_read = 100, first_touched_at = 'read-time' WHERE path = 'x.ts'",
+		).run();
+		old.prepare(
+			`INSERT INTO file_reads (scan_id, read_group, path, bytes_read)
+			 VALUES ('old', 'pass-1', 'x.ts', 10), ('old', 'pass-2', 'x.ts', 100)`,
+		).run();
+		old.prepare(
+			`INSERT INTO files
+			 (scan_id, path, sha, bytes_total, bytes_read, excluded_reason, first_touched_at)
+			 VALUES ('old', 'grep-only.ts', 'sha2', 10, 0, NULL, 'grep-time')`,
+		).run();
+		old.close();
+
+		const ledger = Ledger.open(file);
+		const passes = ledger.passCoverage("old", 2);
+		expect(passes[0]).toMatchObject({ files_touched: 2, bytes_read: 10, completed: false });
+		expect(passes[1]).toMatchObject({ files_touched: 1, bytes_read: 100, completed: false });
+		expect(ledger.coverage("old")).toMatchObject({ files_touched: 2, bytes_read: 100 });
+		ledger.close();
 	});
 
 	it("refuses a database written by a newer opensec rather than misreading it", () => {

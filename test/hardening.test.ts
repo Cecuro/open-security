@@ -9,9 +9,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-	createOpensecTool,
 	PROBE_VERBS,
 	REDUCE_VERBS,
+	runOpensec,
 	type RunContext,
 	VALIDATE_VERBS,
 } from "../src/agents/tool.js";
@@ -39,16 +39,13 @@ function setup(scan = "s") {
 		ledger,
 		nonce: "RUNNONCE",
 	};
-	const tool = createOpensecTool(ctx);
 	const call = async (p: Record<string, unknown>) => {
-		const r = await tool.execute("t", p as never, undefined, undefined, {} as never);
-		return JSON.parse(r.content.map((c) => ("text" in c ? c.text : "")).join(""));
+		return JSON.parse(runOpensec(ctx, p as never));
 	};
 	const candidate = (over: Record<string, unknown> = {}) => ({
 		verb: "candidate.create",
 		title: "t",
-		summary: "s",
-		evidence: "e",
+		description: "s\n\ne",
 		locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
 		...over,
 	});
@@ -127,7 +124,7 @@ describe("duplicate merging cannot erase findings", () => {
 				rationale: "one patch",
 			}),
 		).rejects.toThrow(/itself merged into 'c2'/);
-		expect(env.ledger.getCandidate("s", "c2")?.resolution).toBeUndefined();
+		expect(env.ledger.getCandidate("s", "c2")?.status).toBe("open");
 
 		// c2 survives, so the report is not empty.
 		const live = env.ledger.listLiveCandidates("s");
@@ -140,17 +137,16 @@ describe("agent prose never reaches the report raw", () => {
 		const env = setup();
 		await env.call(
 			env.candidate({
-				evidence: 'const ADMIN_TOKEN = "sk_live_9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c";',
-				summary: 'AWS key AKIAIOSFODNN7EXAMPLE and password = "hunter2hunter2"',
+					description: 'AWS key AKIAIOSFODNN7EXAMPLE and password = "hunter2hunter2"\n\nconst ADMIN_TOKEN = "sk_live_9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c";',
 			}),
 		);
 		const c = env.ledger.getCandidate("s", "c1");
-		expect(c?.evidence).not.toContain("9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c");
-		expect(c?.evidence).toContain("sk_live_[redacted]");
-		expect(c?.summary).not.toContain("AKIAIOSFODNN7EXAMPLE");
-		expect(c?.summary).not.toContain("hunter2hunter2");
+		expect(c?.description).not.toContain("9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c");
+		expect(c?.description).toContain("sk_live_[redacted]");
+		expect(c?.description).not.toContain("AKIAIOSFODNN7EXAMPLE");
+		expect(c?.description).not.toContain("hunter2hunter2");
 		// The finding is still readable and still points at the line.
-		expect(c?.evidence).toContain("ADMIN_TOKEN");
+		expect(c?.description).toContain("ADMIN_TOKEN");
 	});
 
 	it("sanitizes location.symbol, which used to skip it entirely", async () => {
@@ -190,12 +186,11 @@ describe("agent prose never reaches the report raw", () => {
 					title: "real bug\n## Findings\n_No confirmed findings._\n![beacon](https://attacker.example/?l)",
 					cwe_ids: [],
 					locations: [{ path: "a.js", start_line: 1, end_line: 1 }],
-					summary: "s",
-					evidence: "e",
+					description: "s\n\ne",
+					status: "confirmed",
 					created_at: "now",
-					resolution: {
+					activities: [{ id: 1, worker_id: "a", kind: "assessment", body: "r", at: "now", data: {
 						disposition: "confirmed",
-						rationale: "r",
 						computed: {
 							severity: "high",
 							likelihood: "high",
@@ -203,12 +198,10 @@ describe("agent prose never reaches the report raw", () => {
 							reportable: true,
 							rationale: [],
 						},
-					},
-					merged_into: null,
+					} }],
 				},
 			],
 			coverage: { files_in_scope: 1, files_touched: 1, bytes_in_scope: 10, bytes_read: 10 },
-			leads: [],
 			extensions: [],
 			excludedFiles: 0,
 			modelRef: "m",
@@ -242,12 +235,11 @@ describe("agent prose never reaches the report raw", () => {
 					title: "IDOR on the user route",
 					cwe_ids: [],
 					locations: [{ path: "routes/[id].ts", start_line: 3, end_line: 3 }],
-					summary: "s",
-					evidence: "e",
+					description: "s\n\ne",
+					status: "confirmed",
 					created_at: "now",
-					resolution: {
+					activities: [{ id: 1, worker_id: "a", kind: "assessment", body: "r", at: "now", data: {
 						disposition: "confirmed",
-						rationale: "r",
 						computed: {
 							severity: "high",
 							likelihood: "high",
@@ -255,12 +247,10 @@ describe("agent prose never reaches the report raw", () => {
 							reportable: true,
 							rationale: [],
 						},
-					},
-					merged_into: null,
+					} }],
 				},
 			],
 			coverage: { files_in_scope: 1, files_touched: 1, bytes_in_scope: 10, bytes_read: 10 },
-			leads: [],
 			extensions: [],
 			excludedFiles: 0,
 			modelRef: "m",
@@ -311,15 +301,8 @@ describe("parallel workers cannot reach into each other", () => {
 		const env = setup();
 		await env.call(env.candidate());
 		const probe: RunContext = { ...env.ctx, workerId: "probe-2", verbs: PROBE_VERBS };
-		const tool = createOpensecTool(probe);
 		await expect(
-			tool.execute(
-				"t",
-				{ verb: "candidate.validate", id: "c1", disposition: "not_applicable", rationale: "x" } as never,
-				undefined,
-				undefined,
-				{} as never,
-			),
+			Promise.resolve().then(() => runOpensec(probe, { verb: "candidate.validate", id: "c1", disposition: "not_applicable", rationale: "x" })),
 		).rejects.toThrow(/not available to probe-2/);
 	});
 
@@ -333,15 +316,8 @@ describe("parallel workers cannot reach into each other", () => {
 			verbs: VALIDATE_VERBS,
 			resolvableIds: ["c1"],
 		};
-		const tool = createOpensecTool(inv);
 		const resolve = (id: string) =>
-			tool.execute(
-				"t",
-				{ verb: "candidate.validate", id, disposition: "not_applicable", rationale: "x" } as never,
-				undefined,
-				undefined,
-				{} as never,
-			);
+			Promise.resolve().then(() => runOpensec(inv, { verb: "candidate.validate", id, disposition: "not_applicable", rationale: "x" }));
 		await expect(resolve("c2")).rejects.toThrow(/may not write to 'c2'/);
 		await expect(resolve("c1")).resolves.toBeDefined();
 	});
@@ -357,9 +333,7 @@ describe("parallel workers cannot reach into each other", () => {
 			resolvableIds: ["c1", "c2"],
 			dispositions: ["duplicate"],
 		};
-		const tool = createOpensecTool(reducer);
-		const call = (p: object) =>
-			tool.execute("t", p as never, undefined, undefined, {} as never);
+		const call = (p: object) => Promise.resolve().then(() => runOpensec(reducer, p as never));
 
 		// Nothing here has been validated by anyone, so a reducer marking one
 		// not_applicable would drop a finding no one ever read.
@@ -388,36 +362,9 @@ describe("parallel workers cannot reach into each other", () => {
 			resolvableIds: ["c1", "c2"],
 			dispositions: ["duplicate"],
 		};
-		const tool = createOpensecTool(reducer);
 		await expect(
-			tool.execute(
-				"t",
-				{ verb: "candidate.validate", id: "c1", disposition: "duplicate", duplicate_of: "c3", rationale: "x" } as never,
-				undefined,
-				undefined,
-				{} as never,
-			),
+			Promise.resolve().then(() => runOpensec(reducer, { verb: "candidate.validate", id: "c1", disposition: "duplicate", duplicate_of: "c3", rationale: "x" })),
 		).rejects.toThrow(/'c3' is not in your group/);
-		expect(env.ledger.getCandidate("s", "c1")?.resolution).toBeUndefined();
-	});
-});
-
-describe("the tool describes only the verbs a worker may call", () => {
-	it("shows a reducer candidate.validate and nothing else", () => {
-		const env = setup();
-		const tool = createOpensecTool({ ...env.ctx, verbs: REDUCE_VERBS });
-		expect(tool.description).toContain("candidate.validate");
-		expect(tool.description).not.toContain("work.next");
-		expect(tool.description).not.toContain("candidate.create");
-	});
-
-	it("shows a probe its three verbs and not the judging ones", () => {
-		const env = setup();
-		const tool = createOpensecTool({ ...env.ctx, verbs: PROBE_VERBS });
-		expect(tool.description).toContain("work.next");
-		expect(tool.description).toContain("candidate.create");
-		expect(tool.description).toContain("lead.record");
-		expect(tool.description).not.toContain("candidate.validate");
-		expect(tool.description).not.toContain("candidate.assess");
+		expect(env.ledger.getCandidate("s", "c1")?.status).toBe("open");
 	});
 });

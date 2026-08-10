@@ -165,6 +165,16 @@ describe("a truncated read does not finish a large file", () => {
 		expect(l.coverage("s").bytes_read).toBe(51_200);
 		l.close();
 	});
+
+	it("ignores supporting files outside the scan inventory", () => {
+		const l = big();
+		expect(() => {
+			l.recordTouch("s", "supporting.rs", 51_200, false, "pass-1", "probe-1");
+			l.recordTouch("s", "supporting.rs", 51_200, true, "pass-1", "probe-1");
+		}).not.toThrow();
+		expect(l.coverage("s").bytes_read).toBe(0);
+		l.close();
+	});
 });
 
 describe("a worklist scoped to a partition", () => {

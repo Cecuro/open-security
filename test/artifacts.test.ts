@@ -140,12 +140,11 @@ describe("independent filings are reported as search, not as evidence", () => {
 		title: `finding ${id}`,
 		cwe_ids: ["CWE-78"],
 		locations: [{ path: "a.js", start_line: 1, end_line: 1 }],
-		summary: "s",
-		evidence: "e",
-		merged_into: mergedInto,
-		resolution: {
-			disposition: "confirmed" as const,
-			rationale: "traced",
+		description: "s\n\ne",
+		status: mergedInto ? "duplicate" as const : "confirmed" as const,
+		duplicate_of: mergedInto,
+		activities: [{ id: Number(id.slice(1)), worker_id: "w", kind: "assessment" as const, body: "traced", at: "now", data: {
+			disposition: mergedInto ? "duplicate" as const : "confirmed" as const,
 			inputs: {
 				impact: "high" as const,
 				vector: "remote" as const,
@@ -156,7 +155,7 @@ describe("independent filings are reported as search, not as evidence", () => {
 				traced_path_no_control: false,
 				method: "code_reading" as const,
 			},
-		},
+		} }],
 	});
 
 	function render(candidates: unknown[]) {
@@ -179,7 +178,6 @@ describe("independent filings are reported as search, not as evidence", () => {
 			repoPath: "/tmp/r",
 			candidates,
 			coverage: { files_in_scope: 1, files_touched: 1, bytes_in_scope: 1, bytes_read: 1 },
-			leads: [],
 			extensions: [],
 			excludedFiles: 0,
 			modelRef: "m",
@@ -208,7 +206,7 @@ describe("a one-pass report says it is one sample", () => {
 			},
 			repoName: "r", repoPath: "/tmp/r", candidates: [],
 			coverage: { files_in_scope: 1, files_touched: 1, bytes_in_scope: 1, bytes_read: 1 },
-			leads: [], extensions: [], excludedFiles: 0, modelRef: "m", promptHash: "h", passes,
+			extensions: [], excludedFiles: 0, modelRef: "m", promptHash: "h", passes,
 		} as never);
 	}
 

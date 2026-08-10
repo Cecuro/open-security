@@ -1,11 +1,7 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-
 import type { Ledger } from "../db/db.js";
-import { now } from "../db/db.js";
 import { computeSeverity } from "../scan/severity.js";
 import { redactSecrets, stripControlChars } from "../text.js";
 import type {
@@ -17,7 +13,6 @@ import type {
 	Method,
 	Profile,
 	Reachability,
-	Resolution,
 	SeverityInputs,
 	Vector,
 } from "../types.js";
@@ -45,152 +40,19 @@ export type Verb =
 	| "work.complete"
 	| "candidate.create"
 	| "candidate.validate"
-	| "candidate.assess"
-	| "lead.record";
+	| "candidate.assess";
 
 // The threat model is a map, not a findings list — its prompt says so, so the
 // tool must not advertise candidate.create to it. Without this it fell through
 // to ALL_VERBS and offered three verbs the phase has no use for.
-export const THREAT_MODEL_VERBS: Verb[] = ["work.next", "lead.record"];
-export const PROBE_VERBS: Verb[] = ["work.next", "work.complete", "candidate.create", "lead.record"];
-export const VALIDATE_VERBS: Verb[] = ["work.next", "candidate.validate", "lead.record"];
-export const ASSESS_VERBS: Verb[] = ["work.next", "candidate.assess", "lead.record"];
+export const THREAT_MODEL_VERBS: Verb[] = ["work.next"];
+export const PROBE_VERBS: Verb[] = ["work.next", "work.complete", "candidate.create"];
+export const VALIDATE_VERBS: Verb[] = ["work.next", "candidate.validate"];
+export const ASSESS_VERBS: Verb[] = ["work.next", "candidate.assess"];
 export const REDUCE_VERBS: Verb[] = ["candidate.validate"];
-export const SUBAGENT_VERBS: Verb[] = ["work.next", "lead.record"];
+export const SUBAGENT_VERBS: Verb[] = ["work.next"];
 
 const ROLES = ["entrypoint", "source", "root_control", "sink", "evidence"] as const;
-
-const LocationSchema = Type.Object(
-	{
-		path: Type.String({ description: "Repo-relative path, e.g. src/handlers/upload.ts" }),
-		start_line: Type.Integer({ minimum: 1 }),
-		end_line: Type.Integer({ minimum: 1 }),
-		symbol: Type.Optional(Type.String({ description: "Enclosing function or class, if known" })),
-		role: Type.Optional(
-			Type.Union(
-				ROLES.map((r) => Type.Literal(r)),
-				{
-					description:
-						"What this location IS to the finding: entrypoint (attacker's way in), " +
-						"source (where untrusted data enters), root_control (the check that is " +
-						"missing or wrong), sink (where the harm happens), evidence (supporting). " +
-						"Defaults to evidence.",
-				},
-			),
-		),
-	},
-	{ additionalProperties: false },
-);
-
-const SuppressionSchema = Type.Object(
-	{
-		self_only: Type.Optional(Type.Boolean()),
-		requires_preexisting_privilege: Type.Optional(Type.Boolean()),
-		privilege_delta_is_the_bug: Type.Optional(Type.Boolean()),
-		precondition_unreachable: Type.Optional(Type.Boolean()),
-		evidence: Type.Optional(Type.String()),
-		source: Type.Optional(
-			Type.Union([Type.Literal("code_evidence"), Type.Literal("repo_claim")]),
-		),
-	},
-	{ additionalProperties: false },
-);
-
-const paramsSchema = (verbs: Verb[]) =>
-	Type.Object(
-	{
-		verb: Type.Union(verbs.map((v) => Type.Literal(v))),
-
-		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
-
-		title: Type.Optional(Type.String()),
-		cwe: Type.Optional(
-			Type.Array(Type.String(), {
-				description: "CWE ids like CWE-89. Leave empty when there is no clear class.",
-			}),
-		),
-		locations: Type.Optional(Type.Array(LocationSchema)),
-		summary: Type.Optional(Type.String()),
-		evidence: Type.Optional(Type.String()),
-		instance: Type.Optional(
-			Type.String({
-				description:
-					"What distinguishes this from a sibling finding of the same class in the same " +
-					"place — the parameter name, the secret's variable, the route. Two findings " +
-					"with the same class, files and instance are treated as one.",
-			}),
-		),
-
-		id: Type.Optional(Type.String()),
-		disposition: Type.Optional(
-			Type.Union([
-				Type.Literal("confirmed"),
-				Type.Literal("not_applicable"),
-				Type.Literal("duplicate"),
-				Type.Literal("needs_follow_up"),
-			]),
-		),
-		rationale: Type.Optional(Type.String()),
-		duplicate_of: Type.Optional(Type.String()),
-
-		entry_point: Type.Optional(
-			Type.String({ description: "path:line where an attacker starts, and what they control" }),
-		),
-		path: Type.Optional(
-			Type.Array(Type.String(), {
-				description: "Each hop from entry point to sink, in order, with path:line",
-			}),
-		),
-		controls: Type.Optional(
-			Type.Array(Type.String(), {
-				description:
-					"Every check, filter or encoder ON that path, with path:line. An empty list " +
-					"is a claim that there are none, and it is what promotes a finding.",
-			}),
-		),
-
-		impact: Type.Optional(
-			Type.Union([
-				Type.Literal("none"),
-				Type.Literal("low"),
-				Type.Literal("medium"),
-				Type.Literal("high"),
-			]),
-		),
-		vector: Type.Optional(
-			Type.Union([
-				Type.Literal("remote"),
-				Type.Literal("local_network"),
-				Type.Literal("localhost"),
-				Type.Literal("none"),
-				Type.Literal("unknown"),
-			]),
-		),
-		auth_required: Type.Optional(
-			Type.Union([Type.Literal("none"), Type.Literal("user"), Type.Literal("admin")]),
-		),
-		network_reachable: Type.Optional(Type.Boolean()),
-		cross_tenant: Type.Optional(Type.Boolean()),
-		code_execution_proven: Type.Optional(Type.Boolean()),
-		traced_path_no_control: Type.Optional(Type.Boolean()),
-		method: Type.Optional(
-			Type.Union([
-				Type.Literal("reproduced_poc"),
-				Type.Literal("asan"),
-				Type.Literal("debugger"),
-				Type.Literal("code_reading"),
-				Type.Literal("counterevidence"),
-			]),
-		),
-		suppression: Type.Optional(SuppressionSchema),
-
-		text: Type.Optional(Type.String()),
-		status: Type.Optional(
-			Type.Union([Type.Literal("open"), Type.Literal("dead_end")]),
-		),
-	},
-	{ additionalProperties: false },
-);
 
 const ALL_VERBS: Verb[] = [
 	"work.next",
@@ -198,69 +60,14 @@ const ALL_VERBS: Verb[] = [
 	"candidate.create",
 	"candidate.validate",
 	"candidate.assess",
-	"lead.record",
 ];
-
-// The tool describes only the verbs this worker may call. A description that
-// advertises a verb the worker cannot use is an instruction to make an error.
-const VERB_DOC: Record<Verb, string> = {
-	"work.next":
-		"- work.next({ limit }) — the next batch of files nothing has read yet, and how\n" +
-		"  many are left after it. Call it again until remaining is 0.",
-	"work.complete":
-		"- work.complete({ summary }) — after work.next says remaining is 0, record what you reviewed, found, and could not settle.",
-	"candidate.create":
-		"- candidate.create({ title, cwe, locations, summary, evidence, instance }) — a\n" +
-		"  suspected flaw. locations must cite real line ranges in files inside the repo.",
-	"candidate.validate":
-		"- candidate.validate({ id, disposition, rationale }) — is it real? No severity here.",
-	// rationale is required and used to sit inside the "...", which every
-	// attack-path agent discovered by having its first call rejected. Naming a
-	// required field is cheaper than the round trip that teaches it.
-	"candidate.assess":
-		"- candidate.assess({ id, entry_point, path, controls, rationale, impact, ... }) —\n" +
-		"  how far it reaches, plus the observable inputs severity is computed from. You\n" +
-		"  do not set severity.",
-	"lead.record":
-		"- lead.record({ text, status }) — a hypothesis you chased. Record dead ends too.",
-};
-
-export function createOpensecTool(ctx: RunContext) {
-	const verbs = ctx.verbs ?? ALL_VERBS;
-	const guidelines = [
-		...(verbs.includes("work.next")
-			? ["Call opensec work.next before reviewing anything — it is the list you are accountable for."]
-			: []),
-		...(verbs.includes("lead.record")
-			? ["Record dead ends with lead.record. Silence is indistinguishable from never having looked."]
-			: []),
-	];
-	return defineTool({
-		name: "opensec",
-		label: "opensec",
-		description: [
-			`Record security review work. ${verbs.length === 1 ? "One verb" : `${verbs.length} verbs`}:`,
-			"",
-			...verbs.map((v) => VERB_DOC[v]),
-		].join("\n"),
-		parameters: paramsSchema(verbs),
-		promptSnippet: "opensec - record worklist progress, candidates, verdicts and leads",
-		...(guidelines.length > 0 ? { promptGuidelines: guidelines } : {}),
-		// Two calls in one tool batch must not interleave a create and a validate.
-		executionMode: "sequential",
-		async execute(_id, params) {
-			const output = runOpensec(ctx, params as Params);
-			return { content: [{ type: "text", text: output }], details: undefined };
-		},
-	});
-}
 
 type Params = {
 	verb: Verb;
 	[k: string]: unknown;
 };
 
-/** Execute one ledger command for either the PI tool or the sandbox CLI bridge. */
+/** Execute one command received from the sandbox CLI bridge. */
 export function runOpensec(ctx: RunContext, p: Params): string {
 	validateCommandFields(p);
 	const allowed = ctx.verbs ?? ALL_VERBS;
@@ -281,8 +88,6 @@ export function runOpensec(ctx: RunContext, p: Params): string {
 			return candidateValidate(ctx, p);
 		case "candidate.assess":
 			return candidateAssess(ctx, p);
-		case "lead.record":
-			return leadRecord(ctx, p);
 		default:
 			throw new Error(`unknown verb: ${String(p.verb)}`);
 	}
@@ -291,7 +96,7 @@ export function runOpensec(ctx: RunContext, p: Params): string {
 const FIELDS_BY_VERB: Record<Verb, readonly string[]> = {
 	"work.next": ["limit"],
 	"work.complete": ["summary"],
-	"candidate.create": ["title", "cwe", "locations", "summary", "evidence", "instance"],
+	"candidate.create": ["title", "cwe", "locations", "description", "instance"],
 	"candidate.validate": ["id", "disposition", "rationale", "duplicate_of"],
 	"candidate.assess": [
 		"id",
@@ -309,7 +114,6 @@ const FIELDS_BY_VERB: Record<Verb, readonly string[]> = {
 		"method",
 		"suppression",
 	],
-	"lead.record": ["text", "status"],
 };
 
 /** The bridge shares this check with the PI tool so misspelled JSON never becomes a silent no-op. */
@@ -363,20 +167,25 @@ function workNext(ctx: RunContext, p: Params): string {
 
 function workComplete(ctx: RunContext, p: Params): string {
 	const summary = sanitize(ctx, requireText(p.summary, "summary")).slice(0, 2000);
-	ctx.ledger.completeWorkerWork(ctx.scanId, ctx.workerId, ctx.worklist ?? [], ctx.readGroup, summary);
+	ctx.ledger.completeWorkerWork(ctx.scanId, ctx.worklist ?? [], ctx.readGroup);
+	ctx.ledger.recordEvent(
+		ctx.scanId,
+		"work_complete",
+		{ summary, read_group: ctx.readGroup ?? null },
+		ctx.workerId,
+	);
 	return JSON.stringify({ status: "complete", note: "worklist read" });
 }
 
 function candidateCreate(ctx: RunContext, p: Params): string {
 	const title = requireText(p.title, "title");
-	const summary = requireText(p.summary, "summary");
-	const evidence = requireText(p.evidence, "evidence");
-	const rawLocations = p.locations as Location[] | undefined;
-	if (!rawLocations || rawLocations.length === 0) {
+	const description = requireText(p.description, "description");
+	const rawLocations = p.locations;
+	if (!Array.isArray(rawLocations) || rawLocations.length === 0) {
 		throw new Error("candidate.create requires at least one location");
 	}
 
-	const locations = rawLocations.map((l) => validateLocation(ctx, l));
+	const locations = rawLocations.map((l) => validateLocation(ctx, l as Location));
 
 	// What ties a finding to you has to be the finding, not a mention of it.
 	//
@@ -392,11 +201,10 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 		throw new Error(
 			(substantive.length > 0
 				? `no entrypoint, source, root_control or sink is in your worklist — an evidence ` +
-					`location does not tie a finding to you. Cite a file from work.next, or, if ` +
-					`the flaw really lives outside your list, record it with lead.record so it is ` +
-					`not lost. `
+					`location does not tie a finding to you. Cite a file from work.next, or include ` +
+						`the issue in your completion summary. `
 				: `no location is in your worklist — cite at least one file from work.next, or ` +
-					`record it with lead.record. `) +
+						`include the issue in your completion summary. `) +
 				`Got: ${anchors.map((l) => `${l.path}${l.role ? ` (${l.role})` : ""}`).join(", ")}`,
 		);
 	}
@@ -411,10 +219,9 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 		workerId: ctx.workerId,
 		// Capped like instance and symbol: a title is one line of a findings table.
 		title: sanitize(ctx, title).slice(0, 200),
-		cweIds: normalizeCwe(p.cwe as string[] | undefined),
+		cweIds: normalizeCwe(p.cwe),
 		locations,
-		summary: sanitize(ctx, summary),
-		evidence: sanitize(ctx, evidence),
+		description: sanitize(ctx, description),
 		instance,
 	});
 
@@ -434,10 +241,16 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 }
 
 function candidateValidate(ctx: RunContext, p: Params): string {
-	const { candidate, id } = requireCandidate(ctx, p);
+	const { id } = requireCandidate(ctx, p);
 	const rationale = sanitize(ctx, requireText(p.rationale, "rationale"));
 
-	const disposition = (p.disposition as Disposition | undefined) ?? "needs_follow_up";
+	const disposition =
+		enumValue<Disposition>(p.disposition, "disposition", [
+			"confirmed",
+			"not_applicable",
+			"duplicate",
+			"needs_follow_up",
+		]) ?? "needs_follow_up";
 
 	if (ctx.dispositions && !ctx.dispositions.includes(disposition)) {
 		throw new Error(
@@ -466,28 +279,34 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 		if (!target) {
 			throw new Error(`no candidate '${dup}' in this scan. Nothing was recorded.`);
 		}
-		if (target.merged_into) {
+		if (target.duplicate_of) {
 			throw new Error(
-				`duplicate_of '${dup}' is itself merged into '${target.merged_into}' — point ` +
+				`duplicate_of '${dup}' is itself merged into '${target.duplicate_of}' — point ` +
 					`every duplicate at the surviving row. Nothing was recorded.`,
 			);
 		}
-		ctx.ledger.resolveCandidate(ctx.scanId, id, {
-			disposition: "duplicate",
-			rationale,
-			duplicate_of: dup,
-			validation: { disposition: "duplicate", rationale, at: now() },
+		ctx.ledger.addCandidateActivity({
+			scanId: ctx.scanId,
+			candidateId: id,
+			workerId: ctx.workerId,
+			kind: "duplicate",
+			body: rationale,
+			status: "duplicate",
+			duplicateOf: dup,
+			data: { disposition: "duplicate", duplicate_of: dup },
 		});
 		return JSON.stringify({ id, disposition: "duplicate", duplicate_of: dup });
 	}
 
-	const resolution: Resolution = {
-		...candidate.resolution,
-		disposition,
-		rationale,
-		validation: { disposition, rationale, at: now() },
-	};
-	ctx.ledger.resolveCandidate(ctx.scanId, id, resolution);
+	ctx.ledger.addCandidateActivity({
+		scanId: ctx.scanId,
+		candidateId: id,
+		workerId: ctx.workerId,
+		kind: "validation",
+		body: rationale,
+		status: disposition,
+		data: { disposition },
+	});
 
 	return JSON.stringify({
 		id,
@@ -502,7 +321,7 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 function candidateAssess(ctx: RunContext, p: Params): string {
 	const { candidate, id } = requireCandidate(ctx, p);
 
-	const validated = candidate.resolution?.validation?.disposition;
+	const validated = candidate.activities.findLast((activity) => activity.kind === "validation")?.data?.disposition;
 	if (validated !== "confirmed") {
 		throw new Error(
 			`${id} was not confirmed by validation (it is '${validated ?? "unvalidated"}'), ` +
@@ -516,15 +335,15 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 	const inputs = readSeverityInputs(ctx, p, notes);
 
 	if (!inputs) {
-		// candidate.resolution exists here — the confirmed-validation check above
-		// already threw otherwise.
-		const resolution: Resolution = {
-			...candidate.resolution,
-			disposition: "needs_follow_up",
-			rationale,
-			attack_path: { reachability, rationale, at: now() },
-		};
-		ctx.ledger.resolveCandidate(ctx.scanId, id, resolution);
+		ctx.ledger.addCandidateActivity({
+			scanId: ctx.scanId,
+			candidateId: id,
+			workerId: ctx.workerId,
+			kind: "assessment",
+			body: rationale,
+			status: "needs_follow_up",
+			data: { disposition: "needs_follow_up", reachability },
+		});
 		return JSON.stringify({
 			id,
 			disposition: "needs_follow_up",
@@ -549,31 +368,25 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 	}
 
 	const computed = computeSeverity(inputs);
-	const resolution: Resolution = {
-		...candidate.resolution,
-		disposition: computed.reportable ? "confirmed" : "suppressed",
-		rationale,
-		attack_path: { reachability, rationale, at: now() },
-		inputs,
-		computed,
-	};
-	ctx.ledger.resolveCandidate(ctx.scanId, id, resolution);
+	const disposition = computed.reportable ? "confirmed" : "suppressed";
+	ctx.ledger.addCandidateActivity({
+		scanId: ctx.scanId,
+		candidateId: id,
+		workerId: ctx.workerId,
+		kind: "assessment",
+		body: rationale,
+		status: disposition,
+		data: { disposition, reachability, inputs, computed },
+	});
 
 	return JSON.stringify({
 		id,
-		disposition: resolution.disposition,
+		disposition,
 		severity: computed.severity,
 		confidence: computed.confidence,
 		proof_gap: computed.proof_gap,
 		notes,
 	});
-}
-
-function leadRecord(ctx: RunContext, p: Params): string {
-	const text = sanitize(ctx, requireText(p.text, "text"));
-	const status = (p.status as "open" | "dead_end" | undefined) ?? "open";
-	ctx.ledger.recordLead(ctx.scanId, { worker_id: ctx.workerId, text, status });
-	return JSON.stringify({ status: "recorded" });
 }
 
 function requireCandidate(ctx: RunContext, p: Params) {
@@ -590,18 +403,24 @@ function requireCandidate(ctx: RunContext, p: Params) {
 }
 
 function readReachability(ctx: RunContext, p: Params): Reachability {
-	const list = (v: unknown): string[] =>
-		Array.isArray(v)
-			? v
-					.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
-					.map((x) => sanitize(ctx, x).slice(0, 500))
-					.slice(0, 40)
-			: [];
+	const list = (v: unknown, name: string): string[] => {
+		if (v === undefined) return [];
+		if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) {
+			throw new Error(`${name} must be an array of strings`);
+		}
+		return v
+			.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+			.map((x) => sanitize(ctx, x).slice(0, 500))
+			.slice(0, 40);
+	};
+	if (p.entry_point !== undefined && typeof p.entry_point !== "string") {
+		throw new Error("entry_point must be a string");
+	}
 	return {
 		entry_point:
 			typeof p.entry_point === "string" ? sanitize(ctx, p.entry_point).slice(0, 500) : "",
-		path: list(p.path),
-		controls: list(p.controls),
+		path: list(p.path, "path"),
+		controls: list(p.controls, "controls"),
 	};
 }
 
@@ -610,31 +429,124 @@ function readSeverityInputs(
 	p: Params,
 	notes: string[],
 ): SeverityInputs | null {
-	const impact = p.impact as Impact | undefined;
-	const vector = p.vector as Vector | undefined;
-	const method = p.method as Method | undefined;
+	const impact = enumValue<Impact>(p.impact, "impact", ["none", "low", "medium", "high"]);
+	const vector = enumValue<Vector>(p.vector, "vector", [
+		"remote",
+		"local_network",
+		"localhost",
+		"none",
+		"unknown",
+	]);
+	const method = enumValue<Method>(p.method, "method", [
+		"reproduced_poc",
+		"asan",
+		"debugger",
+		"code_reading",
+		"counterevidence",
+	]);
 	if (!impact || !method) return null;
 	if (!vector) notes.push("no vector given; treated as unknown, which caps likelihood at low");
 
-	const raw = p.suppression as SeverityInputs["suppression"];
-	const suppression = raw?.evidence ? { ...raw, evidence: sanitize(ctx, raw.evidence) } : raw;
+	const authRequired = enumValue<AuthRequired>(p.auth_required, "auth_required", [
+		"none",
+		"user",
+		"admin",
+	]);
+	const suppression = readSuppression(ctx, p.suppression);
 
 	return {
 		impact,
 		vector: vector ?? "unknown",
-		auth_required: (p.auth_required as AuthRequired | undefined) ?? "user",
-		network_reachable: p.network_reachable === true,
-		cross_tenant: p.cross_tenant === true,
-		code_execution_proven: p.code_execution_proven === true,
-		traced_path_no_control: p.traced_path_no_control === true,
+		auth_required: authRequired ?? "user",
+		network_reachable: booleanValue(p.network_reachable, "network_reachable"),
+		cross_tenant: booleanValue(p.cross_tenant, "cross_tenant"),
+		code_execution_proven: booleanValue(p.code_execution_proven, "code_execution_proven"),
+		traced_path_no_control: booleanValue(p.traced_path_no_control, "traced_path_no_control"),
 		method,
 		suppression,
 	};
 }
 
+function enumValue<T extends string>(
+	value: unknown,
+	name: string,
+	allowed: readonly T[],
+): T | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !allowed.includes(value as T)) {
+		throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
+	}
+	return value as T;
+}
+
+function booleanValue(value: unknown, name: string): boolean {
+	if (value === undefined) return false;
+	if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
+	return value;
+}
+
+function readSuppression(ctx: RunContext, value: unknown): SeverityInputs["suppression"] {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("suppression must be an object");
+	}
+	const raw = value as Record<string, unknown>;
+	const allowed = [
+		"self_only",
+		"requires_preexisting_privilege",
+		"privilege_delta_is_the_bug",
+		"precondition_unreachable",
+		"evidence",
+		"source",
+	];
+	const unknown = Object.keys(raw).filter((key) => !allowed.includes(key));
+	if (unknown.length > 0) throw new Error(`suppression does not accept: ${unknown.join(", ")}`);
+	const evidence = raw.evidence;
+	if (evidence !== undefined && typeof evidence !== "string") {
+		throw new Error("suppression.evidence must be a string");
+	}
+	return {
+		self_only: booleanValue(raw.self_only, "suppression.self_only"),
+		requires_preexisting_privilege: booleanValue(
+			raw.requires_preexisting_privilege,
+			"suppression.requires_preexisting_privilege",
+		),
+		privilege_delta_is_the_bug: booleanValue(
+			raw.privilege_delta_is_the_bug,
+			"suppression.privilege_delta_is_the_bug",
+		),
+		precondition_unreachable: booleanValue(
+			raw.precondition_unreachable,
+			"suppression.precondition_unreachable",
+		),
+		...(evidence === undefined ? {} : { evidence: sanitize(ctx, evidence) }),
+		source: enumValue(raw.source, "suppression.source", ["code_evidence", "repo_claim"]),
+	};
+}
+
 function validateLocation(ctx: RunContext, loc: Location): Location {
+	if (!loc || typeof loc !== "object" || Array.isArray(loc)) {
+		throw new Error("each location must be an object");
+	}
+	const raw = loc as unknown as Record<string, unknown>;
+	const allowed = ["path", "start_line", "end_line", "symbol", "role"];
+	const unknown = Object.keys(raw).filter((key) => !allowed.includes(key));
+	if (unknown.length > 0) throw new Error(`location does not accept: ${unknown.join(", ")}`);
 	if (typeof loc?.path !== "string" || loc.path.length === 0) {
 		throw new Error("location.path is required");
+	}
+	if (typeof loc.start_line !== "number") throw new Error("location.start_line must be an integer");
+	if (loc.end_line !== undefined && typeof loc.end_line !== "number") {
+		throw new Error("location.end_line must be an integer");
+	}
+	if (loc.symbol !== undefined && typeof loc.symbol !== "string") {
+		throw new Error("location.symbol must be a string");
+	}
+	if (
+		loc.role !== undefined &&
+		(typeof loc.role !== "string" || !(ROLES as readonly string[]).includes(loc.role))
+	) {
+		throw new Error(`location.role must be one of: ${ROLES.join(", ")}`);
 	}
 	if (isAbsolute(loc.path)) {
 		throw new Error(`location.path must be repo-relative, got '${loc.path}'`);
@@ -680,10 +592,8 @@ function validateLocation(ctx: RunContext, loc: Location): Location {
 		path: rel,
 		start_line: start,
 		end_line: end,
-		...(loc.symbol ? { symbol: sanitize(ctx, String(loc.symbol)).slice(0, 200) } : {}),
-		...(loc.role && (ROLES as readonly string[]).includes(loc.role)
-			? { role: loc.role as LocationRole }
-			: {}),
+		...(loc.symbol ? { symbol: sanitize(ctx, loc.symbol).slice(0, 200) } : {}),
+		...(loc.role ? { role: loc.role as LocationRole } : {}),
 	};
 }
 
@@ -699,8 +609,11 @@ function countLines(content: string): number {
 	return parts.length;
 }
 
-function normalizeCwe(cwe: string[] | undefined): string[] {
-	if (!cwe) return [];
+function normalizeCwe(cwe: unknown): string[] {
+	if (cwe === undefined) return [];
+	if (!Array.isArray(cwe) || cwe.some((value) => typeof value !== "string")) {
+		throw new Error("cwe must be an array of strings");
+	}
 	return cwe
 		.map((c) => String(c).trim().toUpperCase())
 		.filter((c) => /^CWE-\d+$/.test(c))

@@ -1,58 +1,15 @@
-You are comparing a small group of candidate findings that landed in the same
-place and the same vulnerability class. Your only question is whether any of
-them are the same finding.
+You are comparing related, unvalidated candidates. Decide only whether any are
+the same finding.
 
 {{PLAIN_WRITING_GUIDE}}
 
-You are **not** judging whether they are real. Nothing here has been validated
-yet, and a separate pass will do that for every row that survives you. Finding
-something twice is search evidence, not proof that it is reportable.
+Read the cited code. Two candidates are duplicates only when one patch fixes
+both. Shared CWE, file, helper, or impact is not enough. Prefer under-merging:
+over-merging silently loses a finding.
 
-Exact matches were already merged before you saw this. What is left are rows
-that look related but are not identical, which is exactly the judgement a rule
-cannot make.
+For each duplicate, send JSON with `id`, `disposition: "duplicate"`,
+`duplicate_of`, and `rationale` to `opensec candidate validate --input -`.
 
-## The test
-
-Two rows are duplicates **only if one patch fixes both.** Remediation
-subsumption, not surface similarity.
-
-They are NOT duplicates merely because they:
-
-- share a CWE, or
-- sit in the same file, or
-- describe the same class of bug in two places, or
-- both trace back to the same unsafe helper — if each caller needs its own fix,
-  each caller is its own row.
-
-They ARE duplicates when two rows describe the same broken control reached by
-two paths, and fixing that control fixes both. Probes legitimately cite
-different lines of the same function, and CWE assignment legitimately varies
-within a family (CWE-22 / -23 / -36 are the same bug wearing different hats).
-
-Read the cited code before merging anything. Two summaries that sound alike can
-describe two different parameters on two different routes.
-
-## Recording
-
-For each duplicate:
-
-    opensec({ verb: "candidate.validate", id: <the duplicate>,
-              disposition: "duplicate", duplicate_of: <the row to keep>,
-              rationale: "<the single patch that fixes both>" })
-
-Keep the row with the better evidence and the more precise location. Never
-point a row at itself, and never chain — every duplicate points at the same
-surviving row.
-
-`duplicate` is the only disposition available to you. You cannot mark anything
-not applicable, because you have not investigated it and neither has anyone
-else yet.
-
-Under-merging costs a duplicated entry in the report. Over-merging destroys a
-finding silently, and there is no way to notice afterwards. When you are unsure,
-leave both.
-
-If nothing here is a duplicate, say so and record nothing. That is the common
-answer. After recording any duplicates, end with one sentence stating how many
-you merged. Do not restate the candidates or rationales.
+Keep the row with clearer evidence and locations. Never point a row to itself,
+outside the given group, or to another duplicate. If none are duplicates,
+record nothing. Do not judge validity or severity.

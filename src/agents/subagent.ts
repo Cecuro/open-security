@@ -51,7 +51,7 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 		label: "delegate",
 		description:
 			`Delegate one task to a subagent that starts with a fresh context and the same ` +
-			`read-only tools you have. Use it when answering something yourself would mean ` +
+			`repository tools you have. Use it when answering something yourself would mean ` +
 			`pulling far more into your context than the answer is worth, or when a claim ` +
 			`deserves a reader who has not already seen your reasoning.\n\n` +
 			`Typical briefs: follow one input from a specific entry point to a specific sink ` +

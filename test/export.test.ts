@@ -30,12 +30,11 @@ const input = {
 			title: "SQL injection",
 			cwe_ids: ["CWE-89"],
 			locations: [{ path: "src/query.ts", start_line: 12, end_line: 13 }],
-			summary: "Attacker-controlled input reaches a query.",
-			evidence: 'query("select " + input)',
+			description: 'Attacker-controlled input reaches a query.\n\nquery("select " + input)',
+			status: "confirmed" as const,
 			created_at: "now",
-			resolution: {
+			activities: [{ id: 1, worker_id: "assess-c1", kind: "assessment" as const, body: "traced", at: "now", data: {
 				disposition: "confirmed" as const,
-				rationale: "traced",
 				computed: {
 					severity: "high" as const,
 					likelihood: "high" as const,
@@ -43,7 +42,7 @@ const input = {
 					reportable: true,
 					rationale: [],
 				},
-			},
+			} }],
 		},
 		{
 			id: "c2",
@@ -52,11 +51,11 @@ const input = {
 			title: "Merged copy",
 			cwe_ids: ["CWE-89"],
 			locations: [{ path: "src/query.ts", start_line: 12, end_line: 13 }],
-			summary: "duplicate",
-			evidence: "duplicate",
+			description: "duplicate",
+			status: "duplicate" as const,
 			created_at: "now",
-			merged_into: "c1",
-			resolution: { disposition: "confirmed" as const, rationale: "merged" },
+			duplicate_of: "c1",
+			activities: [{ id: 2, worker_id: "reduce-1", kind: "duplicate" as const, body: "merged", at: "now", data: { disposition: "duplicate" as const, duplicate_of: "c1" } }],
 		},
 	],
 };

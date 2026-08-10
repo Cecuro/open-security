@@ -23,6 +23,8 @@ export type Disposition =
 	| "duplicate"
 	| "needs_follow_up";
 
+export type CandidateStatus = "open" | Disposition;
+
 export type Impact = "none" | "low" | "medium" | "high";
 
 export type Vector = "remote" | "local_network" | "localhost" | "none" | "unknown";
@@ -93,41 +95,30 @@ export interface Candidate {
 	title: string;
 	cwe_ids: string[];
 	locations: Location[];
-	summary: string;
-	evidence: string;
+	description: string;
+	status: CandidateStatus;
 	created_at: string;
-	resolution?: Resolution;
-	merged_into?: string | null;
+	activities: CandidateActivity[];
+	duplicate_of?: string | null;
 	instance?: string | null;
 	identity_hash?: string | null;
 }
 
-export interface Validation {
-	disposition: Disposition;
-	rationale: string;
-	at: string;
-}
+export type CandidateActivityKind = "validation" | "assessment" | "duplicate" | "comment";
 
-export interface AttackPath {
-	reachability: Reachability;
-	rationale: string;
-	at: string;
-}
-
-export interface Resolution {
-	disposition: Disposition;
-	rationale: string;
-	validation?: Validation;
-	attack_path?: AttackPath;
-	inputs?: SeverityInputs;
-	computed?: SeverityResult;
-	duplicate_of?: string;
-}
-
-export interface Lead {
+export interface CandidateActivity {
+	id: number;
 	worker_id: string;
-	text: string;
-	status: "open" | "dead_end";
+	kind: CandidateActivityKind;
+	body: string;
+	at: string;
+	data?: {
+		disposition?: Disposition;
+		duplicate_of?: string;
+		reachability?: Reachability;
+		inputs?: SeverityInputs;
+		computed?: SeverityResult;
+	};
 }
 
 export interface ScanFile {
@@ -173,10 +164,34 @@ export interface Coverage {
 	bytes_read: number;
 }
 
-export interface WorkerCoverage extends Coverage {
-	worker_id: string;
-	files_assigned: number;
-	bytes_assigned: number;
+export interface PassCoverage extends Coverage {
+	pass: number;
 	completed: boolean;
-	summary?: string;
+}
+
+export function latestActivity(
+	candidate: Candidate,
+	kind: CandidateActivityKind,
+): CandidateActivity | undefined {
+	return candidate.activities.findLast((activity) => activity.kind === kind);
+}
+
+export function candidateComputed(candidate: Candidate): SeverityResult | undefined {
+	return latestActivity(candidate, "assessment")?.data?.computed ?? undefined;
+}
+
+export function candidateInputs(candidate: Candidate): SeverityInputs | undefined {
+	return latestActivity(candidate, "assessment")?.data?.inputs ?? undefined;
+}
+
+export function candidateStatus(candidate: Candidate): CandidateStatus {
+	return candidate.status;
+}
+
+export function candidateDuplicateOf(candidate: Candidate): string | null {
+	return candidate.duplicate_of ?? null;
+}
+
+export function candidateDescription(candidate: Candidate): string {
+	return candidate.description;
 }

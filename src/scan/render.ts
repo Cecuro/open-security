@@ -1,4 +1,15 @@
-import type { Candidate, Coverage, ScanRecord, WorkerCoverage } from "../types.js";
+import {
+	candidateComputed,
+	candidateDescription,
+	candidateDuplicateOf,
+	candidateInputs,
+	candidateStatus,
+	latestActivity,
+	type Candidate,
+	type Coverage,
+	type PassCoverage,
+	type ScanRecord,
+} from "../types.js";
 import { formatSeverity, renderMatrix, severityRank } from "./severity.js";
 
 export interface ReportInput {
@@ -7,8 +18,7 @@ export interface ReportInput {
 	repoPath: string;
 	candidates: Candidate[];
 	coverage: Coverage;
-	probeCoverage?: WorkerCoverage[];
-	leads: Array<{ worker_id: string; text: string; status: string }>;
+	passCoverage?: PassCoverage[];
 	/** File extensions in scope, without the dot. */
 	extensions: string[];
 	excludedFiles: number;
@@ -23,21 +33,22 @@ export interface ReportInput {
 export function renderMarkdown(r: ReportInput): string {
 	const out: string[] = [];
 
-	const merged = new Set(r.candidates.filter((c) => c.merged_into).map((c) => c.id));
+	const merged = new Set(r.candidates.filter((c) => candidateDuplicateOf(c)).map((c) => c.id));
 	const live = r.candidates.filter((c) => !merged.has(c.id));
 
 	const confirmed = live
-		.filter((c) => c.resolution?.disposition === "confirmed")
+		.filter((c) => candidateStatus(c) === "confirmed")
 		.sort((a, b) => {
-			const sa = a.resolution?.computed?.severity ?? "info";
-			const sb = b.resolution?.computed?.severity ?? "info";
+			const sa = candidateComputed(a)?.severity ?? "info";
+			const sb = candidateComputed(b)?.severity ?? "info";
 			return severityRank(sa) - severityRank(sb);
 		});
-	const suppressed = live.filter((c) => c.resolution?.disposition === "suppressed");
-	const notApplicable = live.filter((c) => c.resolution?.disposition === "not_applicable");
-	const followUp = live.filter(
-		(c) => !c.resolution || c.resolution.disposition === "needs_follow_up",
-	);
+	const suppressed = live.filter((c) => candidateStatus(c) === "suppressed");
+	const notApplicable = live.filter((c) => candidateStatus(c) === "not_applicable");
+	const followUp = live.filter((c) => {
+		const status = candidateStatus(c);
+		return status === "open" || status === "needs_follow_up";
+	});
 
 	out.push(`# Security scan: ${esc(r.repoName)}`, "");
 	out.push("| | |", "|---|---|");
@@ -88,18 +99,17 @@ export function renderMarkdown(r: ReportInput): string {
 		"> review**: a file that was read is not thereby a file that was understood.",
 		"",
 	);
-	if (r.probeCoverage && r.probeCoverage.length > 0) {
-		const complete = r.probeCoverage.filter((p) => p.completed).length;
+	if (r.passCoverage && r.passCoverage.length > 0) {
+		const complete = r.passCoverage.filter((p) => p.completed).length;
 		out.push("## Probe coverage", "");
-		out.push(`${complete} / ${r.probeCoverage.length} probe(s) completed their worklist.`, "");
-		out.push("| probe | files read | bytes read | status |", "|---|---|---|---|");
-		for (const p of r.probeCoverage) {
+		out.push(`${complete} / ${r.passCoverage.length} probe pass(es) completed.`, "");
+		out.push("| pass | files read | bytes read | status |", "|---|---|---|---|");
+		for (const p of r.passCoverage) {
 			out.push(
-				`| ${codeSpan(p.worker_id)} | ${p.files_touched} / ${p.files_assigned} | ` +
-				`${pct(p.bytes_read, p.bytes_assigned)} | ${p.completed ? "complete" : "incomplete"} |`,
+				`| ${p.pass} | ${p.files_touched} / ${p.files_in_scope} | ` +
+					`${pct(p.bytes_read, p.bytes_in_scope)} | ${p.completed ? "complete" : "incomplete"} |`,
 			);
 		}
-		for (const p of r.probeCoverage) if (p.summary) out.push(`- ${codeSpan(p.worker_id)}: ${esc(p.summary)}`);
 		out.push("");
 	}
 	// Coverage says what was read. It says nothing about what was noticed, and
@@ -132,7 +142,7 @@ export function renderMarkdown(r: ReportInput): string {
 	} else {
 		out.push("| # | severity | confidence | finding | location |", "|---|---|---|---|---|");
 		for (const c of confirmed) {
-			const comp = c.resolution?.computed;
+			const comp = candidateComputed(c);
 			const loc = c.locations[0];
 			out.push(
 				`| ${c.id} | ${comp ? formatSeverity(comp) : "?"} | ${comp?.confidence.toFixed(1) ?? "?"} | ${escInline(c.title)} | ${loc ? codeSpan(`${loc.path}:${loc.start_line}`) : "?"} |`,
@@ -150,10 +160,9 @@ export function renderMarkdown(r: ReportInput): string {
 			"",
 		);
 		for (const c of followUp) {
+			const note = c.activities.at(-1)?.body;
 			out.push(
-				`- **${c.id}** ${escInline(c.title)} — ${firstLoc(c)}${
-					c.resolution?.rationale ? `\n  ${esc(c.resolution.rationale)}` : ""
-				}`,
+				`- **${c.id}** ${escInline(c.title)} — ${firstLoc(c)}${note ? `\n  ${esc(note)}` : ""}`,
 			);
 		}
 		out.push("");
@@ -162,7 +171,7 @@ export function renderMarkdown(r: ReportInput): string {
 	if (suppressed.length > 0) {
 		out.push("## Suppressed", "");
 		const repoClaims = suppressed.filter(
-			(c) => c.resolution?.inputs?.suppression?.source === "repo_claim",
+			(c) => candidateInputs(c)?.suppression?.source === "repo_claim",
 		).length;
 		if (repoClaims > 0) {
 			out.push(
@@ -172,7 +181,7 @@ export function renderMarkdown(r: ReportInput): string {
 			);
 		}
 		for (const c of suppressed) {
-			const why = c.resolution?.computed?.rationale?.[0] ?? c.resolution?.rationale ?? "";
+			const why = candidateComputed(c)?.rationale?.[0] ?? c.activities.at(-1)?.body ?? "";
 			out.push(`- **${c.id}** ${escInline(c.title)} — ${escInline(why)}`);
 		}
 		out.push("");
@@ -181,7 +190,7 @@ export function renderMarkdown(r: ReportInput): string {
 	if (notApplicable.length > 0) {
 		out.push("## Not applicable", "");
 		for (const c of notApplicable) {
-			out.push(`- **${c.id}** ${escInline(c.title)} — ${escInline(c.resolution?.rationale ?? "")}`);
+			out.push(`- **${c.id}** ${escInline(c.title)} — ${escInline(c.activities.at(-1)?.body ?? "")}`);
 		}
 		out.push("");
 	}
@@ -193,24 +202,11 @@ export function renderMarkdown(r: ReportInput): string {
 			"is evidence about the search, not about the finding.",
 			"",
 		);
-		for (const c of r.candidates.filter((x) => x.merged_into)) {
+		for (const c of r.candidates.filter((x) => candidateDuplicateOf(x))) {
 			out.push(
-				`- **${c.id}** ${escInline(c.title)} → merged into **${escInline(c.merged_into ?? "?")}**: ${escInline(c.resolution?.rationale ?? "")}`,
+				`- **${c.id}** ${escInline(c.title)} → merged into **${escInline(candidateDuplicateOf(c) ?? "?")}**: ${escInline(c.activities.at(-1)?.body ?? "")}`,
 			);
 		}
-		out.push("");
-	}
-
-	const deadEnds = r.leads.filter((l) => l.status === "dead_end");
-	if (deadEnds.length > 0) {
-		out.push("## Leads that went nowhere", "");
-		out.push(
-			'"No findings" from an agent that never looked is indistinguishable from "no',
-			'findings" from an agent that looked hard — unless the dead ends are written',
-			"down. These are they.",
-			"",
-		);
-		for (const l of deadEnds) out.push(`- ${escInline(l.text)}`);
 		out.push("");
 	}
 
@@ -237,12 +233,14 @@ export function renderMarkdown(r: ReportInput): string {
  * in the report.
  */
 function mergedInto(candidates: Candidate[], id: string): number {
-	return candidates.filter((c) => c.merged_into === id).length;
+	return candidates.filter((c) => candidateDuplicateOf(c) === id).length;
 }
 
 function renderFinding(c: Candidate, mergedCount = 0): string[] {
-	const comp = c.resolution?.computed;
-	const inputs = c.resolution?.inputs;
+	const comp = candidateComputed(c);
+	const inputs = candidateInputs(c);
+	const validation = latestActivity(c, "validation");
+	const assessment = latestActivity(c, "assessment");
 	const out: string[] = [];
 
 	out.push(`### ${c.id} — ${escInline(c.title)}`, "");
@@ -273,14 +271,13 @@ function renderFinding(c: Candidate, mergedCount = 0): string[] {
 	}
 	out.push("");
 
-	out.push("**What an attacker gets**", "", esc(c.summary), "");
-	out.push("**Evidence**", "", quote(c.evidence), "");
+	out.push("**Finding**", "", esc(candidateDescription(c)), "");
 
-	if (c.resolution?.validation) {
-		out.push("**Validation**", "", esc(c.resolution.validation.rationale), "");
+	if (validation) {
+		out.push("**Validation**", "", esc(validation.body), "");
 	}
 
-	const reach = c.resolution?.attack_path?.reachability;
+	const reach = assessment?.data?.reachability;
 	if (reach) {
 		out.push("**Attack path**", "");
 		if (reach.entry_point) out.push(`- **entry** — ${escInline(reach.entry_point)}`);
@@ -291,8 +288,8 @@ function renderFinding(c: Candidate, mergedCount = 0): string[] {
 		} else if (reach.path.length > 0) {
 			out.push("**No control was found on this path.**", "");
 		}
-		if (c.resolution?.attack_path?.rationale) {
-			out.push(esc(c.resolution.attack_path.rationale), "");
+		if (assessment?.body) {
+			out.push(esc(assessment.body), "");
 		}
 	}
 
@@ -308,6 +305,13 @@ function renderFinding(c: Candidate, mergedCount = 0): string[] {
 	}
 	if (comp?.rationale.length) {
 		for (const line of comp.rationale) out.push(`- ${escInline(line)}`);
+		out.push("");
+	}
+	if (c.activities.length > 0) {
+		out.push("**Activity**", "");
+		for (const activity of c.activities) {
+			out.push(`- ${activity.at} · ${codeSpan(activity.worker_id)} · ${activity.kind}: ${escInline(activity.body)}`);
+		}
 		out.push("");
 	}
 	return out;
@@ -346,13 +350,6 @@ function usd(value: number): string {
 
 function escInline(s: string): string {
 	return esc(String(s).replace(/[\r\n]+/g, " ")).trim();
-}
-
-function quote(s: string): string {
-	return String(s)
-		.split("\n")
-		.map((l) => `> ${esc(l)}`)
-		.join("\n");
 }
 
 function pct(n: number, d: number): string {

@@ -8,17 +8,18 @@ import { fileURLToPath } from "node:url";
 import { identityHash, mergeLocations, mergeProse } from "../scan/identity.js";
 import type {
 	Candidate,
+	CandidateActivity,
+	CandidateActivityKind,
+	CandidateStatus,
 	Coverage,
-	Lead,
 	Location,
+	PassCoverage,
 	Phase,
 	Profile,
-	Resolution,
 	ScanScope,
 	ScanFile,
 	ScanRecord,
 	ScanStatus,
-	WorkerCoverage,
 } from "../types.js";
 import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 
@@ -61,7 +62,16 @@ export class Ledger {
 	}
 
 	private migrate(): void {
-		this.db.exec(readFileSync(join(here, "schema.sql"), "utf8"));
+		const existing = this.db
+			.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'scans'")
+			.get() !== undefined;
+		if (existing) {
+			this.db.exec(
+				"CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+			);
+		} else {
+			this.db.exec(readFileSync(join(here, "schema.sql"), "utf8"));
+		}
 
 		const stamp = this.db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)");
 		const current = () =>
@@ -71,8 +81,10 @@ export class Ledger {
 
 		let at = current();
 		if (at === null) {
-			stamp.run(1, now());
-			at = 1;
+			// A new ledger is created directly at the current schema. An old ledger
+			// that predates version stamps still starts from the v1 baseline.
+			at = existing ? 1 : SCHEMA_VERSION;
+			stamp.run(at, now());
 		}
 
 		if (at > SCHEMA_VERSION) {
@@ -353,30 +365,30 @@ export class Ledger {
 		const scope = worklist ? ` AND f.path IN (${worklist.map(() => "?").join(",")})` : "";
 		const paths = worklist ? [...worklist] : [];
 
-		// Two shapes rather than one with a conditional expression spliced into it.
-		// The clever version put the read-group placeholder in the SELECT list and
-		// the scan id in the WHERE, and the arguments went in the other order — so
-		// every probe got an empty worklist, filed nothing, and the scan reported
-		// itself clean. Parameter order is not worth being clever about.
 		if (readGroup === undefined) {
+			const progress = `LEFT JOIN (
+				SELECT path, MAX(bytes_read) AS bytes_read, MIN(first_touched_at) AS first_touched_at
+				FROM file_reads WHERE scan_id = ? GROUP BY path
+			) r ON r.path = f.path`;
 			const unread = (
 				this.db
 					.prepare(
-						`SELECT COUNT(*) AS n FROM files f
+						`SELECT COUNT(*) AS n FROM files f ${progress}
 						 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
-						 AND f.bytes_read < f.bytes_total${scope}`,
+						 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}`,
 					)
-					.get(scanId, ...paths) as { n: number }
+					.get(scanId, scanId, ...paths) as { n: number }
 			).n;
 			const files = this.db
 				.prepare(
-					`SELECT f.path, f.sha, f.bytes_total, f.bytes_read, f.excluded_reason,
-					        f.first_touched_at
-					 FROM files f WHERE f.scan_id = ? AND f.excluded_reason IS NULL
-					 AND f.bytes_read < f.bytes_total${scope}
+					`SELECT f.path, f.sha, f.bytes_total, COALESCE(r.bytes_read, 0) AS bytes_read,
+					        f.excluded_reason, r.first_touched_at
+					 FROM files f ${progress}
+					 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
+					 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}
 					 ORDER BY f.path LIMIT ?`,
 				)
-				.all(scanId, ...paths, limit) as ScanFile[];
+				.all(scanId, scanId, ...paths, limit) as ScanFile[];
 			return { files, unread };
 		}
 
@@ -396,7 +408,7 @@ export class Ledger {
 		const files = this.db
 			.prepare(
 				`SELECT f.path, f.sha, f.bytes_total, COALESCE(r.bytes_read, 0) AS bytes_read,
-				        f.excluded_reason, f.first_touched_at
+				        f.excluded_reason, r.first_touched_at
 				 FROM files f ${join}
 				 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
 				 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}
@@ -461,118 +473,96 @@ export class Ledger {
 		readGroup?: string,
 		workerId?: string,
 	): void {
-		// files.bytes_read stays the union across every pass, because coverage is a
-		// claim about the scan. file_reads is what each pass has seen on its own.
+		if (!this.fileInScope(scanId, path)) return;
+		// Direct ledger callers default to the first pass. Agent instrumentation
+		// only calls this for discovery contexts, where readGroup is explicit.
+		const group = readGroup ?? "pass-1";
 		this.db
 			.prepare(
-				continued
-					? `UPDATE files SET bytes_read = MIN(bytes_total, bytes_read + ?),
-					   first_touched_at = COALESCE(first_touched_at, ?)
-					   WHERE scan_id = ? AND path = ?`
-					: `UPDATE files SET bytes_read = MAX(bytes_read, ?),
-					   first_touched_at = COALESCE(first_touched_at, ?)
-					   WHERE scan_id = ? AND path = ?`,
+				`INSERT INTO file_reads
+				 (scan_id, read_group, path, bytes_read, first_touched_at, last_worker_id)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(scan_id, read_group, path) DO UPDATE SET
+				   bytes_read = ${continued ? "MIN((SELECT bytes_total FROM files WHERE scan_id = excluded.scan_id AND path = excluded.path), file_reads.bytes_read + excluded.bytes_read)" : "MAX(file_reads.bytes_read, excluded.bytes_read)"},
+				   first_touched_at = COALESCE(file_reads.first_touched_at, excluded.first_touched_at),
+				   last_worker_id = excluded.last_worker_id`,
 			)
-			.run(bytesRead, now(), scanId, path);
-
-		if (readGroup !== undefined) {
-			this.db
-				.prepare(
-					`INSERT INTO file_reads (scan_id, read_group, path, bytes_read) VALUES (?, ?, ?, ?)
-					 ON CONFLICT(scan_id, read_group, path) DO UPDATE SET
-					   bytes_read = ${continued ? "file_reads.bytes_read + excluded.bytes_read" : "MAX(file_reads.bytes_read, excluded.bytes_read)"}`,
-				)
-				.run(scanId, readGroup, path, bytesRead);
-		}
-		if (workerId !== undefined) {
-			this.db
-				.prepare(
-					`INSERT INTO worker_file_reads (scan_id, worker_id, path, bytes_read) VALUES (?, ?, ?, ?)
-					 ON CONFLICT(scan_id, worker_id, path) DO UPDATE SET
-					   bytes_read = ${continued ? "worker_file_reads.bytes_read + excluded.bytes_read" : "MAX(worker_file_reads.bytes_read, excluded.bytes_read)"}`,
-				)
-				.run(scanId, workerId, path, bytesRead);
-		}
-	}
-
-	beginWorkerWork(scanId: string, workerId: string, paths: readonly string[]): void {
-		const files = paths.length;
-		const bytes = paths.reduce((sum, path) => {
-			const row = this.db
-				.prepare("SELECT bytes_total FROM files WHERE scan_id = ? AND path = ?")
-				.get(scanId, path) as { bytes_total: number } | undefined;
-			return sum + (row?.bytes_total ?? 0);
-		}, 0);
-		this.db
-			.prepare(
-				`INSERT OR IGNORE INTO worker_work (scan_id, worker_id, files_assigned, bytes_assigned)
-				 VALUES (?, ?, ?, ?)`,
-			)
-			.run(scanId, workerId, files, bytes);
+			.run(scanId, group, path, bytesRead, now(), workerId ?? null);
 	}
 
 	completeWorkerWork(
 		scanId: string,
-		workerId: string,
 		worklist: readonly string[],
 		readGroup: string | undefined,
-		summary: string,
 	): void {
 		const { unread } = this.listWork(scanId, 1, worklist, readGroup);
 		if (unread !== 0) throw new Error(`work is not complete: ${unread} file(s) still need reading`);
-		const row = this.db
-			.prepare("SELECT completed_at FROM worker_work WHERE scan_id = ? AND worker_id = ?")
-			.get(scanId, workerId) as { completed_at: string | null } | undefined;
-		if (!row) throw new Error("worker was not registered for this worklist");
-		if (row.completed_at) throw new Error("work.complete was already recorded");
-		this.db
-			.prepare("UPDATE worker_work SET summary = ?, completed_at = ? WHERE scan_id = ? AND worker_id = ?")
-			.run(summary, now(), scanId, workerId);
 	}
 
-	workerCoverage(scanId: string): WorkerCoverage[] {
-		return this.db
-			.prepare(
-				`SELECT w.worker_id, w.files_assigned, w.bytes_assigned, w.summary, w.completed_at,
-				 COUNT(r.path) AS files_touched, COALESCE(SUM(MIN(r.bytes_read, f.bytes_total)), 0) AS bytes_read
-				 FROM worker_work w
-				 LEFT JOIN worker_file_reads r ON r.scan_id = w.scan_id AND r.worker_id = w.worker_id
-				 LEFT JOIN files f ON f.scan_id = r.scan_id AND f.path = r.path
-				 WHERE w.scan_id = ? GROUP BY w.worker_id ORDER BY w.worker_id`,
-			)
-			.all(scanId)
-			.map((row) => {
-				const r = row as Record<string, string | number | null>;
-				return {
-					worker_id: r.worker_id as string,
-					files_assigned: r.files_assigned as number,
-					files_in_scope: r.files_assigned as number,
-					files_touched: r.files_touched as number,
-					bytes_assigned: r.bytes_assigned as number,
-					bytes_in_scope: r.bytes_assigned as number,
-					bytes_read: r.bytes_read as number,
-					completed: r.completed_at !== null,
-					...(r.summary ? { summary: r.summary as string } : {}),
-				};
-			});
+	workerCompleted(scanId: string, workerId: string, readGroup: string): boolean {
+		return Boolean(
+			this.db
+				.prepare(
+					`SELECT 1 FROM scan_events
+					 WHERE scan_id = ? AND worker_id = ? AND type = 'work_complete'
+					 AND json_extract(detail_json, '$.read_group') = ? LIMIT 1`,
+				)
+				.get(scanId, workerId, readGroup),
+		);
+	}
+
+	passCoverage(scanId: string, passes: number): PassCoverage[] {
+		return Array.from({ length: passes }, (_, index) => {
+			const pass = index + 1;
+			const group = `pass-${pass}`;
+			const row = this.db
+				.prepare(
+					`SELECT COUNT(*) AS files_in_scope,
+					 SUM(CASE WHEN r.first_touched_at IS NOT NULL THEN 1 ELSE 0 END) AS files_touched,
+					 COALESCE(SUM(f.bytes_total), 0) AS bytes_in_scope,
+					 COALESCE(SUM(MIN(COALESCE(r.bytes_read, 0), f.bytes_total)), 0) AS bytes_read
+					 FROM files f LEFT JOIN file_reads r
+					 ON r.scan_id = f.scan_id AND r.path = f.path AND r.read_group = ?
+					 WHERE f.scan_id = ? AND f.excluded_reason IS NULL`,
+				)
+				.get(group, scanId) as Record<string, number>;
+			const coverage = coverageRow(row);
+			const work = this.db
+				.prepare(
+					`SELECT
+					 COUNT(DISTINCT CASE WHEN type = 'work_started' THEN worker_id END) AS started,
+					 COUNT(DISTINCT CASE WHEN type = 'work_complete' THEN worker_id END) AS completed
+					 FROM scan_events
+					 WHERE scan_id = ? AND json_extract(detail_json, '$.read_group') = ?`,
+				)
+				.get(scanId, group) as { started: number; completed: number };
+			return {
+				pass,
+				...coverage,
+				completed:
+					coverage.bytes_read >= coverage.bytes_in_scope &&
+					work.started > 0 &&
+					work.completed >= work.started,
+			};
+		});
 	}
 
 	coverage(scanId: string): Coverage {
 		const row = this.db
 			.prepare(
 				`SELECT COUNT(*) AS files_in_scope,
-				        SUM(CASE WHEN first_touched_at IS NOT NULL THEN 1 ELSE 0 END) AS files_touched,
-				        COALESCE(SUM(bytes_total), 0) AS bytes_in_scope,
-				        COALESCE(SUM(MIN(bytes_read, bytes_total)), 0) AS bytes_read
-				 FROM files WHERE scan_id = ? AND excluded_reason IS NULL`,
+				 SUM(CASE WHEN r.first_touched_at IS NOT NULL THEN 1 ELSE 0 END) AS files_touched,
+				 COALESCE(SUM(f.bytes_total), 0) AS bytes_in_scope,
+				 COALESCE(SUM(MIN(COALESCE(r.bytes_read, 0), f.bytes_total)), 0) AS bytes_read
+				 FROM files f LEFT JOIN (
+					SELECT path, MAX(bytes_read) AS bytes_read, MIN(first_touched_at) AS first_touched_at
+					FROM file_reads
+					WHERE scan_id = ? AND read_group LIKE 'pass-%' GROUP BY path
+				 ) r ON r.path = f.path
+				 WHERE f.scan_id = ? AND f.excluded_reason IS NULL`,
 			)
-			.get(scanId) as Record<string, number>;
-		return {
-			files_in_scope: row.files_in_scope ?? 0,
-			files_touched: row.files_touched ?? 0,
-			bytes_in_scope: row.bytes_in_scope ?? 0,
-			bytes_read: row.bytes_read ?? 0,
-		};
+			.get(scanId, scanId) as Record<string, number>;
+		return coverageRow(row);
 	}
 
 	excludedCount(scanId: string): number {
@@ -600,8 +590,7 @@ export class Ledger {
 		title: string;
 		cweIds: string[];
 		locations: Location[];
-		summary: string;
-		evidence: string;
+		description: string;
 		instance?: string | null;
 	}): { id: string; merged: boolean } {
 		const hash = identityHash({
@@ -612,25 +601,33 @@ export class Ledger {
 
 		const existing = this.db
 			.prepare(
-				"SELECT * FROM candidates WHERE scan_id = ? AND identity_hash = ? AND merged_into IS NULL",
+				"SELECT * FROM candidates WHERE scan_id = ? AND identity_hash = ? AND duplicate_of IS NULL",
 			)
 			.get(c.scanId, hash) as Record<string, unknown> | undefined;
 
 		if (existing) {
-			const prev = rowToCandidate(existing);
-			this.db
-				.prepare(
-					`UPDATE candidates SET cwe_ids = ?, locations_json = ?, summary = ?, evidence = ?
-					 WHERE scan_id = ? AND id = ?`,
-				)
-				.run(
-					JSON.stringify([...new Set([...prev.cwe_ids, ...c.cweIds])]),
-					JSON.stringify(mergeLocations(prev.locations, c.locations)),
-					mergeProse(prev.summary, c.summary),
-					mergeProse(prev.evidence, c.evidence),
-					c.scanId,
-					prev.id,
-				);
+			const prev = rowToCandidate(existing, this.listCandidateActivities(c.scanId, existing.id as string));
+			this.db.transaction(() => {
+				this.db
+					.prepare(
+						`UPDATE candidates SET cwe_ids = ?, locations_json = ?, description = ?
+						 WHERE scan_id = ? AND id = ?`,
+					)
+					.run(
+						JSON.stringify([...new Set([...prev.cwe_ids, ...c.cweIds])]),
+						JSON.stringify(mergeLocations(prev.locations, c.locations)),
+						mergeProse(prev.description, c.description),
+						c.scanId,
+						prev.id,
+					);
+				this.db
+					.prepare(
+						`INSERT INTO candidate_activity
+						 (scan_id, candidate_id, worker_id, kind, body, created_at)
+						 VALUES (?, ?, ?, 'comment', ?, ?)`,
+					)
+					.run(c.scanId, prev.id, c.workerId, "matching filing merged into this candidate", now());
+			})();
 			return { id: prev.id, merged: true };
 		}
 
@@ -638,9 +635,9 @@ export class Ledger {
 		this.db
 			.prepare(
 				`INSERT INTO candidates
-				 (id, scan_id, worker_id, title, cwe_ids, locations_json, summary, evidence,
-				  instance, identity_hash, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 (id, scan_id, worker_id, title, cwe_ids, locations_json, description,
+				  status, instance, identity_hash, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
 			)
 			.run(
 				id,
@@ -649,8 +646,7 @@ export class Ledger {
 				c.title,
 				JSON.stringify(c.cweIds),
 				JSON.stringify(c.locations),
-				c.summary,
-				c.evidence,
+				c.description,
 				c.instance ?? null,
 				hash,
 				now(),
@@ -658,22 +654,45 @@ export class Ledger {
 		return { id, merged: false };
 	}
 
-	resolveCandidate(scanId: string, id: string, resolution: Resolution): void {
-		this.db
-			.prepare("UPDATE candidates SET resolution_json = ? WHERE scan_id = ? AND id = ?")
-			.run(JSON.stringify(resolution), scanId, id);
-		if (resolution.disposition === "duplicate" && resolution.duplicate_of) {
+	addCandidateActivity(args: {
+		scanId: string;
+		candidateId: string;
+		workerId: string;
+		kind: CandidateActivityKind;
+		body: string;
+		status: CandidateStatus;
+		data?: CandidateActivity["data"];
+		duplicateOf?: string | null;
+	}): void {
+		this.db.transaction(() => {
 			this.db
-				.prepare("UPDATE candidates SET merged_into = ? WHERE scan_id = ? AND id = ?")
-				.run(resolution.duplicate_of, scanId, id);
-		}
+				.prepare(
+					`INSERT INTO candidate_activity
+					 (scan_id, candidate_id, worker_id, kind, body, data_json, created_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(
+					args.scanId,
+					args.candidateId,
+					args.workerId,
+					args.kind,
+					args.body,
+					args.data ? JSON.stringify(args.data) : null,
+					now(),
+				);
+			this.db
+				.prepare(
+					"UPDATE candidates SET status = ?, duplicate_of = ? WHERE scan_id = ? AND id = ?",
+				)
+				.run(args.status, args.duplicateOf ?? null, args.scanId, args.candidateId);
+		})();
 	}
 
 	getCandidate(scanId: string, id: string): Candidate | undefined {
 		const row = this.db
 			.prepare("SELECT * FROM candidates WHERE scan_id = ? AND id = ?")
 			.get(scanId, id) as Record<string, unknown> | undefined;
-		return row ? rowToCandidate(row) : undefined;
+		return row ? rowToCandidate(row, this.listCandidateActivities(scanId, id)) : undefined;
 	}
 
 	listCandidates(scanId: string): Candidate[] {
@@ -681,29 +700,43 @@ export class Ledger {
 			.prepare(
 				"SELECT * FROM candidates WHERE scan_id = ? ORDER BY CAST(SUBSTR(id, 2) AS INTEGER), id")
 			.all(scanId) as Array<Record<string, unknown>>;
-		return rows.map(rowToCandidate);
+		const activities = this.listAllCandidateActivities(scanId);
+		return rows.map((row) => rowToCandidate(row, activities.get(row.id as string) ?? []));
 	}
 
 	listLiveCandidates(scanId: string): Candidate[] {
-		return this.listCandidates(scanId).filter((c) => !c.merged_into);
+		return this.listCandidates(scanId).filter((c) => !c.duplicate_of);
 	}
 
-	recordLead(scanId: string, lead: Lead): void {
-		this.db
+	private listCandidateActivities(scanId: string, candidateId: string): CandidateActivity[] {
+		const rows = this.db
 			.prepare(
-				"INSERT INTO leads (scan_id, worker_id, text, status, created_at) VALUES (?, ?, ?, ?, ?)",
+				`SELECT id, worker_id, kind, body, data_json, created_at
+				 FROM candidate_activity WHERE scan_id = ? AND candidate_id = ? ORDER BY id`,
 			)
-			.run(scanId, lead.worker_id, lead.text, lead.status, now());
+			.all(scanId, candidateId) as Array<Record<string, unknown>>;
+		return rows.map(rowToActivity);
 	}
 
-	listLeads(scanId: string): Lead[] {
-		return this.db
-			.prepare("SELECT worker_id, text, status FROM leads WHERE scan_id = ?")
-			.all(scanId) as Lead[];
+	private listAllCandidateActivities(scanId: string): Map<string, CandidateActivity[]> {
+		const grouped = new Map<string, CandidateActivity[]>();
+		const rows = this.db
+			.prepare(
+				`SELECT id, candidate_id, worker_id, kind, body, data_json, created_at
+				 FROM candidate_activity WHERE scan_id = ? ORDER BY id`,
+			)
+			.all(scanId) as Array<Record<string, unknown>>;
+		for (const row of rows) {
+			const id = row.candidate_id as string;
+			const list = grouped.get(id) ?? [];
+			list.push(rowToActivity(row));
+			grouped.set(id, list);
+		}
+		return grouped;
 	}
 }
 
-function rowToCandidate(row: Record<string, unknown>): Candidate {
+function rowToCandidate(row: Record<string, unknown>, activities: CandidateActivity[]): Candidate {
 	return {
 		id: row.id as string,
 		scan_id: row.scan_id as string,
@@ -711,15 +744,35 @@ function rowToCandidate(row: Record<string, unknown>): Candidate {
 		title: row.title as string,
 		cwe_ids: JSON.parse(row.cwe_ids as string) as string[],
 		locations: JSON.parse(row.locations_json as string) as Location[],
-		summary: row.summary as string,
-		evidence: row.evidence as string,
+		description: (row.description as string | null) ?? "",
+		status: ((row.status as CandidateStatus | null) ?? "open"),
 		created_at: row.created_at as string,
-		resolution: row.resolution_json
-			? (JSON.parse(row.resolution_json as string) as Resolution)
-			: undefined,
-		merged_into: (row.merged_into as string | null) ?? null,
+		activities,
+		duplicate_of: (row.duplicate_of as string | null) ?? null,
 		instance: (row.instance as string | null) ?? null,
 		identity_hash: (row.identity_hash as string | null) ?? null,
+	};
+}
+
+function rowToActivity(row: Record<string, unknown>): CandidateActivity {
+	return {
+		id: row.id as number,
+		worker_id: row.worker_id as string,
+		kind: row.kind as CandidateActivityKind,
+		body: row.body as string,
+		at: row.created_at as string,
+		data: row.data_json
+			? JSON.parse(row.data_json as string) as CandidateActivity["data"]
+			: undefined,
+	};
+}
+
+function coverageRow(row: Record<string, number>): Coverage {
+	return {
+		files_in_scope: row.files_in_scope ?? 0,
+		files_touched: row.files_touched ?? 0,
+		bytes_in_scope: row.bytes_in_scope ?? 0,
+		bytes_read: row.bytes_read ?? 0,
 	};
 }
 
