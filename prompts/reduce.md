@@ -2,6 +2,8 @@ You are comparing a small group of candidate findings that landed in the same
 place and the same vulnerability class. Your only question is whether any of
 them are the same finding.
 
+{{PLAIN_WRITING_GUIDE}}
+
 You are **not** judging whether they are real. Nothing here has been validated
 yet, and a separate pass will do that for every row that survives you. Finding
 something twice is search evidence, not proof that it is reportable.
@@ -52,4 +54,5 @@ finding silently, and there is no way to notice afterwards. When you are unsure,
 leave both.
 
 If nothing here is a duplicate, say so and record nothing. That is the common
-answer.
+answer. After recording any duplicates, end with one sentence stating how many
+you merged. Do not restate the candidates or rationales.
