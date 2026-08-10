@@ -21,6 +21,7 @@ import type { TSchema } from "typebox";
 
 import { opensecDir } from "../db/db.js";
 import { createSubagentTool, type SubagentDeps } from "./subagent.js";
+import { createBashTool, DockerSandbox } from "./docker.js";
 import { createOpensecTool, type RunContext } from "./tool.js";
 
 export interface AgentRunResult {
@@ -93,11 +94,16 @@ export class AgentRunner {
 		private readonly runtime: ModelRuntime,
 		private readonly defaultModelRef: string | undefined,
 		private readonly repoRoot: string,
+		private readonly sandbox: "none" | "docker",
 	) {}
 
-	static async create(opts: { repoRoot: string; modelRef?: string }): Promise<AgentRunner> {
+	static async create(opts: {
+		repoRoot: string;
+		modelRef?: string;
+		sandbox?: "none" | "docker";
+	}): Promise<AgentRunner> {
 		const runtime = await ModelRuntime.create();
-		return new AgentRunner(runtime, opts.modelRef, opts.repoRoot);
+		return new AgentRunner(runtime, opts.modelRef, opts.repoRoot, opts.sandbox ?? "none");
 	}
 
 	resolveModel(ref: string | undefined): ResolvedModel {
@@ -117,6 +123,7 @@ export class AgentRunner {
 		const { ctx } = args;
 		const resolved = this.resolveModel(args.modelRef);
 		const workDir = agentWorkDir();
+		let sandbox: DockerSandbox | undefined;
 
 		// Load-bearing, and nothing tests it: pi trusts <project>/.pi/settings.json
 		// and spawns its npmCommand, and splices .pi/APPEND_SYSTEM.md above our
@@ -137,17 +144,26 @@ export class AgentRunner {
 				"Those tools return repository-relative paths too.",
 				"",
 				args.systemPrompt,
+				...(this.sandbox === "docker"
+					? [
+						"",
+						"You also have an isolated `bash` tool. Use it for targeted builds, tests and reproductions. It runs in a disposable Docker container with no network access. Files you create there exist only in that container; inspect them with bash.",
+					]
+					: []),
 			].join("\n"),
 			appendSystemPrompt: [],
 		});
 		await resourceLoader.reload();
 
+		try {
+			if (this.sandbox === "docker") sandbox = await DockerSandbox.create(this.repoRoot);
 		const tools: AnyToolDef[] = [
 			instrumentRead(confine(createReadToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			instrumentGrep(confine(createGrepToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			rootRelativeResults(confine(createFindToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			rootRelativeResults(confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
 			createOpensecTool(ctx) as AnyToolDef,
+			...(sandbox ? [createBashTool(sandbox) as AnyToolDef] : []),
 		];
 
 		if (args.subagents) {
@@ -306,6 +322,15 @@ export class AgentRunner {
 			}
 			unsubscribe();
 			session.dispose();
+		}
+		} finally {
+			if (sandbox) {
+				try {
+					await sandbox.dispose();
+				} catch (err) {
+					args.onEvent?.(`  warning: could not remove Docker sandbox — ${(err as Error).message}`);
+				}
+			}
 		}
 	}
 }
