@@ -7,11 +7,17 @@ import { createServer, type Server } from "node:net";
 
 import { runOpensec, type RunContext, type Verb } from "./tool.js";
 
-const MAX_REQUEST_BYTES = 128_000;
+const MAX_REQUEST_BYTES = 1_000_000;
 
 export interface SandboxBridgeMount {
 	mountDir: string;
 	token: string;
+	verbs: string;
+	worker: string;
+}
+
+export interface BridgeOptions {
+	cliPath?: string;
 }
 
 type Request = { token?: unknown; verb?: unknown; params?: unknown };
@@ -23,15 +29,17 @@ export class OpensecBridge {
 		private readonly server: Server,
 		private readonly dir: string,
 		token: string,
+		verbs: readonly Verb[],
+		worker: string,
 	) {
-		this.mount = { mountDir: dir, token };
+		this.mount = { mountDir: dir, token, verbs: verbs.join(","), worker };
 	}
 
-	static async create(ctx: RunContext): Promise<OpensecBridge> {
+	static async create(ctx: RunContext, opts: BridgeOptions = {}): Promise<OpensecBridge> {
 		const dir = mkdtempSync(join(tmpdir(), "opensec-bridge-"));
 		const socket = join(dir, "opensec.sock");
 		const token = randomBytes(32).toString("base64url");
-		copyFileSync(cliPath(), join(dir, "opensec-cli.js"));
+		copyFileSync(opts.cliPath ?? compiledCliPath(), join(dir, "opensec-cli.js"));
 		chmodSync(dir, 0o755);
 
 		const server = createServer((connection) => {
@@ -40,7 +48,7 @@ export class OpensecBridge {
 			connection.on("data", (chunk: string) => {
 				body += chunk;
 				if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) {
-					connection.end(JSON.stringify({ ok: false, error: "request exceeds 128 KB" }) + "\n");
+					connection.end(JSON.stringify({ ok: false, error: "request exceeds 1 MB" }) + "\n");
 					return;
 				}
 				const newline = body.indexOf("\n");
@@ -57,7 +65,7 @@ export class OpensecBridge {
 			});
 		});
 		chmodSync(socket, 0o666);
-		return new OpensecBridge(server, dir, token);
+		return new OpensecBridge(server, dir, token, ctx.verbs ?? [], ctx.workerId);
 	}
 
 	async dispose(): Promise<void> {
@@ -66,9 +74,10 @@ export class OpensecBridge {
 	}
 }
 
-function cliPath(): string {
+function compiledCliPath(): string {
 	const compiled = fileURLToPath(new URL("./opensec-cli.js", import.meta.url));
-	return existsSync(compiled) ? compiled : fileURLToPath(new URL("./opensec-cli.ts", import.meta.url));
+	if (!existsSync(compiled)) throw new Error("compiled OpenSec CLI is missing; run npm run build first");
+	return compiled;
 }
 
 function reply(ctx: RunContext, token: string, raw: string): string {

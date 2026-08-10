@@ -149,7 +149,7 @@ export class AgentRunner {
 				...(this.sandbox === "docker"
 					? [
 						"",
-						"You also have an isolated `bash` tool. Use it for targeted builds, tests and reproductions. It runs in a disposable Docker container with no network access. Files you create there exist only in that container; inspect them with bash. Record review work through the `opensec` CLI in bash: `opensec work.next`; use `--json-file` for non-trivial command input. The `opensec({...})` notation in older prompt text means the equivalent CLI command.",
+						"You also have an isolated `bash` tool. Use it for targeted builds, tests and reproductions. It runs in a disposable Docker container with no network access. Files you create there exist only in that container; inspect them with bash. Record review work through the `opensec` CLI in bash. Start with `opensec work next`; run `opensec help` for commands available in this pass. For complex candidate records, write JSON to a file and use `opensec candidate create --input /tmp/candidate.json` or `opensec candidate assess --input /tmp/assessment.json`. Do not call an `opensec({...})` function in this run.",
 					]
 					: []),
 			].join("\n"),

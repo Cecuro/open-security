@@ -74,6 +74,10 @@ export class DockerSandbox {
 						"OPENSEC_SOCKET=/run/opensec/opensec.sock",
 						"--env",
 						`OPENSEC_TOKEN=${opts.bridge.token}`,
+						"--env",
+						`OPENSEC_VERBS=${opts.bridge.verbs}`,
+						"--env",
+						`OPENSEC_WORKER=${opts.bridge.worker}`,
 					]
 					: []),
 				image,
@@ -85,20 +89,19 @@ export class DockerSandbox {
 
 			const started = await command("docker", ["start", name]);
 			if (started.exitCode !== 0) throw new Error(dockerError("start", started));
-			const madeWorkspace = await command("docker", ["exec", name, "mkdir", "-p", "/workspace"]);
+			const madeWorkspace = await command("docker", ["exec", "--user", "0", name, "mkdir", "-p", "/workspace"]);
 			if (madeWorkspace.exitCode !== 0) throw new Error(dockerError("prepare the workspace", madeWorkspace));
 			const copied = await command("docker", ["cp", repoRoot, `${name}:/workspace/repo`]);
 			if (copied.exitCode !== 0) throw new Error(dockerError("copy the repository", copied));
-			const ownership = await command("docker", ["exec", name, "chown", "-R", `${user}:${user}`, "/workspace/repo"]);
-			if (ownership.exitCode !== 0) {
-				throw new Error(
-					`Docker image '${image}' must provide sandbox user '${user}'. ` +
-						"Set OPENSEC_SANDBOX_USER to the image's unprivileged user.",
-				);
-			}
+			// docker cp creates destination files as root. Leave capabilities dropped and
+			// make the disposable copy writable instead of chowning it for the agent.
+			const permissions = await command("docker", ["exec", "--user", "0", name, "chmod", "-R", "u+rwX,go+rwX", "/workspace/repo"]);
+			if (permissions.exitCode !== 0) throw new Error(dockerError("prepare repository permissions", permissions));
 			if (opts.bridge) {
 				const installed = await command("docker", [
 					"exec",
+					"--user",
+					"0",
 					name,
 					"sh",
 					"-c",
