@@ -75,7 +75,7 @@ export class OpensecBridge {
 }
 
 function compiledCliPath(): string {
-	const compiled = fileURLToPath(new URL("./opensec-cli.js", import.meta.url));
+	const compiled = fileURLToPath(new URL("../cli/agent.js", import.meta.url));
 	if (!existsSync(compiled)) throw new Error("compiled OpenSec CLI is missing; run npm run build first");
 	return compiled;
 }

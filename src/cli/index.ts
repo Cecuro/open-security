@@ -3,6 +3,7 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { isAgentCliCommand, runAgentCli } from "./agent.js";
 import { Ledger } from "../db/db.js";
 import { describeEnv, loadEnv, piAuthPath } from "../env.js";
 import { renderExport, type ExportFormat } from "../scan/export.js";
@@ -69,6 +70,9 @@ written, and only --refresh-threat-model overwrites it.
 
 async function main(argv: string[]): Promise<number> {
 	const [command, ...rest] = argv;
+	if (isAgentCliCommand(command) || (command === "help" && isAgentCliCommand(rest[0]))) {
+		return runAgentCli(argv);
+	}
 
 	// Before anything resolves a model. Values already in the environment win, so
 	// this only fills gaps.
