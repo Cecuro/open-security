@@ -1,6 +1,6 @@
-import { chmodSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -23,7 +23,8 @@ import { opensecDir } from "../db/db.js";
 import { OpensecBridge } from "./bridge.js";
 import { createSubagentTool, type SubagentDeps } from "./subagent.js";
 import { createBashTool, DockerSandbox } from "./docker.js";
-import { createOpensecTool, type RunContext } from "./tool.js";
+import { LocalSandbox } from "./local.js";
+import type { RunContext } from "./tool.js";
 
 export interface AgentRunResult {
 	text: string;
@@ -95,16 +96,16 @@ export class AgentRunner {
 		private readonly runtime: ModelRuntime,
 		private readonly defaultModelRef: string | undefined,
 		private readonly repoRoot: string,
-		private readonly sandbox: "none" | "docker",
+		private readonly sandbox: "local" | "docker",
 	) {}
 
 	static async create(opts: {
 		repoRoot: string;
 		modelRef?: string;
-		sandbox?: "none" | "docker";
+		sandbox?: "local" | "docker";
 	}): Promise<AgentRunner> {
 		const runtime = await ModelRuntime.create();
-		return new AgentRunner(runtime, opts.modelRef, opts.repoRoot, opts.sandbox ?? "none");
+		return new AgentRunner(runtime, opts.modelRef, opts.repoRoot, opts.sandbox ?? "local");
 	}
 
 	resolveModel(ref: string | undefined): ResolvedModel {
@@ -124,7 +125,7 @@ export class AgentRunner {
 		const { ctx } = args;
 		const resolved = this.resolveModel(args.modelRef);
 		const workDir = agentWorkDir();
-		let sandbox: DockerSandbox | undefined;
+		let sandbox: DockerSandbox | LocalSandbox | undefined;
 		let bridge: OpensecBridge | undefined;
 
 		// Load-bearing, and nothing tests it: pi trusts <project>/.pi/settings.json
@@ -142,201 +143,215 @@ export class AgentRunner {
 			noThemes: true,
 			systemPrompt: [
 				`Repository root: ${this.repoRoot}`,
-				"Use repository-relative paths for read, grep, find, and ls (for example, src/handler.ts).",
-				"Those tools return repository-relative paths too.",
+				"File tools use repository-relative paths. Reuse paths returned by find, grep, or ls unchanged.",
+				"read takes one file, find takes a glob, and grep takes a regex; set literal: true for exact code text.",
 				"",
 				args.systemPrompt,
+				"",
 				...(this.sandbox === "docker"
 					? [
-						"",
-						"You also have an isolated `bash` tool. Use it for targeted builds, tests and reproductions. It runs in a disposable Docker container with no network access. Files you create there exist only in that container; inspect them with bash. Record review work through the `opensec` CLI in bash. Start with `opensec work next`; run `opensec help` for commands available in this pass. For complex candidate records, write JSON to a file and use `opensec candidate create --input /tmp/candidate.json` or `opensec candidate assess --input /tmp/assessment.json`. Do not call an `opensec({...})` function in this run.",
+						"Bash runs with no network in a writable Docker copy at /workspace/repo. Container changes are visible only to bash.",
 					]
-					: []),
+					: ["Bash runs on the host in the checked-out repository. Any file changes persist in the user's working tree."]),
+				"Use bash for compound searches, builds, tests, and reproductions. Keep read for assigned-file review because read records coverage.",
+				"Record work with the opensec CLI in bash. Start with `opensec work next`; run `opensec help` for the commands in this pass. For complex records, write JSON to a file and pass it with `--input`. There is no opensec function tool.",
 			].join("\n"),
 			appendSystemPrompt: [],
 		});
 		await resourceLoader.reload();
 
 		try {
-			if (this.sandbox === "docker") {
-				bridge = await OpensecBridge.create(ctx);
-				sandbox = await DockerSandbox.create(this.repoRoot, { bridge: bridge.mount });
+			const workspace = this.sandbox === "docker" ? "/workspace/repo" : this.repoRoot;
+			bridge = await OpensecBridge.create(ctx, { workspace });
+			sandbox =
+				this.sandbox === "docker"
+					? await DockerSandbox.create(this.repoRoot, { bridge: bridge.mount })
+					: await LocalSandbox.create(this.repoRoot, bridge.mount);
+			const tools: AnyToolDef[] = [
+				instrumentRead(confine(createReadToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
+				instrumentGrep(confine(createGrepToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
+				rootRelativeResults(confine(createFindToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
+				rootRelativeResults(confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
+				createBashTool(
+					sandbox,
+					this.sandbox === "docker"
+						? `Run Bash with no network in the writable Docker copy at ${sandbox.repoDir}. Commands run for at most 10 minutes. Large output is saved in the container for later inspection.`
+						: `Run Bash on the host in ${sandbox.repoDir}. Changes affect the user's working tree. Commands run for at most 10 minutes.`,
+				) as AnyToolDef,
+			];
+
+			if (args.subagents) {
+				const delegate = createSubagentTool(ctx, args.subagents);
+				if (delegate) tools.push(delegate as AnyToolDef);
 			}
-		const tools: AnyToolDef[] = [
-			instrumentRead(confine(createReadToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
-			instrumentGrep(confine(createGrepToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
-			rootRelativeResults(confine(createFindToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
-			rootRelativeResults(confine(createLsToolDefinition(this.repoRoot) as AnyToolDef, ctx), ctx),
-			...(sandbox ? [] : [createOpensecTool(ctx) as AnyToolDef]),
-			...(sandbox ? [createBashTool(sandbox) as AnyToolDef] : []),
-		];
 
-		if (args.subagents) {
-			const delegate = createSubagentTool(ctx, args.subagents);
-			if (delegate) tools.push(delegate as AnyToolDef);
-		}
+			const { session } = await createAgentSession({
+				// The agent and every file tool share the scanned repository as their
+				// working directory. The resource loader above stays isolated so a
+				// repository cannot load its own PI configuration or prompts.
+				cwd: this.repoRoot,
+				model: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
+				modelRuntime: this.runtime,
+				resourceLoader,
+				settingsManager,
+				sessionManager: SessionManager.inMemory(this.repoRoot),
+				noTools: "builtin",
+				customTools: tools,
+			});
 
-		const { session } = await createAgentSession({
-			// The agent and every file tool share the scanned repository as their
-			// working directory. The resource loader above stays isolated so a
-			// repository cannot load its own PI configuration or prompts.
-			cwd: this.repoRoot,
-			model: resolved.model,
-			thinkingLevel: resolved.thinkingLevel,
-			modelRuntime: this.runtime,
-			resourceLoader,
-			settingsManager,
-			sessionManager: SessionManager.inMemory(this.repoRoot),
-			noTools: "builtin",
-			customTools: tools,
-		});
-
-		const failures: string[] = [];
-		let reported: UsageDelta = emptyUsage();
-		let stoppedAtBudget = false;
-		const reportUsage = (usage: UsageDelta): void => {
-			if (usage.tokensIn === 0 && usage.tokensOut === 0 && usage.costUsd === 0) return;
-			reported = {
-				tokensIn: reported.tokensIn + usage.tokensIn,
-				tokensOut: reported.tokensOut + usage.tokensOut,
-				costUsd: reported.costUsd + usage.costUsd,
-				inputTokens: reported.inputTokens + usage.inputTokens,
-				cacheReadTokens: reported.cacheReadTokens + usage.cacheReadTokens,
-				cacheWriteTokens: reported.cacheWriteTokens + usage.cacheWriteTokens,
-				cacheCostUsd: reported.cacheCostUsd + usage.cacheCostUsd,
-				cacheSavingsUsd: reported.cacheSavingsUsd + usage.cacheSavingsUsd,
-			};
-			if (args.onUsage?.(usage) === false && !stoppedAtBudget) {
-				stoppedAtBudget = true;
-				void session.abort().catch(() => {});
-			}
-			ctx.ledger.recordEvent(
-				ctx.scanId,
-				"model_usage",
-				{ ...usage, model: `${resolved.model.provider}/${resolved.model.id}` },
-				ctx.workerId,
-			);
-		};
-		ctx.ledger.recordEvent(
-			ctx.scanId,
-			"agent_start",
-			{ model: `${resolved.model.provider}/${resolved.model.id}`, thinking: resolved.thinkingLevel ?? "medium" },
-			ctx.workerId,
-		);
-		const maxTurns = args.maxTurns ?? DEFAULT_MAX_TURNS;
-		let turns = 0;
-		let stoppedAtTurnLimit = false;
-
-		const unsubscribe = session.subscribe((event) => {
-			if (event.type === "turn_end") {
-				const usage = usageOf(event.message, resolved.model);
-				if (usage) reportUsage(usage);
-				for (const result of event.toolResults) {
-					if (!result.isError) continue;
-					ctx.ledger.recordEvent(
-						ctx.scanId,
-						"tool_error",
-						{ tool: result.toolName, error: resultText(result).slice(0, 500) },
-						ctx.workerId,
-					);
-				}
-				return;
-			}
-			if (event.type === "turn_start") {
-				turns += 1;
-				if (turns > maxTurns && !stoppedAtTurnLimit) {
-					stoppedAtTurnLimit = true;
-					// Not awaited: abort() waits for idle and we are inside a listener.
-					// The catch is not optional — an unhandled rejection here exits.
+			const failures: string[] = [];
+			let reported: UsageDelta = emptyUsage();
+			let stoppedAtBudget = false;
+			const reportUsage = (usage: UsageDelta): void => {
+				if (usage.tokensIn === 0 && usage.tokensOut === 0 && usage.costUsd === 0) return;
+				reported = {
+					tokensIn: reported.tokensIn + usage.tokensIn,
+					tokensOut: reported.tokensOut + usage.tokensOut,
+					costUsd: reported.costUsd + usage.costUsd,
+					inputTokens: reported.inputTokens + usage.inputTokens,
+					cacheReadTokens: reported.cacheReadTokens + usage.cacheReadTokens,
+					cacheWriteTokens: reported.cacheWriteTokens + usage.cacheWriteTokens,
+					cacheCostUsd: reported.cacheCostUsd + usage.cacheCostUsd,
+					cacheSavingsUsd: reported.cacheSavingsUsd + usage.cacheSavingsUsd,
+				};
+				if (args.onUsage?.(usage) === false && !stoppedAtBudget) {
+					stoppedAtBudget = true;
 					void session.abort().catch(() => {});
 				}
-				return;
-			}
-			// Without this a provider 404 reads as "the probe found nothing" and the
-			// scan completes clean. willRetry excludes blips pi recovers from.
-			if (event.type !== "agent_end" || event.willRetry) return;
-			const err = (event.messages.at(-1) as { errorMessage?: string } | undefined)?.errorMessage;
-			if (err) failures.push(err);
-		});
-
-		try {
-			try {
-				await session.prompt(args.prompt, { expandPromptTemplates: false });
-				await session.waitForIdle();
-			} catch (err) {
-				if (!stoppedAtTurnLimit && !stoppedAtBudget) throw err;
-			}
-			if (stoppedAtBudget) {
-				throw new Error(`budget exhausted during ${ctx.workerId}; usage up to this response is recorded`);
-			}
-
-			if (failures.length > 0 && !stoppedAtTurnLimit) {
-				throw new Error(`agent run failed: ${failures[0]}`);
-			}
-
-			const stats = session.getSessionStats();
-			const cache = cacheCosts(session.messages, resolved.model);
-			const total: UsageDelta = {
-				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
-				tokensOut: stats.tokens.output,
-				costUsd: stats.cost,
-				inputTokens: stats.tokens.input,
-				cacheReadTokens: stats.tokens.cacheRead,
-				cacheWriteTokens: stats.tokens.cacheWrite,
-				cacheCostUsd: cache.costUsd,
-				cacheSavingsUsd: cache.savingsUsd,
+				ctx.ledger.recordEvent(
+					ctx.scanId,
+					"model_usage",
+					{ ...usage, model: `${resolved.model.provider}/${resolved.model.id}` },
+					ctx.workerId,
+				);
 			};
-			reportUsage(subtractUsage(total, reported));
 			ctx.ledger.recordEvent(
 				ctx.scanId,
-				"agent_end",
-				{ stoppedAtTurnLimit, ...total },
+				"agent_start",
+				{ model: `${resolved.model.provider}/${resolved.model.id}`, thinking: resolved.thinkingLevel ?? "medium" },
 				ctx.workerId,
 			);
-			return {
-				text: session.getLastAssistantText() ?? "",
-				tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
-				tokensOut: stats.tokens.output,
-				costUsd: stats.cost,
-				inputTokens: stats.tokens.input,
-				cacheReadTokens: stats.tokens.cacheRead,
-				cacheWriteTokens: stats.tokens.cacheWrite,
-				cacheCostUsd: cache.costUsd,
-				cacheSavingsUsd: cache.savingsUsd,
-				...(stoppedAtTurnLimit ? { stoppedAtTurnLimit: true } : {}),
-			};
-		} catch (err) {
-			ctx.ledger.recordEvent(
-				ctx.scanId,
-				"agent_error",
-				{ error: (err as Error).message, stoppedAtTurnLimit, stoppedAtBudget },
-				ctx.workerId,
-			);
-			throw err;
-		} finally {
-			if (args.tracePath) {
-				try {
-					mkdirSync(dirname(args.tracePath), { recursive: true, mode: 0o700 });
-					session.exportToJsonl(args.tracePath);
-					chmodSync(args.tracePath, 0o600);
-				} catch (err) {
-					args.onEvent?.(
-						`  warning: no transcript for ${ctx.workerId} — ${(err as Error).message}`,
-					);
+			const maxTurns = args.maxTurns ?? DEFAULT_MAX_TURNS;
+			let turns = 0;
+			let stoppedAtTurnLimit = false;
+
+			const unsubscribe = session.subscribe((event) => {
+				if (event.type === "turn_end") {
+					const usage = usageOf(event.message, resolved.model);
+					if (usage) reportUsage(usage);
+					for (const result of event.toolResults) {
+						if (!result.isError) continue;
+						ctx.ledger.recordEvent(
+							ctx.scanId,
+							"tool_error",
+							{ tool: result.toolName, error: resultText(result).slice(0, 500) },
+							ctx.workerId,
+						);
+					}
+					return;
 				}
+				if (event.type === "turn_start") {
+					turns += 1;
+					if (turns > maxTurns && !stoppedAtTurnLimit) {
+						stoppedAtTurnLimit = true;
+						// Not awaited: abort() waits for idle and we are inside a listener.
+						// The catch is not optional — an unhandled rejection here exits.
+						void session.abort().catch(() => {});
+					}
+					return;
+				}
+				// Without this a provider 404 reads as "the probe found nothing" and the
+				// scan completes clean. willRetry excludes blips pi recovers from.
+				if (event.type !== "agent_end" || event.willRetry) return;
+				const err = (event.messages.at(-1) as { errorMessage?: string } | undefined)?.errorMessage;
+				if (err) failures.push(err);
+			});
+
+			try {
+				try {
+					await session.prompt(args.prompt, { expandPromptTemplates: false });
+					await session.waitForIdle();
+				} catch (err) {
+					if (!stoppedAtTurnLimit && !stoppedAtBudget) throw err;
+				}
+				if (stoppedAtBudget) {
+					throw new Error(`budget exhausted during ${ctx.workerId}; usage up to this response is recorded`);
+				}
+
+				if (failures.length > 0 && !stoppedAtTurnLimit) {
+					throw new Error(`agent run failed: ${failures[0]}`);
+				}
+
+				const stats = session.getSessionStats();
+				const cache = cacheCosts(session.messages, resolved.model);
+				const total: UsageDelta = {
+					tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
+					tokensOut: stats.tokens.output,
+					costUsd: stats.cost,
+					inputTokens: stats.tokens.input,
+					cacheReadTokens: stats.tokens.cacheRead,
+					cacheWriteTokens: stats.tokens.cacheWrite,
+					cacheCostUsd: cache.costUsd,
+					cacheSavingsUsd: cache.savingsUsd,
+				};
+				reportUsage(subtractUsage(total, reported));
+				ctx.ledger.recordEvent(
+					ctx.scanId,
+					"agent_end",
+					{ stoppedAtTurnLimit, ...total },
+					ctx.workerId,
+				);
+				return {
+					text: session.getLastAssistantText() ?? "",
+					tokensIn: stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite,
+					tokensOut: stats.tokens.output,
+					costUsd: stats.cost,
+					inputTokens: stats.tokens.input,
+					cacheReadTokens: stats.tokens.cacheRead,
+					cacheWriteTokens: stats.tokens.cacheWrite,
+					cacheCostUsd: cache.costUsd,
+					cacheSavingsUsd: cache.savingsUsd,
+					...(stoppedAtTurnLimit ? { stoppedAtTurnLimit: true } : {}),
+				};
+			} catch (err) {
+				ctx.ledger.recordEvent(
+					ctx.scanId,
+					"agent_error",
+					{ error: (err as Error).message, stoppedAtTurnLimit, stoppedAtBudget },
+					ctx.workerId,
+				);
+				throw err;
+			} finally {
+				if (args.tracePath) {
+					try {
+						mkdirSync(dirname(args.tracePath), { recursive: true, mode: 0o700 });
+						session.exportToJsonl(args.tracePath);
+						chmodSync(args.tracePath, 0o600);
+					} catch (err) {
+						args.onEvent?.(
+							`  warning: no transcript for ${ctx.workerId} — ${(err as Error).message}`,
+						);
+					}
+				}
+				unsubscribe();
+				session.dispose();
 			}
-			unsubscribe();
-			session.dispose();
-		}
 		} finally {
 			if (sandbox) {
 				try {
 					await sandbox.dispose();
 				} catch (err) {
-					args.onEvent?.(`  warning: could not remove Docker sandbox — ${(err as Error).message}`);
+					args.onEvent?.(`  warning: could not remove execution workspace — ${(err as Error).message}`);
 				}
 			}
-			if (bridge) await bridge.dispose();
+			if (bridge) {
+				try {
+					await bridge.dispose();
+				} catch (err) {
+					args.onEvent?.(`  warning: could not remove OpenSec bridge — ${(err as Error).message}`);
+				}
+			}
 		}
 	}
 }
@@ -397,7 +412,7 @@ function piUsage(message: unknown): PiUsage | undefined {
 
 type AnyToolDef = ToolDefinition<TSchema, unknown, unknown>;
 
-function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
+export function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 	const inner = def.execute.bind(def);
 	return {
 		...def,
@@ -405,17 +420,46 @@ function confine(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			const path = (params as { path?: unknown } | undefined)?.path;
 			const resolvedPath = typeof path === "string" ? resolveToolPath(ctx, path) : path;
 			if (typeof resolvedPath === "string" && resolvedPath.length > 0 && !readableFrom(ctx, resolvedPath)) {
+				if (typeof path === "string" && (path === "/workspace/repo" || path.startsWith("/workspace/repo/"))) {
+					const relativePath = path.slice("/workspace/repo".length).replace(/^\//, "") || ".";
+					throw new Error(
+						`'${path}' is a Docker bash path. File tools use repository-relative paths; pass '${relativePath}'.`,
+					);
+				}
 				throw new Error(
 					`'${path}' is outside the repository under review. ` +
 						`This scan may only read inside ${ctx.repoRoot}` +
 						`${ctx.overflowDir ? ` and ${ctx.overflowDir}` : ""}.`,
 				);
 			}
+			const problem = fileToolPathProblem(def.name, resolvedPath);
+			if (problem) throw new Error(problem);
 			const next =
 				typeof resolvedPath === "string" ? { ...(params as object), path: resolvedPath } : params;
 			return inner(id, next, signal, onUpdate, extCtx);
 		},
 	} as AnyToolDef;
+}
+
+function fileToolPathProblem(tool: string, path: unknown): string | undefined {
+	if (typeof path !== "string" || path.length === 0) return undefined;
+	if (!existsSync(path)) {
+		const name = basename(path);
+		if (tool === "read") {
+			return (
+				`No file exists at this repository-relative path. read takes one file path. ` +
+				`Call find with pattern '**/${name}', then pass the returned path to read unchanged.`
+			);
+		}
+		return (
+			`No path exists at this repository-relative location. ` +
+			`Use find from '.' to locate '${name}', then reuse the returned path unchanged.`
+		);
+	}
+	if (tool === "read" && !statSync(path).isFile()) {
+		return "read takes one file, not a directory. Call ls on this path, then read a returned file path unchanged.";
+	}
+	return undefined;
 }
 
 /** Resolve agent paths from the scanned repository's root. */
@@ -515,7 +559,18 @@ export function instrumentGrep(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 				typeof normalizedAsked === "string"
 					? { ...(params as object), path: normalizedAsked }
 					: params;
-			const result = await inner(id, next, signal, onUpdate, extCtx);
+			let result;
+			try {
+				result = await inner(id, next, signal, onUpdate, extCtx);
+			} catch (err) {
+				const message = (err as Error).message;
+				if (/regular expression|regex|parse error/i.test(message)) {
+					throw new Error(
+						`${message}. grep takes a regular expression; set literal: true to search for exact code text.`,
+					);
+				}
+				throw err;
+			}
 			const searchRoot = resolve(
 				ctx.repoRoot,
 				normalizeLikePi(

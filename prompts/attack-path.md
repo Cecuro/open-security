@@ -50,8 +50,8 @@ listed do not stop it.
   controls list is empty. It is checked against both.
 - `code_execution_proven` — only ever true if you *executed* something and it
   worked. Reading code is not proof.
-- `method` — how you concluded. `code_reading` is the honest answer for a static
-  review, and it is bound to a confidence of 0.3. That is correct: a static
+- `method` — how you concluded. `code_reading` is the honest answer when you did
+  not reproduce the issue, and it is bound to a confidence of 0.3. A code-only
   trace of a frightening CWE is not a 0.9.
 
 ## Suppression

@@ -22,14 +22,14 @@ function setup(over: Partial<RunContext> = {}) {
 
 	const ledger = Ledger.open(join(base, "l.db"));
 	const repoId = ledger.upsertRepo(root, "r", null);
-	ledger.createScan({ id: "s", repoId, revision: null, profile: "static", configHash: "c" });
+	ledger.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
 	ledger.insertFiles("s", [{ path: "app.js", sha: "1", bytes: 6, excludedReason: null }]);
 
 	const ctx: RunContext = {
 		scanId: "s",
 		workerId: "probe-1",
 		repoRoot: root,
-		profile: "static",
+		profile: "local",
 		ledger,
 		nonce: "N",
 		...over,

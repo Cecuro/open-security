@@ -34,9 +34,9 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
 
 Options
   --model <ref>        provider/model, e.g. azure-openai-responses/gpt-5.4
-  --profile <p>        static (default) | container (Docker sandbox with bash)
+  --profile <p>        container (default, isolated) | local (Bash on the host)
                        Container requires Docker. Set OPENSEC_SANDBOX_IMAGE and
-                       OPENSEC_SANDBOX_USER for a custom image, which must include Node 20+.
+                       OPENSEC_SANDBOX_USER for a custom image, which must include Bash and Node 20+.
   --db <path>          ledger location (default ~/.opensec/opensec.db)
   --prompts <dir>      override the prompt pack
   --max-files <n>      refuse rather than run away on a monorepo
@@ -249,7 +249,7 @@ async function main(argv: string[]): Promise<number> {
 	const bad = rejectMissingValues(opts);
 	if (bad) return fail(bad);
 
-	const PROFILES: Profile[] = ["static", "container"];
+	const PROFILES: Profile[] = ["container", "local"];
 	const profileFlag = opts.flags.profile;
 	if (profileFlag !== undefined && !PROFILES.includes(profileFlag as Profile)) {
 		process.stderr.write(`opensec: unknown profile '${profileFlag}'. Use: ${PROFILES.join(" | ")}\n`);
@@ -292,7 +292,7 @@ async function main(argv: string[]): Promise<number> {
 		exclude,
 		model: opts.flags.model,
 		db: opts.flags.db,
-		profile: (profileFlag as Profile | undefined) ?? "static",
+		profile: (profileFlag as Profile | undefined) ?? "container",
 		scope,
 		promptsDir: opts.flags.prompts,
 		...parsed,

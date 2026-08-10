@@ -113,17 +113,14 @@ describe("critical is a promotion from observable inputs", () => {
 		expect(computeSeverity({ ...base, network_reachable: false }).severity).toBe("high");
 	});
 
-	it("reaches critical statically via a traced path, but marks the proof gap", () => {
+	it("reaches critical from a traced path, but marks the proof gap", () => {
 		const r = computeSeverity({ ...base, traced_path_no_control: true });
 		expect(r.severity).toBe("critical");
 		expect(r.proof_gap).toBe("no_execution");
 	});
 
 	it("reaches critical cleanly when execution was proven in a container", () => {
-		const r = computeSeverity(
-			{ ...base, code_execution_proven: true, method: "reproduced_poc" },
-			"container",
-		);
+		const r = computeSeverity({ ...base, code_execution_proven: true, method: "reproduced_poc" });
 		expect(r.severity).toBe("critical");
 		expect(r.proof_gap).toBeUndefined();
 		expect(r.confidence).toBe(1.0);
@@ -131,20 +128,8 @@ describe("critical is a promotion from observable inputs", () => {
 });
 
 describe("confidence is bound to method", () => {
-	it("caps a static review at code-reading confidence", () => {
+	it("assigns code reading its lower confidence", () => {
 		const r = computeSeverity({ ...base, method: "code_reading" });
 		expect(r.confidence).toBe(0.3);
-	});
-
-	it("ignores an execution claim that the static profile cannot support", () => {
-		const r = computeSeverity(
-			{ ...base, code_execution_proven: true, method: "reproduced_poc" },
-			"static",
-		);
-		expect(r.confidence).toBe(0.3);
-		expect(r.rationale.join(" ")).toContain("static profile");
-		// And the execution claim buys no severity either: without a traced path or
-		// a tenant crossing there is no second route, so it stops at high.
-		expect(r.severity).toBe("high");
 	});
 });

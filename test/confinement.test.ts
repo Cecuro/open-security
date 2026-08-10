@@ -28,11 +28,14 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+	confine,
+	instrumentGrep,
 	normalizeLikePi,
 	resolveToolPath,
 	rootRelativeResults,
 	withinRepo,
 } from "../src/agents/session.js";
+import type { RunContext } from "../src/agents/tool.js";
 
 const repo = realpathSync(mkdtempSync(join(tmpdir(), "opensec-confine-")));
 mkdirSync(join(repo, "src", "handlers"), { recursive: true });
@@ -184,5 +187,43 @@ describe("agent-visible tool results use repository-relative paths", () => {
 			{ path: "src" },
 		);
 		expect(text).toContain("src/handlers/");
+	});
+});
+
+describe("file tool errors explain the shared path contract", () => {
+	const ctx = { repoRoot: repo } as RunContext;
+
+	it("tells read how to recover from a missing path", async () => {
+		await expect(
+			runTool(confine(createReadToolDefinition(repo) as never, ctx), {
+				path: "wrong/upload.ts",
+			}),
+		).rejects.toThrow("Call find with pattern '**/upload.ts', then pass the returned path to read unchanged");
+	});
+
+	it("tells read to list a directory before selecting a file", async () => {
+		await expect(
+			runTool(confine(createReadToolDefinition(repo) as never, ctx), { path: "src" }),
+		).rejects.toThrow("Call ls on this path, then read a returned file path unchanged");
+	});
+
+	it("distinguishes Docker bash paths from file tool paths", async () => {
+		await expect(
+			runTool(confine(createReadToolDefinition(repo) as never, ctx), {
+				path: "/workspace/repo/src/handlers/upload.ts",
+			}),
+		).rejects.toThrow("File tools use repository-relative paths; pass 'src/handlers/upload.ts'");
+	});
+
+	it("suggests literal grep for exact code text after a regex error", async () => {
+		const brokenGrep = {
+			name: "grep",
+			execute: async () => {
+				throw new Error("Invalid regular expression");
+			},
+		};
+		await expect(runTool(instrumentGrep(brokenGrep as never, ctx), { pattern: "[" })).rejects.toThrow(
+			"set literal: true to search for exact code text",
+		);
 	});
 });

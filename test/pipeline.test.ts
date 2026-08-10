@@ -32,7 +32,7 @@ describe("the M0 loop, without a model", () => {
 			id: SCAN,
 			repoId,
 			revision: "deadbeef",
-			profile: "static",
+			profile: "local",
 			configHash: "cfg",
 		});
 		ledger.insertFiles(
@@ -49,7 +49,7 @@ describe("the M0 loop, without a model", () => {
 			scanId: SCAN,
 			workerId: "probe-1",
 			repoRoot: FIXTURE,
-			profile: "static",
+			profile: "local",
 			ledger,
 			nonce: "N0NCE",
 		};
@@ -171,16 +171,13 @@ describe("the M0 loop, without a model", () => {
 		expect(md).toContain("2 / 2 files touched");
 		expect(md).toContain("laziness detector");
 		expect(md).toContain("Leads that went nowhere");
-		// The static profile must say so in the report, not just in the config.
-		expect(md).toContain("Nothing was executed");
-
 		ledger.close();
 	});
 
 	it("orders findings by severity and separates the ones it could not settle", async () => {
 		const ledger = Ledger.open(join(mkdtempSync(join(tmpdir(), "opensec-e2e2-")), "l.db"));
 		const repoId = ledger.upsertRepo(FIXTURE, "vuln-app", null);
-		ledger.createScan({ id: "s2", repoId, revision: null, profile: "static", configHash: "c" });
+		ledger.createScan({ id: "s2", repoId, revision: null, profile: "local", configHash: "c" });
 		ledger.insertFiles("s2", [
 			{ path: "server.js", sha: "a", bytes: 100, excludedReason: null },
 		]);
@@ -189,7 +186,7 @@ describe("the M0 loop, without a model", () => {
 			scanId: "s2",
 			workerId: "probe-1",
 			repoRoot: FIXTURE,
-			profile: "static",
+			profile: "local",
 			ledger,
 			nonce: "n",
 		};
@@ -237,7 +234,7 @@ describe("the M0 loop, without a model", () => {
 	it("shows each probe's own coverage and completion state", () => {
 		const md = renderMarkdown({
 			scan: {
-				id: "s3", repo_id: "r", revision: null, profile: "static", status: "completed", phase: "report",
+				id: "s3", repo_id: "r", revision: null, profile: "local", status: "completed", phase: "report",
 				config_hash: "c", model_ref: null, prompt_hash: null, probes: 2, threat_model_source: null,
 				started_at: "then", completed_at: "now", tokens_in: 0, tokens_out: 0, cost_usd: 0,
 			},

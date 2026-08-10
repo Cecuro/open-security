@@ -23,8 +23,11 @@ import { describeDistribution, partition, type Partition } from "../scan/partiti
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
 import { scopedPaths } from "../scan/target.js";
+import { citedOutOfScope } from "../scan/threat-model.js";
 import { redactSecrets, stripControlChars } from "../text.js";
 import type { Candidate, Coverage, Phase, Profile, ScanScope } from "../types.js";
+
+export { citedOutOfScope } from "../scan/threat-model.js";
 
 export interface ScannerOptions {
 	repo: string;
@@ -101,7 +104,7 @@ export class Scanner {
 	static async open(opts: ScannerOptions): Promise<Scanner> {
 		const repoRoot = resolve(opts.repo);
 		const repoName = basename(repoRoot);
-		const profile = opts.profile ?? "static";
+		const profile = opts.profile ?? "container";
 		const scope = opts.scope ?? { kind: "repository" };
 
 		// SDK callers get the same credential resolution as the CLI. Idempotent,
@@ -113,7 +116,7 @@ export class Scanner {
 		const runner = await AgentRunner.create({
 			repoRoot,
 			modelRef: opts.model,
-			sandbox: profile === "container" ? "docker" : "none",
+			sandbox: profile === "container" ? "docker" : "local",
 		});
 		const model = Scanner.resolveEnforceable(runner, opts.maxCostUsd);
 
@@ -177,6 +180,9 @@ export class Scanner {
 					`scan ${scanId} already completed. 'opensec report ${scanId}' re-renders it.`,
 				);
 			}
+			if (String(scan.profile) === "static") {
+				throw new Error(`scan ${scanId} used the removed static profile; start a new local or container scan`);
+			}
 			const repo = ledger.getRepo(scan.repo_id);
 			if (!repo) throw new Error(`scan ${scanId} references a repo that is not in the ledger`);
 			if (!existsSync(repo.path)) {
@@ -187,7 +193,7 @@ export class Scanner {
 			const runner = await AgentRunner.create({
 				repoRoot: repo.path,
 				modelRef: opts.model,
-				sandbox: scan.profile === "container" ? "docker" : "none",
+				sandbox: scan.profile === "container" ? "docker" : "local",
 			});
 			Scanner.resolveEnforceable(runner, opts.maxCostUsd);
 
@@ -905,26 +911,6 @@ function describeCompany(parts: number, passes: number): string {
 		);
 	}
 	return bits.join(" ");
-}
-
-/**
- * How much of a stored threat model points outside this scan.
- *
- * Paths are pulled out of the prose rather than tracked, because the file is
- * the user's to edit and anything we required them to maintain would rot.
- */
-export function citedOutOfScope(
-	text: string,
-	inScope: ReadonlySet<string>,
-): { cited: number; outOfScope: number } {
-	const paths = new Set(
-		(text.match(/[A-Za-z0-9_@./-]+\.[A-Za-z0-9]{1,5}(?=[:`\s,)]|$)/g) ?? [])
-			.map((p) => p.replace(/^[./]+/, ""))
-			.filter((p) => p.includes("/")),
-	);
-	let outOfScope = 0;
-	for (const p of paths) if (!inScope.has(p)) outOfScope++;
-	return { cited: paths.size, outOfScope };
 }
 
 function git(root: string, args: string[]): string | null {

@@ -7,7 +7,7 @@ const input = {
 		id: "scan-1",
 		repo_id: "repo-1",
 		revision: "abc",
-		profile: "static" as const,
+		profile: "local" as const,
 		status: "completed" as const,
 		phase: "report" as const,
 		config_hash: "config",

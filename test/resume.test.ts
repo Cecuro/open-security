@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { Ledger, scanArtifactDir } from "../src/db/db.js";
-import { PHASE_ORDER, phaseBefore, reportScan } from "../src/sdk/scanner.js";
+import { PHASE_ORDER, phaseBefore, reportScan, Scanner } from "../src/sdk/scanner.js";
 import type { Phase } from "../src/types.js";
 
 const artifacts: string[] = [];
@@ -30,7 +30,7 @@ function seedFailedScan(ledger: Ledger, scanId: string): void {
 		id: scanId,
 		repoId,
 		revision: "cafebabe",
-		profile: "static",
+		profile: "local",
 		configHash: "cfg",
 		modelRef: "prov/model-x",
 		promptHash: "ph123",
@@ -109,7 +109,7 @@ describe("reportScan renders from the ledger alone", () => {
 		const scanId = `resume-test-${process.pid}-b`;
 		artifacts.push(scanArtifactDir(scanId));
 		const repoId = ledger.upsertRepo("/tmp/old-repo", "old-repo", null);
-		ledger.createScan({ id: scanId, repoId, revision: null, profile: "static", configHash: "c" });
+		ledger.createScan({ id: scanId, repoId, revision: null, profile: "local", configHash: "c" });
 		ledger.insertFiles(scanId, [{ path: "x.js", sha: "s", bytes: 5, excludedReason: null }]);
 		ledger.finishScan(scanId, "failed");
 
@@ -122,6 +122,25 @@ describe("reportScan renders from the ledger alone", () => {
 });
 
 describe("resume re-enters at the recorded phase", () => {
+	it("refuses a legacy static scan instead of changing its execution model", async () => {
+		const db = join(mkdtempSync(join(tmpdir(), "opensec-static-resume-")), "l.db");
+		const ledger = Ledger.open(db);
+		const repoId = ledger.upsertRepo("/tmp/legacy-repo", "legacy-repo", null);
+		ledger.createScan({
+			id: "legacy-static",
+			repoId,
+			revision: null,
+			profile: "static" as never,
+			configHash: "old",
+		});
+		ledger.finishScan("legacy-static", "failed");
+		ledger.close();
+
+		await expect(Scanner.resume("legacy-static", { db })).rejects.toThrow(
+			"used the removed static profile",
+		);
+	});
+
 	it("orders phases the way run() executes them", () => {
 		const expected: Phase[] = [
 			"inventory",

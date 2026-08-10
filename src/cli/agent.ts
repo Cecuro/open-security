@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { connect } from "node:net";
+import { pathToFileURL } from "node:url";
 
 const COMMANDS = [
 	{ words: ["work", "next"], verb: "work.next", usage: "opensec work next [--limit <n>]", note: "Get the files you must review." },
@@ -25,7 +26,7 @@ export async function runAgentCli(args: string[]): Promise<number> {
 			const command = findCommand(args.slice(1));
 			return output(command ? commandHelp(command) : help());
 		}
-		if (args[0] === "context") return output(context());
+		if (args[0] === "context") return output(await context());
 		const command = findCommand(args);
 		if (!command) throw new Error(`unknown command '${args.slice(0, 2).join(" ")}'. Run 'opensec help'.`);
 		const rest = args.slice(command.words.length);
@@ -33,7 +34,7 @@ export async function runAgentCli(args: string[]): Promise<number> {
 
 		const socket = process.env.OPENSEC_SOCKET;
 		const token = process.env.OPENSEC_TOKEN;
-		if (!socket || !token) throw new Error("this command is only available inside an OpenSec container run");
+		if (!socket || !token) throw new Error("this command is only available inside an OpenSec agent run");
 		const allowed = allowedVerbs();
 		if (allowed.size > 0 && !allowed.has(command.verb)) {
 			throw new Error(`${command.words.join(" ")} is not available in this review pass. Run 'opensec context'.`);
@@ -156,7 +157,7 @@ function help(): string {
 	const allowed = allowedVerbs();
 	return [
 		"AGENT COMMANDS",
-		"  These commands work only inside an OpenSec container run.",
+		"  These commands work only inside an OpenSec agent run.",
 		"",
 		...COMMANDS.filter((command) => allowed.size === 0 || allowed.has(command.verb)).map((command) => `  ${command.usage}\n      ${command.note}`),
 		"",
@@ -166,10 +167,32 @@ function help(): string {
 
 function commandHelp(command: Command): string { return `${command.usage}\n\n${command.note}`; }
 
-function context(): string {
-	if (!process.env.OPENSEC_SOCKET || !process.env.OPENSEC_TOKEN) throw new Error("context is only available inside an OpenSec container run");
+async function context(): Promise<string> {
+	const socket = process.env.OPENSEC_SOCKET;
+	const token = process.env.OPENSEC_TOKEN;
+	if (!socket || !token) throw new Error("context is only available inside an OpenSec agent run");
+	const response = await request(socket, { token, verb: "context" });
+	if (!response.ok) throw new Error(response.error ?? "OpenSec command failed");
+	const remote = object(parseJson(response.output ?? "", "OpenSec bridge"));
 	const allowed = allowedVerbs();
-	return JSON.stringify({ workspace: "/workspace/repo", worker: process.env.OPENSEC_WORKER ?? "unknown", commands: COMMANDS.filter((command) => allowed.size === 0 || allowed.has(command.verb)).map((command) => command.words.join(" ")) }, null, 2);
+	return JSON.stringify(
+		{
+			...remote,
+			commands: COMMANDS.filter((command) => allowed.size === 0 || allowed.has(command.verb)).map(
+				(command) => command.words.join(" "),
+			),
+		},
+		null,
+		2,
+	);
 }
 
 function output(text: string): number { process.stdout.write(`${text}\n`); return 0; }
+
+function isMain(moduleUrl: string, argv1: string | undefined): boolean {
+	return argv1 !== undefined && moduleUrl === pathToFileURL(argv1).href;
+}
+
+if (isMain(import.meta.url, process.argv[1])) {
+	process.exitCode = await runAgentCli(process.argv.slice(2));
+}

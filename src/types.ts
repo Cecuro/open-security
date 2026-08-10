@@ -1,4 +1,4 @@
-export type Profile = "static" | "container";
+export type Profile = "local" | "container";
 
 export type ScanScope =
 	| { kind: "repository" }

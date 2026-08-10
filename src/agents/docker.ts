@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type SpawnOptions } from "node:child_process";
 
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -14,7 +14,7 @@ const MAX_INLINE_OUTPUT_BYTES = 20_000;
 const OUTPUT_HEAD_BYTES = 12_000;
 const OUTPUT_TAIL_BYTES = 4_000;
 
-type CommandResult = {
+export type CommandResult = {
 	exitCode: number;
 	stdout: string;
 	stderr: string;
@@ -40,12 +40,12 @@ export class DockerSandbox {
 		const user = process.env.OPENSEC_SANDBOX_USER ?? "node";
 		const sandbox = new DockerSandbox(name, user);
 		try {
-			const available = await command("docker", ["version", "--format", "{{.Server.Version}}"]);
+			const available = await runCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
 			if (available.exitCode !== 0) {
 				throw new Error("Docker is required for --profile container. Start Docker, then try again.");
 			}
 
-			const created = await command("docker", [
+			const created = await runCommand("docker", [
 				"create",
 				"--name",
 				name,
@@ -76,8 +76,6 @@ export class DockerSandbox {
 						`OPENSEC_TOKEN=${opts.bridge.token}`,
 						"--env",
 						`OPENSEC_VERBS=${opts.bridge.verbs}`,
-						"--env",
-						`OPENSEC_WORKER=${opts.bridge.worker}`,
 					]
 					: []),
 				image,
@@ -87,38 +85,52 @@ export class DockerSandbox {
 			]);
 			if (created.exitCode !== 0) throw new Error(dockerError("create", created));
 
-			const started = await command("docker", ["start", name]);
+			const started = await runCommand("docker", ["start", name]);
 			if (started.exitCode !== 0) throw new Error(dockerError("start", started));
-			const madeWorkspace = await command("docker", ["exec", "--user", "0", name, "mkdir", "-p", "/workspace"]);
+			const madeWorkspace = await runCommand("docker", ["exec", "--user", "0", name, "mkdir", "-p", "/workspace"]);
 			if (madeWorkspace.exitCode !== 0) throw new Error(dockerError("prepare the workspace", madeWorkspace));
-			const copied = await command("docker", ["cp", repoRoot, `${name}:/workspace/repo`]);
+			const copied = await runCommand("docker", ["cp", repoRoot, `${name}:/workspace/repo`]);
 			if (copied.exitCode !== 0) throw new Error(dockerError("copy the repository", copied));
 			// docker cp creates destination files as root. Leave capabilities dropped and
 			// make the disposable copy writable instead of chowning it for the agent.
-			const permissions = await command("docker", ["exec", "--user", "0", name, "chmod", "-R", "u+rwX,go+rwX", "/workspace/repo"]);
+			const permissions = await runCommand("docker", ["exec", "--user", "0", name, "chmod", "-R", "u+rwX,go+rwX", "/workspace/repo"]);
 			if (permissions.exitCode !== 0) throw new Error(dockerError("prepare repository permissions", permissions));
 			if (opts.bridge) {
-				const installed = await command("docker", [
+				const installed = await runCommand("docker", [
 					"exec",
 					"--user",
 					"0",
 					name,
 					"sh",
 					"-c",
-					'printf "#!/bin/sh\\nexec node /run/opensec/opensec-cli.js \\\"$@\\\"\\n" > /usr/local/bin/opensec && chmod 755 /usr/local/bin/opensec',
+					'printf "#!/bin/sh\\nexec node /run/opensec/opensec-cli.mjs \\\"$@\\\"\\n" > /usr/local/bin/opensec && chmod 755 /usr/local/bin/opensec',
 				]);
 				if (installed.exitCode !== 0) throw new Error(dockerError("install the OpenSec CLI", installed));
+				const checked = await runCommand("docker", [
+					"exec",
+					"--user",
+					user,
+					name,
+					"bash",
+					"-lc",
+					"opensec context",
+				]);
+				if (checked.exitCode !== 0) throw new Error(dockerError("check Bash and the OpenSec CLI", checked));
 			}
 			return sandbox;
 		} catch (err) {
-			await sandbox.dispose();
+			try {
+				await sandbox.dispose();
+			} catch {
+				// Keep the setup error, which tells the user what failed.
+			}
 			throw err;
 		}
 	}
 
 	async exec(commandLine: string, timeoutMs?: number): Promise<CommandResult> {
 		const timeout = Math.min(Math.max(1, timeoutMs ?? MAX_TIMEOUT_MS), MAX_TIMEOUT_MS);
-		return command(
+		return runCommand(
 			"docker",
 			[
 				"exec",
@@ -129,7 +141,7 @@ export class DockerSandbox {
 				this.name,
 				"sh",
 				"-c",
-				'exec timeout --signal=KILL --kill-after=5s "$1" sh -lc "$2"',
+				'exec timeout --signal=KILL --kill-after=5s "$1" bash -lc "$2"',
 				"sh",
 				`${Math.ceil(timeout / 1000)}s`,
 				commandLine,
@@ -141,7 +153,7 @@ export class DockerSandbox {
 	async writeOutput(toolCallId: string, output: string): Promise<string> {
 		const id = toolCallId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 100) || "output";
 		const path = `${this.repoDir}/.opensec/tool-output/${id}.txt`;
-		const saved = await command(
+		const saved = await runCommand(
 			"docker",
 			[
 				"exec",
@@ -163,7 +175,7 @@ export class DockerSandbox {
 	}
 
 	async dispose(): Promise<void> {
-		const removed = await command("docker", ["rm", "--force", this.name], 30_000);
+		const removed = await runCommand("docker", ["rm", "--force", this.name], 30_000);
 		if (removed.exitCode !== 0 && !/No such container/i.test(removed.stderr)) {
 			throw new Error(dockerError("remove sandbox", removed));
 		}
@@ -172,15 +184,14 @@ export class DockerSandbox {
 
 export type BashSandbox = Pick<DockerSandbox, "exec" | "repoDir" | "writeOutput">;
 
-export function createBashTool(sandbox: BashSandbox) {
+export function createBashTool(
+	sandbox: BashSandbox,
+	description = `Run a Bash command in the workspace at ${sandbox.repoDir}. Commands run for at most 10 minutes.`,
+) {
 	return defineTool({
 		name: "bash",
 		label: "bash",
-		description:
-			`Run a shell command in an isolated Docker workspace at ${sandbox.repoDir}. ` +
-			"The repository copy is writable only inside this disposable container. " +
-			"Commands have no network access and run for at most 10 minutes. " +
-			"Large output is saved under .opensec/tool-output; inspect it with bash using sed, tail, or grep.",
+		description,
 		parameters: Type.Object(
 			{
 				command: Type.String({ description: "Shell command to run" }),
@@ -204,14 +215,20 @@ export function createBashTool(sandbox: BashSandbox) {
 	});
 }
 
-async function command(
+export async function runCommand(
 	program: string,
 	args: string[],
 	timeoutMs = 30_000,
 	input?: string,
+	options: Pick<SpawnOptions, "cwd" | "env"> & { killProcessGroup?: boolean } = {},
 ): Promise<CommandResult> {
 	return new Promise((resolve) => {
-		const child = spawn(program, args, { stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"] });
+		const child = spawn(program, args, {
+			cwd: options.cwd,
+			env: options.env,
+			detached: options.killProcessGroup,
+			stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"],
+		});
 		let stdout = "";
 		let stderr = "";
 		let stdoutTruncated = false;
@@ -219,7 +236,12 @@ async function command(
 		let timedOut = false;
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			try {
+				if (options.killProcessGroup && child.pid) process.kill(-child.pid, "SIGKILL");
+				else child.kill("SIGKILL");
+			} catch {
+				// The command finished between the timeout and the kill.
+			}
 		}, timeoutMs);
 		child.stdout!.on("data", (chunk: Buffer) => {
 			const captured = appendBounded(stdout, chunk);

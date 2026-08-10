@@ -24,7 +24,7 @@ function setup() {
 
 	const ledger = Ledger.open(join(base, "l.db"));
 	const repoId = ledger.upsertRepo(root, "r", null);
-	ledger.createScan({ id: "s", repoId, revision: null, profile: "static", configHash: "c" });
+	ledger.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
 	ledger.insertFiles("s", [
 		{ path: "a.js", sha: "1", bytes: 12, excludedReason: null },
 		{ path: "b.js", sha: "2", bytes: 12, excludedReason: null },
@@ -36,7 +36,7 @@ function setup() {
 			scanId: "s",
 			workerId: id,
 			repoRoot: root,
-			profile: "static",
+			profile: "local",
 			ledger,
 			nonce: "N",
 			verbs: PROBE_VERBS,

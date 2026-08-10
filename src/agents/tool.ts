@@ -548,7 +548,7 @@ function candidateAssess(ctx: RunContext, p: Params): string {
 		}
 	}
 
-	const computed = computeSeverity(inputs, ctx.profile);
+	const computed = computeSeverity(inputs);
 	const resolution: Resolution = {
 		...candidate.resolution,
 		disposition: computed.reportable ? "confirmed" : "suppressed",

@@ -17,7 +17,7 @@ describe("cache usage", () => {
 				id: "s",
 				repoId,
 				revision: null,
-				profile: "static",
+				profile: "local",
 				configHash: "h",
 			});
 			ledger.addUsage("s", {
