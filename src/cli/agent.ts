@@ -5,8 +5,7 @@ import { pathToFileURL } from "node:url";
 const COMMANDS = [
 	{ words: ["work", "next"], verb: "work.next", usage: "opensec work next [--limit <n>]", note: "Get the files you must review." },
 	{ words: ["work", "complete"], verb: "work.complete", usage: "opensec work complete --summary <text> | --summary-file <path>", note: "Record completed review work." },
-	{ words: ["lead", "record"], verb: "lead.record", usage: "opensec lead record --text <text> | --text-file <path> [--status open|dead_end]", note: "Record a lead or dead end." },
-	{ words: ["candidate", "create"], verb: "candidate.create", usage: "opensec candidate create --input <path|->", note: "Create a suspected finding." },
+	{ words: ["candidate", "create"], verb: "candidate.create", usage: "opensec candidate create --input <path|->", note: "Create a suspected finding from JSON: title, description, locations, optional cwe and instance." },
 	{ words: ["candidate", "validate"], verb: "candidate.validate", usage: "opensec candidate validate <id> --disposition <value> --rationale <text> | --rationale-file <path>", note: "Record a validation verdict." },
 	{ words: ["candidate", "assess"], verb: "candidate.assess", usage: "opensec candidate assess --input <path|->", note: "Record attack-path and severity inputs." },
 ] as const;
@@ -15,7 +14,7 @@ type Command = (typeof COMMANDS)[number];
 type AgentResponse = { ok: boolean; output?: string; error?: string };
 
 export function isAgentCliCommand(command: string | undefined): boolean {
-	return command === "work" || command === "lead" || command === "candidate" || command === "context";
+	return command === "work" || command === "candidate" || command === "context";
 }
 
 /** Dispatch the agent-only part of the public opensec command tree. */
@@ -58,11 +57,6 @@ function params(command: Command, args: string[]): Record<string, unknown> {
 		return flags.size === 0 ? {} : { limit: numberFlag(flags, "--limit") };
 	}
 	if (command.verb === "work.complete") return { summary: textFlag(flagsOf(args, ["--summary", "--summary-file"]), "--summary") };
-	if (command.verb === "lead.record") {
-		const flags = flagsOf(args, ["--text", "--text-file", "--status"]);
-		const status = flags.get("--status");
-		return { text: textFlag(flags, "--text"), ...(status ? { status } : {}) };
-	}
 	if (command.verb === "candidate.validate") {
 		const [id, ...options] = args;
 		if (!id || id.startsWith("--")) throw new Error("candidate validate needs a candidate id");
@@ -165,7 +159,37 @@ function help(): string {
 	].join("\n");
 }
 
-function commandHelp(command: Command): string { return `${command.usage}\n\n${command.note}`; }
+const COMMAND_DETAILS: Partial<Record<Command["verb"], string>> = {
+	"candidate.create": [
+		"JSON fields:",
+		"  title        short finding title",
+		"  description  complete finding with path:line evidence",
+		"  locations    [{ path, start_line, end_line, role?, symbol? }]",
+		"  cwe          optional CWE id array",
+		"  instance     optional sibling identifier",
+	].join("\n"),
+	"candidate.validate": [
+		"Disposition: confirmed | not_applicable | needs_follow_up | duplicate.",
+		"Duplicate also requires --duplicate-of <id>.",
+	].join("\n"),
+	"candidate.assess": [
+		"JSON fields: id, entry_point, path[], controls[], rationale, and:",
+		"  impact        none | low | medium | high",
+		"  vector        remote | local_network | localhost | none | unknown",
+		"  auth_required none | user | admin",
+		"  method        reproduced_poc | asan | debugger | code_reading | counterevidence",
+		"Boolean fields: network_reachable, cross_tenant, code_execution_proven,",
+		"traced_path_no_control. Optional suppression object:",
+		"  boolean keys: self_only, requires_preexisting_privilege,",
+		"    privilege_delta_is_the_bug, precondition_unreachable",
+		"  evidence: string; source: code_evidence | repo_claim",
+	].join("\n"),
+};
+
+function commandHelp(command: Command): string {
+	const detail = COMMAND_DETAILS[command.verb];
+	return `${command.usage}\n\n${command.note}${detail ? `\n\n${detail}` : ""}`;
+}
 
 async function context(): Promise<string> {
 	const socket = process.env.OPENSEC_SOCKET;

@@ -10,7 +10,7 @@ import {
 	MAX_PER_PARENT,
 	type SubagentDeps,
 } from "../src/agents/subagent.js";
-import { createOpensecTool, type RunContext, SUBAGENT_VERBS } from "../src/agents/tool.js";
+import { runOpensec, type RunContext, SUBAGENT_VERBS } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { loadPrompts } from "../src/scan/prompts.js";
 
@@ -140,45 +140,30 @@ describe("subagents run in-process and inherit the scan", () => {
 describe("verb scoping", () => {
 	it("stops a subagent from recording findings its parent never saw", async () => {
 		const env = setup({ workerId: "probe-1/sub-1", verbs: SUBAGENT_VERBS, depth: 1 });
-		const tool = createOpensecTool(env.ctx);
-		const run = async (p: object) => {
-			const r = await tool.execute("t", p as never, undefined, undefined, {} as never);
-			return r.content.map((c) => ("text" in c ? c.text : "")).join("");
-		};
+		const run = async (p: object) => runOpensec(env.ctx, p as never);
 
 		await expect(
 			run({
 				verb: "candidate.create",
 				title: "t",
-				summary: "s",
-				evidence: "e",
+				description: "s\n\ne",
 				locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
 			}),
 		).rejects.toThrow(/not available to probe-1\/sub-1/);
 
-		// It can still page the worklist and record what it ruled out.
+		// It can still page the parent's worklist.
 		expect(JSON.parse(await run({ verb: "work.next" })).returned).toBe(1);
-		await run({ verb: "lead.record", text: "checked, nothing there", status: "dead_end" });
-		expect(env.ledger.listLeads("s")).toHaveLength(1);
 	});
 
 	it("leaves phase agents with all four verbs", async () => {
 		const env = setup();
-		const tool = createOpensecTool(env.ctx);
-		const r = await tool.execute(
-			"t",
-			{
+		const r = runOpensec(env.ctx, {
 				verb: "candidate.create",
 				title: "t",
-				summary: "s",
-				evidence: "e",
+				description: "s\n\ne",
 				locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
-			} as never,
-			undefined,
-			undefined,
-			{} as never,
-		);
-		expect(JSON.parse(r.content.map((c) => ("text" in c ? c.text : "")).join("")).id).toBe("c1");
+			});
+		expect(JSON.parse(r).id).toBe("c1");
 	});
 });
 

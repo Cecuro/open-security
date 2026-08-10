@@ -46,7 +46,6 @@ describe("cache usage", () => {
 				repoPath: "/tmp/cache-repo",
 				candidates: [],
 				coverage: { files_in_scope: 0, files_touched: 0, bytes_in_scope: 0, bytes_read: 0 },
-				leads: [],
 				extensions: [],
 				excludedFiles: 0,
 				modelRef: "provider/model",

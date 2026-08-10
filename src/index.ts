@@ -24,7 +24,7 @@ export { policyExitCode } from "./scan/policy.js";
 export { loadEnv, describeEnv, piAuthPath, type EnvLoadResult } from "./env.js";
 export { loadPrompts, wrapUntrusted, type Prompts, PROMPT_NAMES } from "./scan/prompts.js";
 export { AgentRunner } from "./agents/session.js";
-export { createOpensecTool, type RunContext, type Verb } from "./agents/tool.js";
+export { type RunContext, type Verb } from "./agents/tool.js";
 export {
 	collisionGroups,
 	cweFamily,

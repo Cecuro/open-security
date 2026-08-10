@@ -17,20 +17,13 @@ const finding: Candidate = {
 	title: "A real finding",
 	cwe_ids: [],
 	locations: [],
-	summary: "summary",
-	evidence: "evidence",
+	description: "summary\n\nevidence",
+	status: "confirmed",
 	created_at: "now",
-	resolution: {
+	activities: [{ id: 1, worker_id: "assess-c1", kind: "assessment", body: "confirmed", at: "now", data: {
 		disposition: "confirmed",
-		rationale: "confirmed",
-		computed: {
-			severity: "high",
-			likelihood: "high",
-			confidence: 0.3,
-			reportable: true,
-			rationale: [],
-		},
-	},
+		computed: { severity: "high", likelihood: "high", confidence: 0.3, reportable: true, rationale: [] },
+	} }],
 };
 
 describe("CI severity policy", () => {
@@ -47,6 +40,16 @@ describe("CI severity policy", () => {
 		expect(
 			policyExitCode(
 				{ candidates: [], coverage: { ...coverage, bytes_read: 9 } },
+				"high",
+			),
+		).toBe(2);
+		expect(
+			policyExitCode(
+				{
+					candidates: [],
+					coverage,
+					passCoverage: [{ pass: 1, ...coverage, completed: false }],
+				},
 				"high",
 			),
 		).toBe(2);

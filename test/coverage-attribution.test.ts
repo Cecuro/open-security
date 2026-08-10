@@ -35,7 +35,7 @@ function setup() {
   ]);
 
   const ctx: RunContext = {
-    scanId: "s", workerId: "probe-1", repoRoot: root, profile: "local", ledger, nonce: "N",
+    scanId: "s", workerId: "probe-1", repoRoot: root, profile: "local", ledger, nonce: "N", readGroup: "pass-1",
   };
   const tool = instrumentGrep(createGrepToolDefinition(root) as never, ctx) as never as {
     execute: (i: string, p: unknown, s?: unknown, u?: unknown, c?: unknown) => Promise<unknown>;

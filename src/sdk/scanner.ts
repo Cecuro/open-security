@@ -25,7 +25,16 @@ import { renderMarkdown } from "../scan/render.js";
 import { scopedPaths } from "../scan/target.js";
 import { citedOutOfScope } from "../scan/threat-model.js";
 import { redactSecrets, stripControlChars } from "../text.js";
-import type { Candidate, Coverage, Phase, Profile, ScanScope } from "../types.js";
+import {
+	candidateComputed,
+	latestActivity,
+	type Candidate,
+	type Coverage,
+	type Phase,
+	type PassCoverage,
+	type Profile,
+	type ScanScope,
+} from "../types.js";
 
 export { citedOutOfScope } from "../scan/threat-model.js";
 
@@ -62,6 +71,7 @@ export interface ScanResult {
 	jsonPath: string;
 	candidates: Candidate[];
 	coverage: Coverage;
+	passCoverage: PassCoverage[];
 }
 
 /**
@@ -183,6 +193,12 @@ export class Scanner {
 			if (String(scan.profile) === "static") {
 				throw new Error(`scan ${scanId} used the removed static profile; start a new local or container scan`);
 			}
+			const storedPasses = Math.max(1, scan.probes ?? 1);
+			if (opts.probes !== undefined && Math.max(1, opts.probes) !== storedPasses) {
+				throw new Error(
+					`scan ${scanId} started with ${storedPasses} probe pass(es); resume cannot change it`,
+				);
+			}
 			const repo = ledger.getRepo(scan.repo_id);
 			if (!repo) throw new Error(`scan ${scanId} references a repo that is not in the ledger`);
 			if (!existsSync(repo.path)) {
@@ -217,7 +233,7 @@ export class Scanner {
 
 			return new Scanner(
 				scanId,
-				{ ...opts, repo: repo.path },
+				{ ...opts, repo: repo.path, probes: storedPasses },
 				ledger,
 				runner,
 				prompts,
@@ -454,7 +470,11 @@ export class Scanner {
 		const files = inScope.slice(0, 200);
 		const total = inScope.length;
 		const result = await this.runAgent({
-			ctx: { ...this.ctx("threat-model"), verbs: THREAT_MODEL_VERBS },
+			ctx: {
+				...this.ctx("threat-model"),
+				verbs: THREAT_MODEL_VERBS,
+				readGroup: "threat-model",
+			},
 			onEvent: (m) => this.say(m),
 			tracePath: this.tracePath("threat-model"),
 			subagents: this.subagentDeps(),
@@ -525,7 +545,7 @@ export class Scanner {
 
 		await mapConcurrent(plan, this.concurrency, async ({ workerId, paths, readGroup }) => {
 			this.checkBudget();
-			this.ledger.beginWorkerWork(this.scanId, workerId, paths);
+			this.ledger.recordEvent(this.scanId, "work_started", { read_group: readGroup }, workerId);
 			await this.runAgent({
 				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS, worklist: paths, readGroup },
 				onEvent: (m) => this.say(m),
@@ -540,16 +560,17 @@ export class Scanner {
 					"",
 					wrapUntrusted(this.nonce, "threat-model", tm),
 					"",
-					'Begin by calling opensec({ verb: "work.next" }) to get your worklist.',
+					"Begin with `opensec work next` to get your worklist.",
 					"Page through it until remaining is 0. That covers the list; it is not",
 					"where you stop. Keep going until a pass turns up nothing you had not",
 					"already recorded, then report.",
 				].join("\n"),
 			});
-			const progress = this.ledger.workerCoverage(this.scanId).find((p) => p.worker_id === workerId);
+			const remaining = this.ledger.listWork(this.scanId, 1, paths, readGroup).unread;
+			const completed = this.ledger.workerCompleted(this.scanId, workerId, readGroup);
 			this.say(
-				`  ${workerId} ${progress?.completed ? "completed" : "stopped incomplete"} ` +
-				`(${progress?.files_touched ?? 0}/${progress?.files_assigned ?? paths.length} files touched)`,
+				`  ${workerId} ${completed ? "completed" : "stopped incomplete"} ` +
+					`(${paths.length - remaining}/${paths.length} files read)`,
 			);
 		});
 
@@ -561,7 +582,7 @@ export class Scanner {
 	async reduce(): Promise<number> {
 		this.ledger.setPhase(this.scanId, "reduce");
 
-		const live = this.ledger.listLiveCandidates(this.scanId).filter((c) => !c.resolution);
+		const live = this.ledger.listLiveCandidates(this.scanId).filter((c) => c.status === "open");
 		const groups = collisionGroups(live);
 		if (groups.length === 0) {
 			if (live.length > 1) this.say(`reduce: ${live.length} candidate(s), no collisions`);
@@ -599,7 +620,7 @@ export class Scanner {
 			});
 		});
 
-		const merged = this.ledger.listCandidates(this.scanId).filter((c) => c.merged_into).length;
+		const merged = this.ledger.listCandidates(this.scanId).filter((c) => c.duplicate_of).length;
 		this.say(`reduce: ${merged} row(s) merged`);
 		return merged;
 	}
@@ -607,7 +628,7 @@ export class Scanner {
 	async validate(candidates?: Candidate[]): Promise<void> {
 		this.ledger.setPhase(this.scanId, "validate");
 		const todo = (candidates ?? this.ledger.listLiveCandidates(this.scanId)).filter(
-			(c) => !c.resolution?.validation,
+			(c) => !latestActivity(c, "validation"),
 		);
 		if (todo.length === 0) return;
 		this.say(`validate: ${todo.length} candidate(s), ${this.concurrency} at a time`);
@@ -631,19 +652,24 @@ export class Scanner {
 					"",
 					wrapUntrusted(this.nonce, `candidate-${c.id}`, describeCandidate(c)),
 					"",
-					`Decide, then call opensec({ verb: "candidate.validate", id: "${c.id}", ... }) once.`,
+					`Decide, then run \`opensec candidate validate ${c.id} ...\` once.`,
 				].join("\n"),
 			});
 
 			const after = this.ledger.getCandidate(this.scanId, c.id);
-			if (after && !after.resolution?.validation) {
-				this.ledger.resolveCandidate(this.scanId, c.id, {
-					disposition: "needs_follow_up",
-					rationale: "the validate agent finished without recording a verdict",
+			if (after && !latestActivity(after, "validation")) {
+				this.ledger.addCandidateActivity({
+					scanId: this.scanId,
+					candidateId: c.id,
+					workerId,
+					kind: "validation",
+					body: "the validate agent finished without recording a verdict",
+					status: "needs_follow_up",
+					data: { disposition: "needs_follow_up" },
 				});
 				this.say(`  ${c.id} → needs_follow_up (no verdict recorded)`);
 			} else {
-				this.say(`  ${c.id} → ${after?.resolution?.validation?.disposition}  ${c.title}`);
+				this.say(`  ${c.id} → ${after?.status}  ${c.title}`);
 			}
 		});
 	}
@@ -652,7 +678,9 @@ export class Scanner {
 		this.ledger.setPhase(this.scanId, "attack_path");
 		const todo = this.ledger
 			.listLiveCandidates(this.scanId)
-			.filter((c) => c.resolution?.validation?.disposition === "confirmed" && !c.resolution.computed);
+			.filter(
+				(c) => latestActivity(c, "validation")?.data?.disposition === "confirmed" && !candidateComputed(c),
+			);
 		if (todo.length === 0) return;
 		this.say(`attack path: ${todo.length} confirmed finding(s), ${this.concurrency} at a time`);
 
@@ -680,22 +708,26 @@ export class Scanner {
 					"",
 					"Only set `code_execution_proven` after a successful reproduction in this run.",
 					"",
-					`Trace it, then call opensec({ verb: "candidate.assess", id: "${c.id}", ... }) once.`,
+					`Trace it, then run \`opensec candidate assess --input <file>\` once for ${c.id}.`,
 				].join("\n"),
 			});
 
 			const after = this.ledger.getCandidate(this.scanId, c.id);
-			if (after && !after.resolution?.attack_path) {
-				this.ledger.resolveCandidate(this.scanId, c.id, {
-					...(after.resolution ?? { disposition: "needs_follow_up", rationale: "" }),
-					disposition: "needs_follow_up",
-					rationale: "confirmed as real, but the attack-path pass recorded no rating",
+			if (after && !latestActivity(after, "assessment")) {
+				this.ledger.addCandidateActivity({
+					scanId: this.scanId,
+					candidateId: c.id,
+					workerId,
+					kind: "assessment",
+					body: "confirmed as real, but the attack-path pass recorded no rating",
+					status: "needs_follow_up",
+					data: { disposition: "needs_follow_up" },
 				});
 				this.say(`  ${c.id} → needs_follow_up (confirmed but unrated)`);
 			} else {
-				const sev = after?.resolution?.computed?.severity;
+				const sev = after ? candidateComputed(after)?.severity : undefined;
 				this.say(
-					`  ${c.id} → ${after?.resolution?.disposition}${sev ? ` (${sev})` : ""}  ${c.title}`,
+					`  ${c.id} → ${after?.status}${sev ? ` (${sev})` : ""}  ${c.title}`,
 				);
 			}
 		});
@@ -790,7 +822,7 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 	const repo = ledger.getRepo(scan.repo_id);
 	const candidates = ledger.listCandidates(scanId);
 	const coverage = ledger.coverage(scanId);
-	const probeCoverage = ledger.workerCoverage(scanId);
+	const passCoverage = ledger.passCoverage(scanId, Math.max(1, scan.probes ?? 1));
 	const extensions = [
 		...new Set(ledger.listInScopePaths(scanId).map(ext).filter(Boolean)),
 	].sort();
@@ -801,8 +833,7 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 		repoPath: repo?.path ?? "(unknown)",
 		candidates,
 		coverage,
-		probeCoverage,
-		leads: ledger.listLeads(scanId),
+		passCoverage,
 		extensions,
 		excludedFiles: ledger.excludedCount(scanId),
 		modelRef: scan.model_ref ?? "(not recorded)",
@@ -826,7 +857,7 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 			{
 				scan,
 				coverage,
-				probeCoverage,
+				passCoverage,
 				candidates,
 			},
 			null,
@@ -838,7 +869,7 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 		},
 	);
 
-	return { scanId, markdown, reportPath, jsonPath, candidates, coverage };
+	return { scanId, markdown, reportPath, jsonPath, candidates, coverage, passCoverage };
 }
 
 function threatModelNote(source: string | null): string | undefined {
@@ -873,11 +904,8 @@ function describeCandidate(c: Candidate): string {
 		"locations:",
 		c.locations.map((l) => `  ${formatLocation(l)}`).join("\n"),
 		"",
-		"summary:",
-		c.summary,
-		"",
-		"evidence as filed:",
-		c.evidence,
+		"description:",
+		c.description,
 	].join("\n");
 }
 

@@ -49,13 +49,16 @@ function seedFailedScan(ledger: Ledger, scanId: string): void {
 		title: "SQL injection in getUser",
 		cweIds: ["CWE-89"],
 		locations: [{ path: "a.ts", start_line: 1, end_line: 2 }],
-		summary: "id is interpolated",
-		evidence: "a.ts:1",
+		description: "id is interpolated\n\na.ts:1",
 	});
-	ledger.resolveCandidate(scanId, "c1", {
-		disposition: "confirmed",
-		rationale: "traced it",
-		validation: { disposition: "confirmed", rationale: "traced it", at: "t" },
+	ledger.addCandidateActivity({
+		scanId,
+		candidateId: "c1",
+		workerId: "validate-c1",
+		kind: "validation",
+		body: "traced it",
+		status: "confirmed",
+		data: { disposition: "confirmed" },
 	});
 	ledger.upsertCandidate({
 		scanId,
@@ -63,8 +66,7 @@ function seedFailedScan(ledger: Ledger, scanId: string): void {
 		title: "Unvalidated thing",
 		cweIds: [],
 		locations: [{ path: "a.ts", start_line: 3, end_line: 3 }],
-		summary: "s",
-		evidence: "e",
+		description: "s\n\ne",
 	});
 	ledger.setPhase(scanId, "validate");
 	ledger.finishScan(scanId, "failed");
@@ -138,6 +140,26 @@ describe("resume re-enters at the recorded phase", () => {
 
 		await expect(Scanner.resume("legacy-static", { db })).rejects.toThrow(
 			"used the removed static profile",
+		);
+	});
+
+	it("refuses to change the number of probe passes on resume", async () => {
+		const db = join(mkdtempSync(join(tmpdir(), "opensec-probe-resume-")), "l.db");
+		const ledger = Ledger.open(db);
+		const repoId = ledger.upsertRepo("/tmp", "tmp", null);
+		ledger.createScan({
+			id: "two-pass",
+			repoId,
+			revision: null,
+			profile: "local",
+			configHash: "old",
+			probes: 2,
+		});
+		ledger.finishScan("two-pass", "failed");
+		ledger.close();
+
+		await expect(Scanner.resume("two-pass", { db, probes: 1 })).rejects.toThrow(
+			"started with 2 probe pass(es)",
 		);
 	});
 

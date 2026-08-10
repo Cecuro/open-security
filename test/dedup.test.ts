@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { createOpensecTool, PROBE_VERBS, type RunContext } from "../src/agents/tool.js";
+import { runOpensec, PROBE_VERBS, type RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { collisionGroups, cweFamily, identityOf, mergeProse } from "../src/scan/identity.js";
 
@@ -41,21 +41,14 @@ function setup() {
 			nonce: "N",
 			verbs: PROBE_VERBS,
 		};
-		const tool = createOpensecTool(ctx);
-		return async (p: Record<string, unknown>) =>
-			JSON.parse(
-				(await tool.execute("t", p as never, undefined, undefined, {} as never)).content
-					.map((c) => ("text" in c ? c.text : ""))
-					.join(""),
-			);
+		return async (p: Record<string, unknown>) => JSON.parse(runOpensec(ctx, p as never));
 	};
 
 	const file = (over: Record<string, unknown> = {}) => ({
 		verb: "candidate.create",
 		title: "SQL injection in getUser",
 		cwe: ["CWE-89"],
-		summary: "the id is interpolated",
-		evidence: "a.js:2",
+		description: "the id is interpolated\n\na.js:2",
 		locations: [{ path: "a.js", start_line: 2, end_line: 2, role: "sink" }],
 		...over,
 	});
@@ -76,8 +69,7 @@ describe("identical findings collapse without a model", () => {
 			env.file({
 				// Different words, different line inside the same function, same finding.
 				title: "SQLi via id",
-				summary: "user-controlled id reaches the query",
-				evidence: "a.js:3",
+					description: "user-controlled id reaches the query\n\na.js:3",
 				locations: [{ path: "a.js", start_line: 3, end_line: 3, role: "sink" }],
 			}),
 		);
@@ -87,8 +79,8 @@ describe("identical findings collapse without a model", () => {
 		// One row, and neither probe's evidence was thrown away.
 		const live = env.ledger.listLiveCandidates("s");
 		expect(live).toHaveLength(1);
-		expect(live[0]?.evidence).toContain("a.js:2");
-		expect(live[0]?.evidence).toContain("a.js:3");
+		expect(live[0]?.description).toContain("a.js:2");
+		expect(live[0]?.description).toContain("a.js:3");
 		expect(live[0]?.locations).toHaveLength(2);
 	});
 
@@ -96,7 +88,7 @@ describe("identical findings collapse without a model", () => {
 		const env = setup();
 		await env.probe("probe-1")(env.file());
 		await env.probe("probe-2")(env.file());
-		expect(env.ledger.listLiveCandidates("s")[0]?.resolution).toBeUndefined();
+		expect(env.ledger.listLiveCandidates("s")[0]?.status).toBe("open");
 	});
 
 	it("keeps siblings apart when the probe distinguishes them", async () => {
