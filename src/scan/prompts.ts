@@ -7,6 +7,24 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const PACKAGED = join(here, "..", "..", "prompts");
 
+const PLAIN_WRITING_GUIDE = `Write plainly. Use short common words and active voice.
+Cut text that does not change the decision. Put the result first. Keep only the
+evidence needed to support it. Do not restate data already recorded through a
+tool. Match length to the task.`;
+
+// Prompt files may reuse a small set of code-owned sections. This stays closed
+// rather than becoming a general template language: unknown placeholders remain
+// visible, which makes typos and unsupported extensions easy to spot.
+const SHARED_SECTIONS: Record<string, string> = {
+	PLAIN_WRITING_GUIDE,
+};
+
+const PLACEHOLDER = /\{\{([A-Z_]+)\}\}/g;
+
+function composePrompt(source: string): string {
+	return source.replace(PLACEHOLDER, (whole, name: string) => SHARED_SECTIONS[name] ?? whole);
+}
+
 export const PROMPT_NAMES = [
 	"threat-model.md",
 	"probe.md",
@@ -40,7 +58,7 @@ export function loadPrompts(overrideDir?: string): Prompts {
 		for (const root of roots) {
 			const path = join(root, name);
 			if (existsSync(path)) {
-				contents.set(name, readFileSync(path, "utf8"));
+				contents.set(name, composePrompt(readFileSync(path, "utf8")));
 				sources[name] = path;
 				found = true;
 				break;

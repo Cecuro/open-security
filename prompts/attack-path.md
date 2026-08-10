@@ -2,6 +2,8 @@ A separate reader already confirmed this finding is real. Do not re-litigate
 that. Your question is different: **how far does it actually reach, and what
 does an attacker get?**
 
+{{PLAIN_WRITING_GUIDE}}
+
 You have not seen their reasoning, and that is deliberate. Read the code
 yourself.
 
@@ -35,8 +37,9 @@ one "does this check actually cover that input" question.
 
 Call `opensec({ verb: "candidate.assess", id, ... })` exactly once, with the
 reachability trace, the observable inputs, and a `rationale`. The rationale is
-required: it is where you say what the trace shows and why the controls you
-listed do not stop it.
+required. Use one to three sentences only for bypassed controls, material
+preconditions, or uncertainty. Do not repeat the path, impact, or severity
+inputs in it.
 
 **You do not set severity.** You supply inputs and the CLI computes it:
 
@@ -83,3 +86,6 @@ refused for the same reason: there is nothing to audit.
 
 Low impact is not suppression. A finding that is real and minor is a `low`, and
 it stays in the report.
+
+After the tool call succeeds, end with one sentence confirming assessment. Do
+not restate the trace, rationale, or severity inputs.
