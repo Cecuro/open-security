@@ -118,6 +118,50 @@ describe("OpenSec sandbox bridge", () => {
 		}
 	});
 
+	it("round-trips finding text through JSON without treating it as shell syntax", async () => {
+		const ctx = setup();
+		ctx.verbs = ["candidate.validate"];
+		ctx.resolvableIds = ["c1"];
+		ctx.dispositions = ["confirmed", "not_applicable", "needs_follow_up"];
+		ctx.ledger.upsertCandidate({
+			scanId: "scan",
+			workerId: "probe",
+			title: "finding",
+			cweIds: [],
+			locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
+			description: "description",
+		});
+		const bridge = await OpensecBridge.create(ctx, { cliPath: cliFixture(), workspace: ctx.repoRoot });
+		bridges.push(bridge);
+		const oldSocket = process.env.OPENSEC_SOCKET;
+		const oldToken = process.env.OPENSEC_TOKEN;
+		const oldVerbs = process.env.OPENSEC_VERBS;
+		process.env.OPENSEC_SOCKET = join(bridge.mount.mountDir, "opensec.sock");
+		process.env.OPENSEC_TOKEN = bridge.mount.token;
+		process.env.OPENSEC_VERBS = bridge.mount.verbs;
+		const rationale = 'literal $(whoami), `uname`, "$HOME", and a single quote\'';
+		const input = join(ctx.repoRoot, "validation.json");
+		writeFileSync(input, JSON.stringify({ id: "c1", disposition: "confirmed", rationale }));
+		const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+		try {
+			expect(
+				await runAgentCli([
+					"candidate",
+					"validate",
+					"--input",
+					input,
+				]),
+			).toBe(0);
+			expect(ctx.ledger.getCandidate("scan", "c1")?.activities[0]?.body).toBe(rationale);
+		} finally {
+			write.mockRestore();
+			restoreEnv("OPENSEC_SOCKET", oldSocket);
+			restoreEnv("OPENSEC_TOKEN", oldToken);
+			restoreEnv("OPENSEC_VERBS", oldVerbs);
+		}
+	});
+
 	it("closes idle clients during cleanup", async () => {
 		const bridge = await OpensecBridge.create(setup(), { cliPath: cliFixture() });
 		const client = connect(join(bridge.mount.mountDir, "opensec.sock"));

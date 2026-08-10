@@ -473,6 +473,7 @@ export class Ledger {
 		readGroup?: string,
 		workerId?: string,
 	): void {
+		if (!this.fileInScope(scanId, path)) return;
 		// Direct ledger callers default to the first pass. Agent instrumentation
 		// only calls this for discovery contexts, where readGroup is explicit.
 		const group = readGroup ?? "pass-1";
@@ -540,7 +541,8 @@ export class Ledger {
 				...coverage,
 				completed:
 					coverage.bytes_read >= coverage.bytes_in_scope &&
-					(work.started === 0 || work.completed >= work.started),
+					work.started > 0 &&
+					work.completed >= work.started,
 			};
 		});
 	}

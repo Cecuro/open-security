@@ -4,9 +4,9 @@ import { pathToFileURL } from "node:url";
 
 const COMMANDS = [
 	{ words: ["work", "next"], verb: "work.next", usage: "opensec work next [--limit <n>]", note: "Get the files you must review." },
-	{ words: ["work", "complete"], verb: "work.complete", usage: "opensec work complete --summary <text> | --summary-file <path>", note: "Record completed review work." },
+	{ words: ["work", "complete"], verb: "work.complete", usage: "opensec work complete --input <path|->", note: "Record completed review work from JSON." },
 	{ words: ["candidate", "create"], verb: "candidate.create", usage: "opensec candidate create --input <path|->", note: "Create a suspected finding from JSON: title, description, locations, optional cwe and instance." },
-	{ words: ["candidate", "validate"], verb: "candidate.validate", usage: "opensec candidate validate <id> --disposition <value> --rationale <text> | --rationale-file <path>", note: "Record a validation verdict." },
+	{ words: ["candidate", "validate"], verb: "candidate.validate", usage: "opensec candidate validate --input <path|->", note: "Record a validation verdict from JSON." },
 	{ words: ["candidate", "assess"], verb: "candidate.assess", usage: "opensec candidate assess --input <path|->", note: "Record attack-path and severity inputs." },
 ] as const;
 
@@ -56,33 +56,12 @@ function params(command: Command, args: string[]): Record<string, unknown> {
 		const flags = flagsOf(args, ["--limit"]);
 		return flags.size === 0 ? {} : { limit: numberFlag(flags, "--limit") };
 	}
-	if (command.verb === "work.complete") return { summary: textFlag(flagsOf(args, ["--summary", "--summary-file"]), "--summary") };
-	if (command.verb === "candidate.validate") {
-		const [id, ...options] = args;
-		if (!id || id.startsWith("--")) throw new Error("candidate validate needs a candidate id");
-		const flags = flagsOf(options, ["--disposition", "--rationale", "--rationale-file", "--duplicate-of"]);
-		const duplicate = flags.get("--duplicate-of");
-		return {
-			id,
-			disposition: requiredFlag(flags, "--disposition"),
-			rationale: textFlag(flags, "--rationale"),
-			...(duplicate ? { duplicate_of: duplicate } : {}),
-		};
-	}
 	return jsonParams(args);
 }
 
 function jsonParams(args: string[]): Record<string, unknown> {
-	if (args.length === 2 && args[0] === "--json") return object(parseJson(args[1] ?? "", "--json"));
 	if (args.length === 2 && args[0] === "--input") return object(parseJson(args[1] === "-" ? readStdin() : read(args[1] ?? ""), args[1] ?? ""));
-	throw new Error("use --input <path|-> or --json <object>");
-}
-
-function textFlag(flags: Map<string, string>, name: string): string {
-	const value = flags.get(name);
-	const file = flags.get(`${name}-file`);
-	if ((value ? 1 : 0) + (file ? 1 : 0) !== 1) throw new Error(`use exactly one of ${name} <text> or ${name}-file <path>`);
-	return value ?? read(file!);
+	throw new Error("use --input <path|->");
 }
 
 function flagsOf(args: string[], permitted: string[]): Map<string, string> {
@@ -160,6 +139,7 @@ function help(): string {
 }
 
 const COMMAND_DETAILS: Partial<Record<Command["verb"], string>> = {
+	"work.complete": "JSON fields: summary.",
 	"candidate.create": [
 		"JSON fields:",
 		"  title        short finding title",
@@ -169,8 +149,9 @@ const COMMAND_DETAILS: Partial<Record<Command["verb"], string>> = {
 		"  instance     optional sibling identifier",
 	].join("\n"),
 	"candidate.validate": [
+		"JSON fields: id, disposition, rationale, and optional duplicate_of.",
 		"Disposition: confirmed | not_applicable | needs_follow_up | duplicate.",
-		"Duplicate also requires --duplicate-of <id>.",
+		"Duplicate also requires duplicate_of.",
 	].join("\n"),
 	"candidate.assess": [
 		"JSON fields: id, entry_point, path[], controls[], rationale, and:",

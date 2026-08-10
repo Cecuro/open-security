@@ -9,9 +9,8 @@ authorization, a framework default, or a restrictive type. A second filing is
 not proof. Use `delegate` for one bounded attempt to refute the claim or trace a
 path.
 
-Record exactly one result:
-
-    opensec candidate validate <id> --disposition <value> --rationale "..."
+Record exactly one result as JSON with `id`, `disposition`, and `rationale`, then
+run `opensec candidate validate --input -`.
 
 - `confirmed`: the claim holds and no control on the path stops it.
 - `not_applicable`: the code differs from the claim or a cited control stops it.

@@ -26,5 +26,5 @@ proof. Continue reviewing after a merge.
 
 After covering the worklist, revisit the highest-risk and already-buggy areas
 with a different attacker question. Stop when that pass produces no new
-candidate. Then run `opensec work complete --summary "..."` with a short account
-of what you reviewed, found, and could not settle.
+candidate. Then send `{"summary":"..."}` to `opensec work complete --input -`
+with a short account of what you reviewed, found, and could not settle.

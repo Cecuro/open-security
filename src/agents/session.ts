@@ -158,7 +158,7 @@ export class AgentRunner {
 				...(ctx.verbs?.includes("work.next")
 					? ["Start with `opensec work next` and page until remaining is 0."]
 					: []),
-				"Pass complex JSON on stdin with `--input -`, or use a temporary file outside the repository. There is no opensec function tool.",
+				"Pass JSON with `--input -` using a single-quoted heredoc (`<<'JSON'`), or use a temporary file outside the repository. Never put repository or finding text in shell arguments. There is no opensec function tool.",
 			].join("\n"),
 			appendSystemPrompt: [],
 		});
@@ -532,7 +532,7 @@ function instrumentRead(def: AnyToolDef, ctx: RunContext): AnyToolDef {
 			const result = await inner(id, next, signal, onUpdate, extCtx);
 			if (typeof path === "string") {
 				const rel = toRepoRelative(ctx.repoRoot, resolveToolPath(ctx, path));
-					if (rel && ctx.readGroup !== undefined) {
+				if (rel && ctx.readGroup !== undefined) {
 					// A read with an offset is the agent continuing through a file it
 					// has already seen the start of, so it adds rather than replaces.
 					const offset = (params as { offset?: unknown } | undefined)?.offset;

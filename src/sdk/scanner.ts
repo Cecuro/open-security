@@ -652,7 +652,7 @@ export class Scanner {
 					"",
 					wrapUntrusted(this.nonce, `candidate-${c.id}`, describeCandidate(c)),
 					"",
-					`Decide, then run \`opensec candidate validate ${c.id} ...\` once.`,
+					"Decide, then run `opensec candidate validate --input -` once.",
 				].join("\n"),
 			});
 

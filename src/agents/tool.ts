@@ -244,7 +244,13 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 	const { id } = requireCandidate(ctx, p);
 	const rationale = sanitize(ctx, requireText(p.rationale, "rationale"));
 
-	const disposition = (p.disposition as Disposition | undefined) ?? "needs_follow_up";
+	const disposition =
+		enumValue<Disposition>(p.disposition, "disposition", [
+			"confirmed",
+			"not_applicable",
+			"duplicate",
+			"needs_follow_up",
+		]) ?? "needs_follow_up";
 
 	if (ctx.dispositions && !ctx.dispositions.includes(disposition)) {
 		throw new Error(
@@ -519,8 +525,28 @@ function readSuppression(ctx: RunContext, value: unknown): SeverityInputs["suppr
 }
 
 function validateLocation(ctx: RunContext, loc: Location): Location {
+	if (!loc || typeof loc !== "object" || Array.isArray(loc)) {
+		throw new Error("each location must be an object");
+	}
+	const raw = loc as unknown as Record<string, unknown>;
+	const allowed = ["path", "start_line", "end_line", "symbol", "role"];
+	const unknown = Object.keys(raw).filter((key) => !allowed.includes(key));
+	if (unknown.length > 0) throw new Error(`location does not accept: ${unknown.join(", ")}`);
 	if (typeof loc?.path !== "string" || loc.path.length === 0) {
 		throw new Error("location.path is required");
+	}
+	if (typeof loc.start_line !== "number") throw new Error("location.start_line must be an integer");
+	if (loc.end_line !== undefined && typeof loc.end_line !== "number") {
+		throw new Error("location.end_line must be an integer");
+	}
+	if (loc.symbol !== undefined && typeof loc.symbol !== "string") {
+		throw new Error("location.symbol must be a string");
+	}
+	if (
+		loc.role !== undefined &&
+		(typeof loc.role !== "string" || !(ROLES as readonly string[]).includes(loc.role))
+	) {
+		throw new Error(`location.role must be one of: ${ROLES.join(", ")}`);
 	}
 	if (isAbsolute(loc.path)) {
 		throw new Error(`location.path must be repo-relative, got '${loc.path}'`);
@@ -566,10 +592,8 @@ function validateLocation(ctx: RunContext, loc: Location): Location {
 		path: rel,
 		start_line: start,
 		end_line: end,
-		...(loc.symbol ? { symbol: sanitize(ctx, String(loc.symbol)).slice(0, 200) } : {}),
-		...(loc.role && (ROLES as readonly string[]).includes(loc.role)
-			? { role: loc.role as LocationRole }
-			: {}),
+		...(loc.symbol ? { symbol: sanitize(ctx, loc.symbol).slice(0, 200) } : {}),
+		...(loc.role ? { role: loc.role as LocationRole } : {}),
 	};
 }
 

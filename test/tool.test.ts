@@ -134,6 +134,30 @@ describe("structural checks at the write boundary", () => {
 		expect(out.id).toBe("c1");
 	});
 
+	it("rejects malformed location metadata instead of weakening identity", async () => {
+		await expect(
+			env.call({
+				...good,
+				locations: [{ path: "app.js", start_line: 2, end_line: 3, role: "root-control" }],
+			}),
+		).rejects.toThrow(/location.role must be one of/);
+		await expect(
+			env.call({
+				...good,
+				locations: [{ path: "app.js", start_line: 2, end_line: 3, symbol: 42 }],
+			}),
+		).rejects.toThrow(/location.symbol must be a string/);
+	});
+
+	it("rejects unknown location fields", async () => {
+		await expect(
+			env.call({
+				...good,
+				locations: [{ path: "app.js", start_line: 2, end_line: 3, sink: true }],
+			}),
+		).rejects.toThrow(/location does not accept: sink/);
+	});
+
 	it("rejects a line number the file does not have", async () => {
 		await expect(
 			env.call({ ...good, locations: [{ path: "app.js", start_line: 99, end_line: 99 }] }),
@@ -331,6 +355,18 @@ describe("the two passes are separate, and the tool enforces it", () => {
 				method: "code_reading",
 			}),
 		).rejects.toThrow(/not confirmed by validation/);
+	});
+
+	it("rejects an unknown validation disposition", async () => {
+		await env.call(good);
+		await expect(
+			env.call({
+				verb: "candidate.validate",
+				id: "c1",
+				disposition: "accepted",
+				rationale: "x",
+			}),
+		).rejects.toThrow(/disposition must be one of/);
 	});
 
 	it("refuses to rate a candidate validation threw out", async () => {
