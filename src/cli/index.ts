@@ -33,7 +33,9 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
 
 Options
   --model <ref>        provider/model, e.g. azure-openai-responses/gpt-5.4
-  --profile <p>        static (default) | container (M2, not yet implemented)
+  --profile <p>        static (default) | container (Docker sandbox with bash)
+                       Container requires Docker. Set OPENSEC_SANDBOX_IMAGE and
+                       OPENSEC_SANDBOX_USER for a custom image and its unprivileged user.
   --db <path>          ledger location (default ~/.opensec/opensec.db)
   --prompts <dir>      override the prompt pack
   --max-files <n>      refuse rather than run away on a monorepo

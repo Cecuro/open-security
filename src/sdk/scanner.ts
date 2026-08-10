@@ -104,19 +104,17 @@ export class Scanner {
 		const profile = opts.profile ?? "static";
 		const scope = opts.scope ?? { kind: "repository" };
 
-		if (profile === "container") {
-			throw new Error(
-				"--profile container is not implemented yet (M2). Use --profile static.",
-			);
-		}
-
 		// SDK callers get the same credential resolution as the CLI. Idempotent,
 		// and anything already in the environment wins.
 		loadEnv();
 
 		const prompts = loadPrompts(opts.promptsDir);
 		const ledger = Ledger.open(opts.db);
-		const runner = await AgentRunner.create({ repoRoot, modelRef: opts.model });
+		const runner = await AgentRunner.create({
+			repoRoot,
+			modelRef: opts.model,
+			sandbox: profile === "container" ? "docker" : "none",
+		});
 		const model = Scanner.resolveEnforceable(runner, opts.maxCostUsd);
 
 		const repoId = ledger.upsertRepo(repoRoot, repoName, git(repoRoot, ["config", "--get", "remote.origin.url"]));
@@ -186,7 +184,11 @@ export class Scanner {
 			}
 
 			const prompts = loadPrompts(opts.promptsDir);
-			const runner = await AgentRunner.create({ repoRoot: repo.path, modelRef: opts.model });
+			const runner = await AgentRunner.create({
+				repoRoot: repo.path,
+				modelRef: opts.model,
+				sandbox: scan.profile === "container" ? "docker" : "none",
+			});
 			Scanner.resolveEnforceable(runner, opts.maxCostUsd);
 
 			const head = git(repo.path, ["rev-parse", "HEAD"]);
@@ -623,8 +625,6 @@ export class Scanner {
 					"",
 					wrapUntrusted(this.nonce, `candidate-${c.id}`, describeCandidate(c)),
 					"",
-					"You have no shell — this is a static review.",
-					"",
 					`Decide, then call opensec({ verb: "candidate.validate", id: "${c.id}", ... }) once.`,
 				].join("\n"),
 			});
@@ -672,8 +672,7 @@ export class Scanner {
 					"",
 					wrapUntrusted(this.nonce, `candidate-${c.id}`, describeCandidate(c)),
 					"",
-					"You have no shell — this is a static review. Nothing you conclude may",
-					"claim execution, and `code_execution_proven` must be false.",
+					"Only set `code_execution_proven` after a successful reproduction in this run.",
 					"",
 					`Trace it, then call opensec({ verb: "candidate.assess", id: "${c.id}", ... }) once.`,
 				].join("\n"),
