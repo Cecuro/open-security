@@ -122,6 +122,21 @@ describe("reportScan renders from the ledger alone", () => {
 		expect(result.markdown).toContain("1 pass(es), each over all 1 files");
 		ledger.close();
 	});
+
+	it("writes a completed scan's terminal state into findings.json", () => {
+		const ledger = openLedger();
+		const scanId = `resume-test-${process.pid}-completed`;
+		artifacts.push(scanArtifactDir(scanId));
+		const repoId = ledger.upsertRepo("/tmp/completed-repo", "completed-repo", null);
+		ledger.createScan({ id: scanId, repoId, revision: null, config: testScanConfig() });
+		ledger.finishScan(scanId, "completed");
+
+		const result = reportScan(ledger, scanId);
+		const json = JSON.parse(readFileSync(result.jsonPath, "utf8"));
+		expect(json.scan).toMatchObject({ status: "completed", phase: "report" });
+		expect(json.scan.completed_at).toBeTypeOf("string");
+		ledger.close();
+	});
 });
 
 describe("resume re-enters at the recorded phase", () => {
