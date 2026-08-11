@@ -22,6 +22,7 @@ export interface SandboxBridgeMount {
 
 export interface BridgeOptions {
 	cliPath?: string;
+	relayPath?: string;
 	workspace?: string;
 }
 
@@ -50,6 +51,7 @@ export class OpensecBridge {
 
 		try {
 			copyFileSync(opts.cliPath ?? compiledCliPath(), join(dir, "opensec-cli.mjs"));
+			copyFileSync(opts.relayPath ?? compiledRelayPath(), join(dir, "opensec-relay.mjs"));
 			writeFileSync(
 				join(dir, "opensec"),
 				'#!/bin/sh\nexec node "$(dirname "$0")/opensec-cli.mjs" "$@"\n',
@@ -101,6 +103,12 @@ export class OpensecBridge {
 function compiledCliPath(): string {
 	const compiled = fileURLToPath(new URL("../cli/agent.js", import.meta.url));
 	if (!existsSync(compiled)) throw new Error("compiled OpenSec CLI is missing; run npm run build first");
+	return compiled;
+}
+
+function compiledRelayPath(): string {
+	const compiled = fileURLToPath(new URL("./relay.js", import.meta.url));
+	if (!existsSync(compiled)) throw new Error("compiled OpenSec relay is missing; run npm run build first");
 	return compiled;
 }
 
