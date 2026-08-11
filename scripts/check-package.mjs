@@ -22,6 +22,8 @@ const required = [
 	"dist/review/assets/index.html",
 	"dist/review/assets/app.js",
 	"dist/review/assets/styles.css",
+	"docs/screenshots/runs.jpg",
+	"docs/screenshots/findings.jpg",
 ];
 const missing = required.filter((file) => !files.has(file));
 if (missing.length > 0) {
