@@ -46,6 +46,28 @@ function request(socket: string, payload: object): Promise<{ ok: boolean; output
 }
 
 describe("OpenSec sandbox bridge", () => {
+	it("shows group help and copyable JSON examples", async () => {
+		const output: string[] = [];
+		const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+			output.push(String(chunk));
+			return true;
+		});
+
+		try {
+			expect(await runAgentCli(["work", "--help"])).toBe(0);
+			expect(output.join("")).toContain("WORK COMMANDS");
+			output.length = 0;
+			expect(await runAgentCli(["help", "candidate"])).toBe(0);
+			expect(output.join("")).toContain("CANDIDATE COMMANDS");
+			output.length = 0;
+			expect(await runAgentCli(["candidate", "assess", "--help"])).toBe(0);
+			expect(output.join("")).toContain('"auth_required":"none"');
+			expect(output.join("")).toContain('"path":[');
+		} finally {
+			write.mockRestore();
+		}
+	});
+
 	it("only accepts its run token and applies the existing worklist rules", async () => {
 		const bridge = await OpensecBridge.create(setup(), { cliPath: cliFixture() });
 		bridges.push(bridge);

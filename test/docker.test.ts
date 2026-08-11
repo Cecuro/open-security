@@ -1,11 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createBashTool, type BashSandbox } from "../src/agents/docker.js";
+import { createBashTool, DEFAULT_IMAGE_DOCKERFILE, type BashSandbox } from "../src/agents/docker.js";
 
 const call = (tool: ReturnType<typeof createBashTool>, params: object) =>
 	tool.execute("call", params as never, undefined, undefined, {} as never);
 
 describe("Docker bash tool", () => {
+	it("builds the default image with the tools agents need to inspect and test repositories", () => {
+		for (const tool of ["cargo", "curl", "git", "python3", "ripgrep"]) {
+			expect(DEFAULT_IMAGE_DOCKERFILE).toContain(tool);
+		}
+		expect(DEFAULT_IMAGE_DOCKERFILE).toContain("FROM node:20-bookworm-slim");
+		expect(DEFAULT_IMAGE_DOCKERFILE).toContain("FROM rust:1.88-bookworm AS rust");
+		expect(DEFAULT_IMAGE_DOCKERFILE).toContain("ln -s /usr/local/cargo/bin/$tool /usr/local/bin/$tool");
+	});
+
 	it("runs commands inside the supplied sandbox and returns stderr", async () => {
 		const exec = vi.fn().mockResolvedValue({
 			exitCode: 0,
