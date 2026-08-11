@@ -9,6 +9,7 @@ import { OpensecBridge } from "../src/agents/bridge.js";
 import { runAgentCli } from "../src/cli/agent.js";
 import type { RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
+import { testScanConfig } from "./config.js";
 
 const bridges: OpensecBridge[] = [];
 
@@ -21,7 +22,7 @@ function setup(): RunContext {
 	writeFileSync(join(root, "app.js"), "one\ntwo\n");
 	const ledger = Ledger.open(join(root, "ledger.db"));
 	const repoId = ledger.upsertRepo(root, "fixture", null);
-	ledger.createScan({ id: "scan", repoId, revision: null, profile: "container", configHash: "h" });
+	ledger.createScan({ id: "scan", repoId, revision: null, config: testScanConfig("container") });
 	ledger.insertFiles("scan", [{ path: "app.js", sha: "x", bytes: 8, excludedReason: null }]);
 	return { scanId: "scan", workerId: "probe", repoRoot: root, profile: "container", ledger, nonce: "nonce" };
 }

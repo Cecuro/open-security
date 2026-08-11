@@ -19,6 +19,7 @@ import { Ledger } from "../src/db/db.js";
 import { renderMarkdown } from "../src/scan/render.js";
 import { computeSeverity } from "../src/scan/severity.js";
 import { redactSecrets, stripControlChars } from "../src/text.js";
+import { testScanConfig } from "./config.js";
 
 function setup(scan = "s") {
 	const base = mkdtempSync(join(tmpdir(), "opensec-hard-"));
@@ -28,7 +29,7 @@ function setup(scan = "s") {
 
 	const ledger = Ledger.open(join(base, "l.db"));
 	const repoId = ledger.upsertRepo(root, "r", null);
-	ledger.createScan({ id: scan, repoId, revision: null, profile: "local", configHash: "c" });
+	ledger.createScan({ id: scan, repoId, revision: null, config: testScanConfig() });
 	ledger.insertFiles(scan, [{ path: "app.js", sha: "1", bytes: 15, excludedReason: null }]);
 
 	const ctx: RunContext = {
@@ -173,7 +174,7 @@ describe("agent prose never reaches the report raw", () => {
 	it("keeps a newline in a title from breaking out of the findings table", () => {
 		const ledger = Ledger.open(join(mkdtempSync(join(tmpdir(), "opensec-render-")), "l.db"));
 		const repoId = ledger.upsertRepo("/tmp/x", "x", null);
-		ledger.createScan({ id: "r", repoId, revision: null, profile: "local", configHash: "c" });
+		ledger.createScan({ id: "r", repoId, revision: null, config: testScanConfig() });
 		const md = renderMarkdown({
 			scan: ledger.getScan("r")!,
 			repoName: "x",
@@ -222,7 +223,7 @@ describe("agent prose never reaches the report raw", () => {
 		// everyday paths in half the JS frameworks.
 		const ledger = Ledger.open(join(mkdtempSync(join(tmpdir(), "opensec-render2-")), "l.db"));
 		const repoId = ledger.upsertRepo("/tmp/x", "x", null);
-		ledger.createScan({ id: "r", repoId, revision: null, profile: "local", configHash: "c" });
+		ledger.createScan({ id: "r", repoId, revision: null, config: testScanConfig() });
 		const md = renderMarkdown({
 			scan: ledger.getScan("r")!,
 			repoName: "x",

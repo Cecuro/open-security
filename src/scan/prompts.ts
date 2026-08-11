@@ -30,7 +30,7 @@ export const PROMPT_NAMES = [
 	"probe.md",
 	"reduce.md",
 	"validate.md",
-	"attack-path.md",
+	"assessment.md",
 	"refs/counterevidence.md",
 	"agents/delegate.md",
 ] as const;

@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { identityHash, mergeLocations, mergeProse } from "../scan/identity.js";
+import { normalizeScanConfig, parseScanConfig, scanConfigHash } from "../scan/config.js";
 import type {
 	Candidate,
 	CandidateActivity,
@@ -16,10 +17,10 @@ import type {
 	PassCoverage,
 	Phase,
 	Profile,
-	ScanScope,
 	ScanFile,
 	ScanRecord,
 	ScanStatus,
+	ScanConfig,
 } from "../types.js";
 import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 
@@ -128,30 +129,28 @@ export class Ledger {
 		id: string;
 		repoId: string;
 		revision: string | null;
-		profile: Profile;
-		configHash: string;
-		modelRef?: string;
-		promptHash?: string;
-		probes?: number;
-		scope?: ScanScope;
+		config: ScanConfig;
 	}): void {
+		const config = normalizeScanConfig(args.config);
+		const configJson = JSON.stringify(config);
 		this.db
 			.prepare(
 				`INSERT INTO scans (id, repo_id, revision, profile, status, phase, config_hash,
-				 model_ref, prompt_hash, probes, scope_kind, scope_base, started_at)
-				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?, ?, ?, ?, ?, ?)`,
+				 config_json, model_ref, prompt_hash, passes, scope_kind, scope_base, started_at)
+				 VALUES (?, ?, ?, ?, 'running', 'inventory', ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				args.id,
 				args.repoId,
 				args.revision,
-				args.profile,
-				args.configHash,
-				args.modelRef ?? null,
-				args.promptHash ?? null,
-				args.probes ?? null,
-				args.scope?.kind ?? "repository",
-				args.scope?.kind === "diff" ? args.scope.base : null,
+				config.profile,
+				scanConfigHash(config),
+				configJson,
+				config.modelRef,
+				config.promptHash,
+				config.passes,
+				config.scope.kind,
+				config.scope.kind === "diff" ? config.scope.base : null,
 				now(),
 			);
 	}
@@ -301,9 +300,10 @@ export class Ledger {
 			status: row.status as ScanStatus,
 			phase: row.phase as Phase,
 			config_hash: row.config_hash as string,
+			config: parseScanConfig(row.config_json),
 			model_ref: (row.model_ref as string | null) ?? null,
 			prompt_hash: (row.prompt_hash as string | null) ?? null,
-			probes: (row.probes as number | null) ?? null,
+			passes: (row.passes as number | null) ?? null,
 			threat_model_source: (row.threat_model_source as string | null) ?? null,
 			scope_kind: (row.scope_kind as ScanRecord["scope_kind"]) ?? null,
 			scope_base: (row.scope_base as string | null) ?? null,

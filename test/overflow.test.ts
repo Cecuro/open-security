@@ -21,6 +21,7 @@ import {
 import { readableFrom } from "../src/agents/session.js";
 import type { RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
+import { testScanConfig } from "./config.js";
 import { loadPrompts } from "../src/scan/prompts.js";
 
 function setup(reportText: string) {
@@ -32,7 +33,7 @@ function setup(reportText: string) {
 
 	const ledger = Ledger.open(join(base, "l.db"));
 	const repoId = ledger.upsertRepo(root, "r", null);
-	ledger.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
+	ledger.createScan({ id: "s", repoId, revision: null, config: testScanConfig() });
 	ledger.insertFiles("s", [{ path: "app.js", sha: "1", bytes: 6, excludedReason: null }]);
 
 	const ctx: RunContext = {

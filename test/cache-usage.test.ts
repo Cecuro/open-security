@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { Ledger } from "../src/db/db.js";
 import { renderMarkdown } from "../src/scan/render.js";
+import { testScanConfig } from "./config.js";
 
 describe("cache usage", () => {
 	it("persists cache buckets and renders their hit rate and economics", () => {
@@ -17,8 +18,7 @@ describe("cache usage", () => {
 				id: "s",
 				repoId,
 				revision: null,
-				profile: "local",
-				configHash: "h",
+				config: testScanConfig(),
 			});
 			ledger.addUsage("s", {
 				inputTokens: 750,

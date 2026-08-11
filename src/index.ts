@@ -9,6 +9,15 @@ export {
 export { Ledger, defaultDbPath, opensecDir, scanArtifactDir } from "./db/db.js";
 export { inventory, type InventoryResult, type InventoryEntry } from "./scan/inventory.js";
 export {
+	normalizeScanConfig,
+	parseScanConfig,
+	scanConfigHash,
+	DEFAULT_CONCURRENCY,
+	DEFAULT_MAX_TURNS,
+	DEFAULT_PASSES,
+	type ScanConfigInput,
+} from "./scan/config.js";
+export {
 	computeSeverity,
 	formatSeverity,
 	renderMatrix,

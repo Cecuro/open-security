@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Ledger, scanArtifactDir } from "../src/db/db.js";
 import { PHASE_ORDER, phaseBefore, reportScan, Scanner } from "../src/sdk/scanner.js";
 import type { Phase } from "../src/types.js";
+import { testScanConfig } from "./config.js";
 
 const artifacts: string[] = [];
 afterEach(() => {
@@ -30,11 +31,11 @@ function seedFailedScan(ledger: Ledger, scanId: string): void {
 		id: scanId,
 		repoId,
 		revision: "cafebabe",
-		profile: "local",
-		configHash: "cfg",
-		modelRef: "prov/model-x",
-		promptHash: "ph123",
-		probes: 2,
+		config: testScanConfig("local", {
+			modelRef: "prov/model-x",
+			promptHash: "ph123",
+			passes: 2,
+		}),
 	});
 	ledger.insertFiles(scanId, [
 		{ path: "a.ts", sha: "s1", bytes: 100, excludedReason: null },
@@ -88,7 +89,7 @@ describe("reportScan renders from the ledger alone", () => {
 		// Provenance comes from the scan row, not from live Scanner state.
 		expect(result.markdown).toContain("prov/model-x");
 		expect(result.markdown).toContain("ph123");
-		expect(result.markdown).toContain("2 probe(s), each over all 1 files");
+		expect(result.markdown).toContain("2 pass(es), each over all 1 files");
 		expect(result.markdown).toContain("threat-model.md");
 		expect(result.markdown).toContain("1 / 1 files touched");
 		// And it is written to disk like a live report.
@@ -106,19 +107,19 @@ describe("reportScan renders from the ledger alone", () => {
 		ledger.close();
 	});
 
-	it("renders a pre-v6 scan row, with provenance marked as not recorded", () => {
+	it("renders normalized provenance stored on a new scan", () => {
 		const ledger = openLedger();
 		const scanId = `resume-test-${process.pid}-b`;
 		artifacts.push(scanArtifactDir(scanId));
 		const repoId = ledger.upsertRepo("/tmp/old-repo", "old-repo", null);
-		ledger.createScan({ id: scanId, repoId, revision: null, profile: "local", configHash: "c" });
+		ledger.createScan({ id: scanId, repoId, revision: null, config: testScanConfig() });
 		ledger.insertFiles(scanId, [{ path: "x.js", sha: "s", bytes: 5, excludedReason: null }]);
 		ledger.finishScan(scanId, "failed");
 
 		const result = reportScan(ledger, scanId);
-		expect(result.markdown).toContain("(not recorded)");
-		// No probes column value → no ownership claim, rather than a made-up one.
-		expect(result.markdown).not.toContain("each over all");
+		expect(result.markdown).toContain("test/model");
+		expect(result.markdown).toContain("test-prompts");
+		expect(result.markdown).toContain("1 pass(es), each over all 1 files");
 		ledger.close();
 	});
 });
@@ -132,8 +133,7 @@ describe("resume re-enters at the recorded phase", () => {
 			id: "legacy-static",
 			repoId,
 			revision: null,
-			profile: "static" as never,
-			configHash: "old",
+			config: { ...testScanConfig(), profile: "static" as never },
 		});
 		ledger.finishScan("legacy-static", "failed");
 		ledger.close();
@@ -143,23 +143,21 @@ describe("resume re-enters at the recorded phase", () => {
 		);
 	});
 
-	it("refuses to change the number of probe passes on resume", async () => {
-		const db = join(mkdtempSync(join(tmpdir(), "opensec-probe-resume-")), "l.db");
+	it("refuses to change the number of passes on resume", async () => {
+		const db = join(mkdtempSync(join(tmpdir(), "opensec-pass-resume-")), "l.db");
 		const ledger = Ledger.open(db);
 		const repoId = ledger.upsertRepo("/tmp", "tmp", null);
 		ledger.createScan({
 			id: "two-pass",
 			repoId,
 			revision: null,
-			profile: "local",
-			configHash: "old",
-			probes: 2,
+			config: testScanConfig("local", { passes: 2 }),
 		});
 		ledger.finishScan("two-pass", "failed");
 		ledger.close();
 
-		await expect(Scanner.resume("two-pass", { db, probes: 1 })).rejects.toThrow(
-			"started with 2 probe pass(es)",
+		await expect(Scanner.resume("two-pass", { db, passes: 1 })).rejects.toThrow(
+			"started with 2 pass(es)",
 		);
 	});
 
@@ -170,19 +168,19 @@ describe("resume re-enters at the recorded phase", () => {
 			"discovery",
 			"reduce",
 			"validate",
-			"attack_path",
+			"assessment",
 			"report",
 		];
 		expect(PHASE_ORDER).toEqual(expected);
 	});
 
 	it("skips exactly the phases before the one the scan stopped in", () => {
-		// Failed mid-validate: discovery's probes must not run (and bill) again.
+		// Failed mid-validate: discovery agents must not run (and bill) again.
 		expect(phaseBefore("inventory", "validate")).toBe(true);
 		expect(phaseBefore("discovery", "validate")).toBe(true);
 		expect(phaseBefore("reduce", "validate")).toBe(true);
 		expect(phaseBefore("validate", "validate")).toBe(false);
-		expect(phaseBefore("attack_path", "validate")).toBe(false);
+		expect(phaseBefore("assessment", "validate")).toBe(false);
 		// A fresh scan starts at inventory and skips nothing.
 		for (const p of PHASE_ORDER) expect(phaseBefore(p, "inventory")).toBe(false);
 	});

@@ -14,6 +14,7 @@ import { runOpensec, type RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { inventory } from "../src/scan/inventory.js";
 import { renderMarkdown } from "../src/scan/render.js";
+import { testScanConfig } from "./config.js";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "vuln-app");
 const SCAN = "scan-pipeline";
@@ -32,8 +33,7 @@ describe("the M0 loop, without a model", () => {
 			id: SCAN,
 			repoId,
 			revision: "deadbeef",
-			profile: "local",
-			configHash: "cfg",
+			config: testScanConfig(),
 		});
 		ledger.insertFiles(
 			SCAN,
@@ -99,7 +99,7 @@ describe("the M0 loop, without a model", () => {
 			expect(v.disposition).toBe("confirmed");
 		}
 
-		// --- phase 3b: attack path ---------------------------------------------
+		// --- phase 3b: assessment ----------------------------------------------
 		const r1 = await call({
 			verb: "candidate.assess",
 			id: "c1",
@@ -152,7 +152,7 @@ describe("the M0 loop, without a model", () => {
 		expect(md).toContain("critical (unproven)");
 		// Both passes are attributed separately in the report.
 		expect(md).toContain("**Validation**");
-		expect(md).toContain("**Attack path**");
+		expect(md).toContain("**Assessment**");
 		expect(md).toContain("**No control was found on this path.**");
 		expect(md).toContain("Controls on this path:");
 		expect(md).toContain("`server.js:16`");
@@ -165,7 +165,7 @@ describe("the M0 loop, without a model", () => {
 	it("orders findings by severity and separates the ones it could not settle", async () => {
 		const ledger = Ledger.open(join(mkdtempSync(join(tmpdir(), "opensec-e2e2-")), "l.db"));
 		const repoId = ledger.upsertRepo(FIXTURE, "vuln-app", null);
-		ledger.createScan({ id: "s2", repoId, revision: null, profile: "local", configHash: "c" });
+		ledger.createScan({ id: "s2", repoId, revision: null, config: testScanConfig() });
 		ledger.insertFiles("s2", [
 			{ path: "server.js", sha: "a", bytes: 100, excludedReason: null },
 		]);
@@ -211,11 +211,11 @@ describe("the M0 loop, without a model", () => {
 		ledger.close();
 	});
 
-	it("shows each probe's own coverage and completion state", () => {
+	it("shows each pass's own coverage and completion state", () => {
 		const md = renderMarkdown({
 			scan: {
 				id: "s3", repo_id: "r", revision: null, profile: "local", status: "completed", phase: "report",
-				config_hash: "c", model_ref: null, prompt_hash: null, probes: 2, threat_model_source: null,
+				config_hash: "c", config: null, model_ref: null, prompt_hash: null, passes: 2, threat_model_source: null,
 				started_at: "then", completed_at: "now", tokens_in: 0, tokens_out: 0, cost_usd: 0,
 			},
 			repoName: "r",
@@ -228,7 +228,7 @@ describe("the M0 loop, without a model", () => {
 			],
 			extensions: ["ts"], excludedFiles: 0, modelRef: "test/none", promptHash: "h",
 		});
-		expect(md).toContain("1 / 2 probe pass(es) completed");
+		expect(md).toContain("1 / 2 pass(es) completed");
 		expect(md).toContain("| 1 | 2 / 2 | 100% | complete |");
 		expect(md).toContain("| 2 | 0 / 2 | 0% | incomplete |");
 	});

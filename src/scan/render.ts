@@ -101,8 +101,8 @@ export function renderMarkdown(r: ReportInput): string {
 	);
 	if (r.passCoverage && r.passCoverage.length > 0) {
 		const complete = r.passCoverage.filter((p) => p.completed).length;
-		out.push("## Probe coverage", "");
-		out.push(`${complete} / ${r.passCoverage.length} probe pass(es) completed.`, "");
+		out.push("## Pass coverage", "");
+		out.push(`${complete} / ${r.passCoverage.length} pass(es) completed.`, "");
 		out.push("| pass | files read | bytes read | status |", "|---|---|---|---|");
 		for (const p of r.passCoverage) {
 			out.push(
@@ -122,7 +122,7 @@ export function renderMarkdown(r: ReportInput): string {
 			"> This was **one pass**. Reading everything is not noticing everything: a",
 			"> second pass over the same code, at the same revision, finds an overlapping",
 			"> but different set — in both directions, including findings this one made.",
-			"> Treat this as one sample, not the finding list. Raise `--probes` for more.",
+			"> Treat this as one sample, not the finding list. Raise `--passes` for more.",
 			"",
 		);
 	}
@@ -198,7 +198,7 @@ export function renderMarkdown(r: ReportInput): string {
 	if (merged.size > 0) {
 		out.push("## Merged as duplicates", "");
 		out.push(
-			"Merged rows are kept, never deleted. Two probes reaching the same conclusion",
+			"Merged rows are kept, never deleted. Two agents reaching the same conclusion",
 			"is evidence about the search, not about the finding.",
 			"",
 		);
@@ -279,7 +279,7 @@ function renderFinding(c: Candidate, mergedCount = 0): string[] {
 
 	const reach = assessment?.data?.reachability;
 	if (reach) {
-		out.push("**Attack path**", "");
+		out.push("**Assessment**", "");
 		if (reach.entry_point) out.push(`- **entry** — ${escInline(reach.entry_point)}`);
 		for (const hop of reach.path) out.push(`- ${escInline(hop)}`);
 		out.push("");

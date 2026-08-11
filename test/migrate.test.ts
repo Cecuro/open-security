@@ -143,6 +143,9 @@ describe("schema migrations", () => {
 		expect(cols("scans")).toContain("threat_model_source");
 		expect(cols("scans")).toContain("scope_kind");
 		expect(cols("scans")).toContain("scope_base");
+		expect(cols("scans")).toContain("config_json");
+		expect(cols("scans")).toContain("passes");
+		expect(cols("scans")).not.toContain("probes");
 		expect(cols("scans")).toEqual(
 			expect.arrayContaining([
 				"input_tokens",
@@ -212,6 +215,22 @@ describe("schema migrations", () => {
 		b.close();
 		// Indexes too — a missing one is a silent full scan, not an error.
 		expect(shapeOf(upgraded).split("\n").length).toBe(shapeOf(fresh).split("\n").length);
+	});
+
+	it("renames the recorded assessment phase and pass count", () => {
+		const file = tmpFile("v15.db");
+		makeVersion(file, 15);
+		const before = new Database(file);
+		before.prepare("UPDATE scans SET phase = 'attack_path', probes = 3 WHERE id = 'old'").run();
+		before.close();
+
+		const ledger = Ledger.open(file);
+		expect(ledger.getScan("old")).toMatchObject({
+			phase: "assessment",
+			passes: 3,
+			config: null,
+		});
+		ledger.close();
 	});
 
 	it("is idempotent — reopening applies nothing and changes nothing", () => {

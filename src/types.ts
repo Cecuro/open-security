@@ -13,8 +13,24 @@ export type Phase =
 	| "discovery"
 	| "reduce"
 	| "validate"
-	| "attack_path"
+	| "assessment"
 	| "report";
+
+/** The complete, defaulted configuration that governs one scan. */
+export interface ScanConfig {
+	modelRef: string;
+	profile: Profile;
+	scope: ScanScope;
+	promptHash: string;
+	passes: number;
+	concurrency: number;
+	maxTurns: number;
+	maxFiles: number | null;
+	exclude: string[];
+	maxCostUsd: number | null;
+	partitionMaxFiles: number;
+	refreshThreatModel: boolean;
+}
 
 export type Disposition =
 	| "confirmed"
@@ -138,9 +154,11 @@ export interface ScanRecord {
 	status: ScanStatus;
 	phase: Phase;
 	config_hash: string;
+	/** Null only for scans created before normalized configuration was stored. */
+	config: ScanConfig | null;
 	model_ref: string | null;
 	prompt_hash: string | null;
-	probes: number | null;
+	passes: number | null;
 	threat_model_source: string | null;
 	scope_kind?: ScanScope["kind"] | null;
 	scope_base?: string | null;

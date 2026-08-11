@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import { instrumentGrep } from "../src/agents/session.js";
 import type { RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
+import { testScanConfig } from "./config.js";
 
 function setup() {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "opensec-cov-")));
@@ -28,7 +29,7 @@ function setup() {
 
   const ledger = Ledger.open(join(base, "l.db"));
   const repoId = ledger.upsertRepo(root, "r", null);
-  ledger.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
+  ledger.createScan({ id: "s", repoId, revision: null, config: testScanConfig() });
   ledger.insertFiles("s", [
     { path: "src/handlers/upload.ts", sha: "1", bytes: 21, excludedReason: null },
     { path: "top.ts", sha: "2", bytes: 21, excludedReason: null },

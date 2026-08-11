@@ -322,6 +322,15 @@ export const MIGRATIONS: Migration[] = [
 			CREATE INDEX files_scan_scope ON files(scan_id, excluded_reason);
 		`,
 	},
+	{
+		version: 16,
+		note: "normalized scan configuration and consistent pass/assessment names",
+		sql: `
+			ALTER TABLE scans RENAME COLUMN probes TO passes;
+			ALTER TABLE scans ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}';
+			UPDATE scans SET phase = 'assessment' WHERE phase = 'attack_path';
+		`,
+	},
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.reduce((v, m) => Math.max(v, m.version), 1);
