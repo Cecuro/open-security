@@ -6,7 +6,32 @@ import { Type } from "typebox";
 
 import type { SandboxBridgeMount } from "./bridge.js";
 
-const DEFAULT_IMAGE = "node:20-bookworm-slim";
+const DEFAULT_IMAGE = "opensec-agent:node20-rust1.88-bookworm-v1";
+export const DEFAULT_IMAGE_DOCKERFILE = `FROM rust:1.88-bookworm AS rust
+FROM node:20-bookworm-slim
+
+COPY --from=rust /usr/local/cargo /usr/local/cargo
+COPY --from=rust /usr/local/rustup /usr/local/rustup
+
+ENV CARGO_HOME=/home/node/.cargo \\
+    RUSTUP_HOME=/usr/local/rustup \\
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends \\
+      build-essential \\
+      ca-certificates \\
+      curl \\
+      git \\
+      jq \\
+      pkg-config \\
+      python3 \\
+      ripgrep \\
+ && rm -rf /var/lib/apt/lists/* \\
+ && for tool in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup; do \\
+      ln -s /usr/local/cargo/bin/$tool /usr/local/bin/$tool; \\
+    done
+`;
 const MAX_TIMEOUT_MS = 10 * 60_000;
 const SANDBOX_LIFETIME = "2h";
 const MAX_CAPTURE_BYTES = 1_000_000;
@@ -35,7 +60,8 @@ export class DockerSandbox {
 		repoRoot: string,
 		opts: { image?: string; bridge?: SandboxBridgeMount } = {},
 	) {
-		const image = opts.image ?? process.env.OPENSEC_SANDBOX_IMAGE ?? DEFAULT_IMAGE;
+		const customImage = opts.image ?? process.env.OPENSEC_SANDBOX_IMAGE;
+		const image = customImage ?? DEFAULT_IMAGE;
 		const name = `opensec-${randomBytes(9).toString("hex")}`;
 		const user = process.env.OPENSEC_SANDBOX_USER ?? "node";
 		const sandbox = new DockerSandbox(name, user);
@@ -44,6 +70,7 @@ export class DockerSandbox {
 			if (available.exitCode !== 0) {
 				throw new Error("Docker is required for --profile container. Start Docker, then try again.");
 			}
+			if (!customImage) await ensureDefaultImage();
 
 			const created = await runCommand("docker", [
 				"create",
@@ -180,6 +207,18 @@ export class DockerSandbox {
 			throw new Error(dockerError("remove sandbox", removed));
 		}
 	}
+}
+
+async function ensureDefaultImage(): Promise<void> {
+	const existing = await runCommand("docker", ["image", "inspect", DEFAULT_IMAGE]);
+	if (existing.exitCode === 0) return;
+	const built = await runCommand(
+		"docker",
+		["build", "--tag", DEFAULT_IMAGE, "-"],
+		10 * 60_000,
+		DEFAULT_IMAGE_DOCKERFILE,
+	);
+	if (built.exitCode !== 0) throw new Error(dockerError("build the default agent image", built));
 }
 
 export type BashSandbox = Pick<DockerSandbox, "exec" | "repoDir" | "writeOutput">;
