@@ -596,45 +596,65 @@ export class Scanner {
 
 		const live = this.ledger.listLiveCandidates(this.scanId).filter((c) => c.status === "open");
 		const groups = collisionGroups(live);
-		if (groups.length === 0) {
-			if (live.length > 1) this.say(`reduce: ${live.length} candidate(s), no collisions`);
-			return 0;
+		if (groups.length > 0) {
+			const inGroups = groups.reduce((n, g) => n + g.length, 0);
+			this.say(
+				`reduce: ${inGroups} of ${live.length} candidate(s) collide, in ${groups.length} group(s)`,
+			);
+
+			await mapConcurrent(groups, this.concurrency, async (group, i) => {
+				await this.runReducer(
+					group,
+					`reduce-${i + 1}`,
+					`${group.length} candidates likely collide because they cite the same broken-control file.`,
+				);
+			});
+		} else if (live.length > 1) {
+			this.say(`reduce: ${live.length} candidate(s), no local collisions`);
 		}
 
-		const inGroups = groups.reduce((n, g) => n + g.length, 0);
-		this.say(
-			`reduce: ${inGroups} of ${live.length} candidate(s) collide, in ${groups.length} group(s)`,
-		);
-
-		await mapConcurrent(groups, this.concurrency, async (group, i) => {
-			this.checkBudget();
-			const workerId = `reduce-${i + 1}`;
-			await this.runAgent({
-				ctx: {
-					...this.ctx(workerId),
-					verbs: REDUCE_VERBS,
-					resolvableIds: group.map((c) => c.id),
-					dispositions: ["duplicate"],
-				},
-				onEvent: (m) => this.say(m),
-				tracePath: this.tracePath(workerId),
-				systemPrompt: this.prompts.get("reduce.md"),
-				prompt: [
-					`${group.length} candidates in the same class and the same file.`,
-					"They have not been validated. Your only question is whether any of them",
-					"are the same finding.",
-					"",
-					wrapUntrusted(this.nonce, "candidates", group.map(describeCandidate).join("\n\n---\n\n")),
-					"",
-					"Merge what one patch would fix. If nothing here is a duplicate, say so",
-					"and record nothing.",
-				].join("\n"),
-			});
-		});
+		// File-local groups catch the cheap, obvious cases. A separate model-led
+		// sweep lets it link the same root cause when agents anchored it in different
+		// files or entry points. The duplicate rows stay intact as review evidence.
+		const survivors = this.ledger.listLiveCandidates(this.scanId).filter((c) => c.status === "open");
+		if (survivors.length > 1) {
+			this.say(`reduce: final global sweep of ${survivors.length} candidate(s)`);
+			await this.runReducer(
+				survivors,
+				"reduce-global",
+				`${survivors.length} surviving candidates from the whole repository. ` +
+					"The local pass could not compare every pair; look for remaining duplicates across files and paths.",
+			);
+		}
 
 		const merged = this.ledger.listCandidates(this.scanId).filter((c) => c.duplicate_of).length;
 		this.say(`reduce: ${merged} row(s) merged`);
 		return merged;
+	}
+
+	private async runReducer(group: Candidate[], workerId: string, context: string): Promise<void> {
+		this.checkBudget();
+		await this.runAgent({
+			ctx: {
+				...this.ctx(workerId),
+				verbs: REDUCE_VERBS,
+				resolvableIds: group.map((c) => c.id),
+				dispositions: ["duplicate"],
+			},
+			onEvent: (m) => this.say(m),
+			tracePath: this.tracePath(workerId),
+			systemPrompt: this.prompts.get("reduce.md"),
+			prompt: [
+				context,
+				"They have not been validated. Your only question is whether any of them",
+				"are the same reportable finding.",
+				"",
+				wrapUntrusted(this.nonce, "candidates", group.map(describeCandidate).join("\n\n---\n\n")),
+				"",
+				"Link candidates with the same root cause that should appear once in the report.",
+				"If nothing here is a duplicate, say so and record nothing.",
+			].join("\n"),
+		});
 	}
 
 	async validate(candidates?: Candidate[]): Promise<void> {
