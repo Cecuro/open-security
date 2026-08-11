@@ -26,6 +26,17 @@ import { MIGRATIONS, SCHEMA_VERSION } from "./migrations.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+export interface CandidateActivityWrite {
+	scanId: string;
+	candidateId: string;
+	workerId: string;
+	kind: CandidateActivityKind;
+	body: string;
+	status: CandidateStatus;
+	data?: CandidateActivity["data"];
+	duplicateOf?: string | null;
+}
+
 export function defaultDbPath(): string {
 	return join(homedir(), ".opensec", "opensec.db");
 }
@@ -654,24 +665,23 @@ export class Ledger {
 		return { id, merged: false };
 	}
 
-	addCandidateActivity(args: {
-		scanId: string;
-		candidateId: string;
-		workerId: string;
-		kind: CandidateActivityKind;
-		body: string;
-		status: CandidateStatus;
-		data?: CandidateActivity["data"];
-		duplicateOf?: string | null;
-	}): void {
+	addCandidateActivity(args: CandidateActivityWrite): void {
+		this.addCandidateActivities([args]);
+	}
+
+	addCandidateActivities(items: readonly CandidateActivityWrite[]): void {
+		if (items.length === 0) return;
+		const insert = this.db.prepare(
+			`INSERT INTO candidate_activity
+			 (scan_id, candidate_id, worker_id, kind, body, data_json, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		);
+		const update = this.db.prepare(
+			"UPDATE candidates SET status = ?, duplicate_of = ? WHERE scan_id = ? AND id = ?",
+		);
 		this.db.transaction(() => {
-			this.db
-				.prepare(
-					`INSERT INTO candidate_activity
-					 (scan_id, candidate_id, worker_id, kind, body, data_json, created_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				)
-				.run(
+			for (const args of items) {
+				insert.run(
 					args.scanId,
 					args.candidateId,
 					args.workerId,
@@ -680,11 +690,8 @@ export class Ledger {
 					args.data ? JSON.stringify(args.data) : null,
 					now(),
 				);
-			this.db
-				.prepare(
-					"UPDATE candidates SET status = ?, duplicate_of = ? WHERE scan_id = ? AND id = ?",
-				)
-				.run(args.status, args.duplicateOf ?? null, args.scanId, args.candidateId);
+				update.run(args.status, args.duplicateOf ?? null, args.scanId, args.candidateId);
+			}
 		})();
 	}
 

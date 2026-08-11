@@ -62,16 +62,28 @@ function isGroup(value: string | undefined): value is (typeof GROUPS)[number] {
 	return GROUPS.some((group) => group === value);
 }
 
-function params(command: Command, args: string[]): Record<string, unknown> {
+function params(command: Command, args: string[]): Record<string, unknown> | Record<string, unknown>[] {
 	if (command.verb === "work.next") {
 		const flags = flagsOf(args, ["--limit"]);
 		return flags.size === 0 ? {} : { limit: numberFlag(flags, "--limit") };
 	}
-	return jsonParams(args);
+	return jsonParams(command, args);
 }
 
-function jsonParams(args: string[]): Record<string, unknown> {
-	if (args.length === 2 && args[0] === "--input") return object(parseJson(args[1] === "-" ? readStdin() : read(args[1] ?? ""), args[1] ?? ""));
+function jsonParams(command: Command, args: string[]): Record<string, unknown> | Record<string, unknown>[] {
+	if (args.length === 2 && args[0] === "--input") {
+		const value = parseJson(args[1] === "-" ? readStdin() : read(args[1] ?? ""), args[1] ?? "");
+		if (!Array.isArray(value)) return object(value);
+		if (command.verb !== "candidate.validate") throw new Error(`${command.verb} does not accept an input array`);
+		if (value.length === 0) throw new Error("candidate.validate input array must not be empty");
+		if (value.length > 50) throw new Error("candidate.validate accepts at most 50 items per batch");
+		return value.map((item, index) => {
+			if (typeof item !== "object" || item === null || Array.isArray(item)) {
+				throw new Error(`candidate.validate input[${index}] must be a JSON object`);
+			}
+			return item as Record<string, unknown>;
+		});
+	}
 	throw new Error("use --input <path|->");
 }
 
@@ -187,6 +199,7 @@ const COMMAND_DETAILS: Partial<Record<Command["verb"], string>> = {
 		"JSON fields: id, disposition, rationale, and optional duplicate_of.",
 		"Disposition: confirmed | not_applicable | needs_follow_up | duplicate.",
 		"Duplicate also requires duplicate_of.",
+		"Input may be one object or an array of up to 50 objects; arrays commit atomically.",
 		"",
 		"Examples:",
 		'{"id":"c1","disposition":"confirmed","rationale":"The public path reaches the sink without the claimed control."}',

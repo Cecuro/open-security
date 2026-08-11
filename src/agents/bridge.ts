@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runOpensec, type RunContext, type Verb } from "./tool.js";
+import { runOpensec, runOpensecBatch, type RunContext, type Verb } from "./tool.js";
 
 const COMMAND_PATH = "/v1/command";
 const MAX_REQUEST_BYTES = 1_000_000;
@@ -163,7 +163,11 @@ function reply(ctx: RunContext, workspace: string, raw: string): object {
 				output: JSON.stringify({ workspace, worker: ctx.workerId, verbs: ctx.verbs ?? [] }, null, 2),
 			};
 		}
-		if (request.params !== undefined && (typeof request.params !== "object" || request.params === null || Array.isArray(request.params))) {
+		if (Array.isArray(request.params)) {
+			const output = runOpensecBatch(ctx, request.verb as Verb, request.params);
+			return { ok: true, output };
+		}
+		if (request.params !== undefined && (typeof request.params !== "object" || request.params === null)) {
 			return { ok: false, error: "params must be a JSON object" };
 		}
 		const output = runOpensec(ctx, { ...(request.params as object | undefined), verb: request.verb as Verb });
