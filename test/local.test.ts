@@ -9,9 +9,17 @@ function setup() {
 	const repo = mkdtempSync(join(tmpdir(), "opensec-local-repo-"));
 	const mountDir = mkdtempSync(join(tmpdir(), "opensec-local-bridge-"));
 	const cli = join(mountDir, "opensec");
-	writeFileSync(cli, '#!/bin/sh\nprintf "context:%s" "$OPENSEC_TOKEN"\n');
+	writeFileSync(cli, '#!/bin/sh\nprintf "context:%s:%s" "$OPENSEC_TOKEN" "$OPENSEC_ENDPOINT"\n');
 	chmodSync(cli, 0o755);
-	return { repo, bridge: { mountDir, token: "secret", verbs: "work.next" } };
+	return {
+		repo,
+		bridge: {
+			mountDir,
+			endpoint: "http://127.0.0.1:1234/v1/command",
+			token: "secret",
+			verbs: "work.next",
+		},
+	};
 }
 
 describe("local Bash backend", () => {
@@ -22,7 +30,7 @@ describe("local Bash backend", () => {
 		const result = await sandbox.exec('printf "changed" > local-proof.txt; opensec context');
 
 		expect(result.exitCode).toBe(0);
-		expect(result.stdout).toBe("context:secret");
+		expect(result.stdout).toBe("context:secret:http://127.0.0.1:1234/v1/command");
 		expect(readFileSync(join(repo, "local-proof.txt"), "utf8")).toBe("changed");
 	});
 

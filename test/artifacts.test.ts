@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { opensecDir } from "../src/db/db.js";
 import { renderMarkdown } from "../src/scan/render.js";
+import { citedOutOfScope } from "../src/sdk/scanner.js";
 import { redactSecrets, stripControlChars } from "../src/text.js";
 
 const made: string[] = [];
@@ -251,12 +252,11 @@ describe("an exclusion that excluded nothing says so", () => {
 });
 
 describe("drift is only claimed against a real inventory", () => {
-	it("reports nothing when there is nothing to compare against", async () => {
+	it("reports nothing when there is nothing to compare against", () => {
 		// Phases are individually callable. `new Set(undefined)` is empty, so an
 		// unguarded comparison calls every path the threat model cites
 		// out-of-scope — confidently, and wrongly, to an SDK caller who invoked
 		// threatModel() on its own.
-		const { citedOutOfScope } = await import("../src/sdk/scanner.js");
 		const tm = "See `a/b.rs:1-10` and `c/d.ts:4`.";
 		expect(citedOutOfScope(tm, new Set())).toEqual({ cited: 2, outOfScope: 2 });
 		// The guard lives at the call site, so what this pins is the shape the

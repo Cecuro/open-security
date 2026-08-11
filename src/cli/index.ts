@@ -34,8 +34,8 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
 
 Options
   --model <ref>        provider/model, e.g. azure-openai-responses/gpt-5.4
-  --profile <p>        container (default, isolated) | local (Bash on the host)
-                       Container requires Docker. The cached default image includes Node,
+  --profile <p>        container (default, network-isolated) | local (Bash on the host)
+                       Container requires Docker Engine 28+. The cached default image includes Node,
                        Rust/Cargo, Git, Python, ripgrep, curl, jq, and build tools.
                        Set OPENSEC_SANDBOX_IMAGE and OPENSEC_SANDBOX_USER to override it;
                        a custom image must include Bash and Node 20+.

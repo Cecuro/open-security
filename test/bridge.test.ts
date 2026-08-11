@@ -27,22 +27,22 @@ function setup(): RunContext {
 	return { scanId: "scan", workerId: "probe", repoRoot: root, profile: "container", ledger, nonce: "nonce" };
 }
 
-function cliFixture(): string {
-	const file = join(mkdtempSync(join(tmpdir(), "opensec-cli-")), "opensec-cli.js");
-	writeFileSync(file, "process.exit(0);\n");
-	return file;
+function bridgeFiles(): { cliPath: string; relayPath: string } {
+	const dir = mkdtempSync(join(tmpdir(), "opensec-cli-"));
+	const cliPath = join(dir, "opensec-cli.js");
+	const relayPath = join(dir, "opensec-relay.js");
+	writeFileSync(cliPath, "process.exit(0);\n");
+	writeFileSync(relayPath, "process.exit(0);\n");
+	return { cliPath, relayPath };
 }
 
-function request(socket: string, payload: object): Promise<{ ok: boolean; output?: string; error?: string }> {
-	return new Promise((resolve, reject) => {
-		const client = connect(socket);
-		let body = "";
-		client.setEncoding("utf8");
-		client.on("connect", () => client.write(`${JSON.stringify(payload)}\n`));
-		client.on("data", (chunk: string) => (body += chunk));
-		client.on("end", () => resolve(JSON.parse(body)));
-		client.on("error", reject);
+async function request(endpoint: string, token: string, payload: object): Promise<{ ok: boolean; output?: string; error?: string }> {
+	const response = await fetch(endpoint, {
+		method: "POST",
+		headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+		body: JSON.stringify(payload),
 	});
+	return response.json() as Promise<{ ok: boolean; output?: string; error?: string }>;
 }
 
 describe("OpenSec sandbox bridge", () => {
@@ -69,25 +69,25 @@ describe("OpenSec sandbox bridge", () => {
 	});
 
 	it("only accepts its run token and applies the existing worklist rules", async () => {
-		const bridge = await OpensecBridge.create(setup(), { cliPath: cliFixture() });
+		const bridge = await OpensecBridge.create(setup(), bridgeFiles());
 		bridges.push(bridge);
 		expect(bridge.mount).toMatchObject({ verbs: "" });
-		const socket = join(bridge.mount.mountDir, "opensec.sock");
 		expect(existsSync(join(bridge.mount.mountDir, "opensec-cli.mjs"))).toBe(true);
+		expect(existsSync(join(bridge.mount.mountDir, "opensec-relay.mjs"))).toBe(true);
 		expect(existsSync(join(bridge.mount.mountDir, "opensec"))).toBe(true);
 
-		await expect(request(socket, { token: "wrong", verb: "work.next" })).resolves.toEqual({
+		await expect(request(bridge.mount.endpoint, "wrong", { verb: "work.next" })).resolves.toEqual({
 			ok: false,
 			error: "unauthorized",
 		});
-		const response = await request(socket, { token: bridge.mount.token, verb: "work.next", params: { limit: 1 } });
+		const response = await request(bridge.mount.endpoint, bridge.mount.token, { verb: "work.next", params: { limit: 1 } });
 		expect(response.ok).toBe(true);
 		expect(JSON.parse(response.output ?? "{}").files.join(" ")).toContain("app.js");
-		await expect(request(socket, { token: bridge.mount.token, verb: "work.next", params: { limti: 1 } })).resolves.toEqual({
+		await expect(request(bridge.mount.endpoint, bridge.mount.token, { verb: "work.next", params: { limti: 1 } })).resolves.toEqual({
 			ok: false,
 			error: "work.next does not accept: limti",
 		});
-		const context = await request(socket, { token: bridge.mount.token, verb: "context" });
+		const context = await request(bridge.mount.endpoint, bridge.mount.token, { verb: "context" });
 		expect(context.ok).toBe(true);
 		expect(JSON.parse(context.output ?? "{}")).toMatchObject({
 			workspace: "/workspace/repo",
@@ -96,13 +96,11 @@ describe("OpenSec sandbox bridge", () => {
 	});
 
 	it("does not let params replace the authenticated top-level verb", async () => {
-		const bridge = await OpensecBridge.create(setup(), { cliPath: cliFixture() });
+		const bridge = await OpensecBridge.create(setup(), bridgeFiles());
 		bridges.push(bridge);
-		const socket = join(bridge.mount.mountDir, "opensec.sock");
 
 		await expect(
-			request(socket, {
-				token: bridge.mount.token,
+			request(bridge.mount.endpoint, bridge.mount.token, {
 				verb: "work.next",
 				params: { verb: "lead.record", text: "should not be recorded" },
 			}),
@@ -112,12 +110,12 @@ describe("OpenSec sandbox bridge", () => {
 	it("serves CLI context through the real bridge", async () => {
 		const ctx = setup();
 		ctx.verbs = ["work.next"];
-		const bridge = await OpensecBridge.create(ctx, { cliPath: cliFixture(), workspace: ctx.repoRoot });
+		const bridge = await OpensecBridge.create(ctx, { ...bridgeFiles(), workspace: ctx.repoRoot });
 		bridges.push(bridge);
-		const oldSocket = process.env.OPENSEC_SOCKET;
+		const oldEndpoint = process.env.OPENSEC_ENDPOINT;
 		const oldToken = process.env.OPENSEC_TOKEN;
 		const oldVerbs = process.env.OPENSEC_VERBS;
-		process.env.OPENSEC_SOCKET = join(bridge.mount.mountDir, "opensec.sock");
+		process.env.OPENSEC_ENDPOINT = bridge.mount.endpoint;
 		process.env.OPENSEC_TOKEN = bridge.mount.token;
 		process.env.OPENSEC_VERBS = bridge.mount.verbs;
 		const output: string[] = [];
@@ -135,7 +133,7 @@ describe("OpenSec sandbox bridge", () => {
 			});
 		} finally {
 			write.mockRestore();
-			restoreEnv("OPENSEC_SOCKET", oldSocket);
+			restoreEnv("OPENSEC_ENDPOINT", oldEndpoint);
 			restoreEnv("OPENSEC_TOKEN", oldToken);
 			restoreEnv("OPENSEC_VERBS", oldVerbs);
 		}
@@ -154,12 +152,12 @@ describe("OpenSec sandbox bridge", () => {
 			locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
 			description: "description",
 		});
-		const bridge = await OpensecBridge.create(ctx, { cliPath: cliFixture(), workspace: ctx.repoRoot });
+		const bridge = await OpensecBridge.create(ctx, { ...bridgeFiles(), workspace: ctx.repoRoot });
 		bridges.push(bridge);
-		const oldSocket = process.env.OPENSEC_SOCKET;
+		const oldEndpoint = process.env.OPENSEC_ENDPOINT;
 		const oldToken = process.env.OPENSEC_TOKEN;
 		const oldVerbs = process.env.OPENSEC_VERBS;
-		process.env.OPENSEC_SOCKET = join(bridge.mount.mountDir, "opensec.sock");
+		process.env.OPENSEC_ENDPOINT = bridge.mount.endpoint;
 		process.env.OPENSEC_TOKEN = bridge.mount.token;
 		process.env.OPENSEC_VERBS = bridge.mount.verbs;
 		const rationale = 'literal $(whoami), `uname`, "$HOME", and a single quote\'';
@@ -179,15 +177,16 @@ describe("OpenSec sandbox bridge", () => {
 			expect(ctx.ledger.getCandidate("scan", "c1")?.activities[0]?.body).toBe(rationale);
 		} finally {
 			write.mockRestore();
-			restoreEnv("OPENSEC_SOCKET", oldSocket);
+			restoreEnv("OPENSEC_ENDPOINT", oldEndpoint);
 			restoreEnv("OPENSEC_TOKEN", oldToken);
 			restoreEnv("OPENSEC_VERBS", oldVerbs);
 		}
 	});
 
 	it("closes idle clients during cleanup", async () => {
-		const bridge = await OpensecBridge.create(setup(), { cliPath: cliFixture() });
-		const client = connect(join(bridge.mount.mountDir, "opensec.sock"));
+		const bridge = await OpensecBridge.create(setup(), bridgeFiles());
+		const endpoint = new URL(bridge.mount.endpoint);
+		const client = connect(Number(endpoint.port), endpoint.hostname);
 		client.on("error", () => {});
 		await once(client, "connect");
 

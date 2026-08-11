@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
-import { connect } from "node:net";
-import { pathToFileURL } from "node:url";
+import { readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const COMMANDS = [
 	{ words: ["work", "next"], verb: "work.next", usage: "opensec work next [--limit <n>]", note: "Get the files you must review." },
@@ -39,14 +38,14 @@ export async function runAgentCli(args: string[]): Promise<number> {
 		const rest = args.slice(command.words.length);
 		if (rest[0] === "--help" || rest[0] === "-h") return output(commandHelp(command));
 
-		const socket = process.env.OPENSEC_SOCKET;
+		const endpoint = process.env.OPENSEC_ENDPOINT;
 		const token = process.env.OPENSEC_TOKEN;
-		if (!socket || !token) throw new Error("this command is only available inside an OpenSec agent run");
+		if (!endpoint || !token) throw new Error("this command is only available inside an OpenSec agent run");
 		const allowed = allowedVerbs();
 		if (allowed.size > 0 && !allowed.has(command.verb)) {
 			throw new Error(`${command.words.join(" ")} is not available in this review pass. Run 'opensec context'.`);
 		}
-		const response = await request(socket, { token, verb: command.verb, params: params(command, rest) });
+		const response = await request(endpoint, token, { verb: command.verb, params: params(command, rest) });
 		if (!response.ok) throw new Error(response.error ?? "OpenSec command failed");
 		return output(response.output ?? "");
 	} catch (err) {
@@ -118,20 +117,24 @@ function object(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
-function request(socket: string, payload: object): Promise<AgentResponse> {
-	return new Promise((resolve, reject) => {
-		const connection = connect(socket);
-		let body = "";
-		connection.setEncoding("utf8");
-		connection.setTimeout(10_000);
-		connection.on("connect", () => connection.write(`${JSON.stringify(payload)}\n`));
-		connection.on("data", (chunk: string) => (body += chunk));
-		connection.on("timeout", () => connection.destroy(new Error("OpenSec bridge timed out")));
-		connection.on("end", () => {
-			try { resolve(JSON.parse(body) as AgentResponse); } catch { reject(new Error("invalid response from OpenSec bridge")); }
+async function request(endpoint: string, token: string, payload: object): Promise<AgentResponse> {
+	let response: Response;
+	try {
+		response = await fetch(endpoint, {
+			method: "POST",
+			headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(10_000),
 		});
-		connection.on("error", reject);
-	});
+	} catch (err) {
+		if ((err as Error).name === "TimeoutError") throw new Error("OpenSec bridge timed out");
+		throw new Error(`cannot reach OpenSec bridge: ${(err as Error).message}`);
+	}
+	try {
+		return JSON.parse(await response.text()) as AgentResponse;
+	} catch {
+		throw new Error("invalid response from OpenSec bridge");
+	}
 }
 
 function allowedVerbs(): Set<string> {
@@ -212,10 +215,10 @@ function commandHelp(command: Command): string {
 }
 
 async function context(): Promise<string> {
-	const socket = process.env.OPENSEC_SOCKET;
+	const endpoint = process.env.OPENSEC_ENDPOINT;
 	const token = process.env.OPENSEC_TOKEN;
-	if (!socket || !token) throw new Error("context is only available inside an OpenSec agent run");
-	const response = await request(socket, { token, verb: "context" });
+	if (!endpoint || !token) throw new Error("context is only available inside an OpenSec agent run");
+	const response = await request(endpoint, token, { verb: "context" });
 	if (!response.ok) throw new Error(response.error ?? "OpenSec command failed");
 	const remote = object(parseJson(response.output ?? "", "OpenSec bridge"));
 	const allowed = allowedVerbs();
@@ -234,7 +237,12 @@ async function context(): Promise<string> {
 function output(text: string): number { process.stdout.write(`${text}\n`); return 0; }
 
 function isMain(moduleUrl: string, argv1: string | undefined): boolean {
-	return argv1 !== undefined && moduleUrl === pathToFileURL(argv1).href;
+	if (argv1 === undefined) return false;
+	try {
+		return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argv1);
+	} catch {
+		return false;
+	}
 }
 
 if (isMain(import.meta.url, process.argv[1])) {

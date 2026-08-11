@@ -34,6 +34,7 @@ RUN apt-get update \\
 `;
 const MAX_TIMEOUT_MS = 10 * 60_000;
 const SANDBOX_LIFETIME = "2h";
+const RELAY_PORT = 7331;
 const MAX_CAPTURE_BYTES = 1_000_000;
 const MAX_INLINE_OUTPUT_BYTES = 20_000;
 const OUTPUT_HEAD_BYTES = 12_000;
@@ -53,6 +54,8 @@ export class DockerSandbox {
 	private constructor(
 		private readonly name: string,
 		private readonly user: string,
+		private readonly relayName?: string,
+		private readonly networkName?: string,
 		readonly repoDir = "/workspace/repo",
 	) {}
 
@@ -62,15 +65,22 @@ export class DockerSandbox {
 	) {
 		const customImage = opts.image ?? process.env.OPENSEC_SANDBOX_IMAGE;
 		const image = customImage ?? DEFAULT_IMAGE;
-		const name = `opensec-${randomBytes(9).toString("hex")}`;
+		const id = randomBytes(9).toString("hex");
+		const name = `opensec-${id}`;
+		const relayName = opts.bridge ? `opensec-relay-${id}` : undefined;
+		const networkName = opts.bridge ? `opensec-net-${id}` : undefined;
 		const user = process.env.OPENSEC_SANDBOX_USER ?? "node";
-		const sandbox = new DockerSandbox(name, user);
+		const sandbox = new DockerSandbox(name, user, relayName, networkName);
 		try {
 			const available = await runCommand("docker", ["version", "--format", "{{.Server.Version}}"]);
 			if (available.exitCode !== 0) {
 				throw new Error("Docker is required for --profile container. Start Docker, then try again.");
 			}
 			if (!customImage) await ensureDefaultImage();
+			if (opts.bridge) {
+				requireIsolatedGateway(available.stdout);
+				await sandbox.startRelay(image, opts.bridge);
+			}
 
 			const created = await runCommand("docker", [
 				"create",
@@ -80,7 +90,7 @@ export class DockerSandbox {
 				"--label",
 				"opensec.sandbox=true",
 				"--network",
-				"none",
+				networkName ?? "none",
 				"--cpus",
 				"2",
 				"--memory",
@@ -98,9 +108,9 @@ export class DockerSandbox {
 						"--mount",
 						`type=bind,src=${opts.bridge.mountDir},dst=/run/opensec,readonly`,
 						"--env",
-						"OPENSEC_SOCKET=/run/opensec/opensec.sock",
+						`OPENSEC_ENDPOINT=http://opensec-relay:${RELAY_PORT}/v1/command`,
 						"--env",
-						`OPENSEC_TOKEN=${opts.bridge.token}`,
+						`OPENSEC_TOKEN=${sandbox.relayToken}`,
 						"--env",
 						`OPENSEC_VERBS=${opts.bridge.verbs}`,
 					]
@@ -118,9 +128,31 @@ export class DockerSandbox {
 			if (madeWorkspace.exitCode !== 0) throw new Error(dockerError("prepare the workspace", madeWorkspace));
 			const copied = await runCommand("docker", ["cp", repoRoot, `${name}:/workspace/repo`]);
 			if (copied.exitCode !== 0) throw new Error(dockerError("copy the repository", copied));
-			// docker cp creates destination files as root. Leave capabilities dropped and
-			// make the disposable copy writable instead of chowning it for the agent.
-			const permissions = await runCommand("docker", ["exec", "--user", "0", name, "chmod", "-R", "u+rwX,go+rwX", "/workspace/repo"]);
+			// Docker Desktop may preserve the host uid even though docker cp commonly
+			// creates root-owned files. With all capabilities dropped, container root
+			// cannot chmod a file owned by that host uid. Run chmod as the copied tree's
+			// actual owner, then make the disposable copy writable by the agent user.
+			const owner = await runCommand("docker", [
+				"exec",
+				"--user",
+				"0",
+				name,
+				"stat",
+				"-c",
+				"%u:%g",
+				"/workspace/repo",
+			]);
+			if (owner.exitCode !== 0) throw new Error(dockerError("inspect repository ownership", owner));
+			const permissions = await runCommand("docker", [
+				"exec",
+				"--user",
+				owner.stdout.trim(),
+				name,
+				"chmod",
+				"-R",
+				"u+rwX,go+rwX",
+				"/workspace/repo",
+			]);
 			if (permissions.exitCode !== 0) throw new Error(dockerError("prepare repository permissions", permissions));
 			if (opts.bridge) {
 				const installed = await runCommand("docker", [
@@ -130,18 +162,12 @@ export class DockerSandbox {
 					name,
 					"sh",
 					"-c",
-					'printf "#!/bin/sh\\nexec node /run/opensec/opensec-cli.mjs \\\"$@\\\"\\n" > /usr/local/bin/opensec && chmod 755 /usr/local/bin/opensec',
+					'printf "#!/bin/sh\\nexec node /run/opensec/opensec-cli.mjs \\\"\\$@\\\"\\n" > /usr/local/bin/opensec && chmod 755 /usr/local/bin/opensec',
 				]);
 				if (installed.exitCode !== 0) throw new Error(dockerError("install the OpenSec CLI", installed));
-				const checked = await runCommand("docker", [
-					"exec",
-					"--user",
-					user,
-					name,
-					"bash",
-					"-lc",
-					"opensec context",
-				]);
+				const checked = await retry(() => runCommand("docker", [
+					"exec", "--user", user, name, "bash", "-lc", "opensec context",
+				]));
 				if (checked.exitCode !== 0) throw new Error(dockerError("check Bash and the OpenSec CLI", checked));
 			}
 			return sandbox;
@@ -153,6 +179,41 @@ export class DockerSandbox {
 			}
 			throw err;
 		}
+	}
+
+	private readonly relayToken = randomBytes(32).toString("base64url");
+
+	private async startRelay(image: string, bridge: SandboxBridgeMount): Promise<void> {
+		const network = this.networkName!;
+		const relay = this.relayName!;
+		const madeNetwork = await runCommand("docker", [
+			"network", "create", "--driver", "bridge", "--internal",
+			"--opt", "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+			"--label", "opensec.sandbox=true", network,
+		]);
+		if (madeNetwork.exitCode !== 0) throw new Error(dockerError("create the isolated network", madeNetwork));
+
+		const created = await runCommand("docker", [
+			"create", "--name", relay, "--rm", "--label", "opensec.sandbox=true",
+			"--network", network, "--network-alias", "opensec-relay",
+			"--add-host", "host.docker.internal:host-gateway",
+			"--cpus", "0.25", "--memory", "128m", "--pids-limit", "64", "--cap-drop", "ALL",
+			"--security-opt", "no-new-privileges", "--read-only",
+			"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+			"--mount", `type=bind,src=${bridge.mountDir},dst=/run/opensec,readonly`,
+			"--env", "OPENSEC_RELAY=1",
+			"--env", `OPENSEC_RELAY_PORT=${RELAY_PORT}`,
+			"--env", `OPENSEC_RELAY_TOKEN=${this.relayToken}`,
+			"--env", `OPENSEC_UPSTREAM_ENDPOINT=${containerEndpoint(bridge.endpoint)}`,
+			"--env", `OPENSEC_UPSTREAM_TOKEN=${bridge.token}`,
+			image, "sh", "-c",
+			`exec timeout --signal=KILL ${SANDBOX_LIFETIME} node /run/opensec/opensec-relay.mjs`,
+		]);
+		if (created.exitCode !== 0) throw new Error(dockerError("create the command relay", created));
+		const connected = await runCommand("docker", ["network", "connect", "bridge", relay]);
+		if (connected.exitCode !== 0) throw new Error(dockerError("connect the command relay", connected));
+		const started = await runCommand("docker", ["start", relay]);
+		if (started.exitCode !== 0) throw new Error(dockerError("start the command relay", started));
 	}
 
 	async exec(commandLine: string, timeoutMs?: number): Promise<CommandResult> {
@@ -202,11 +263,44 @@ export class DockerSandbox {
 	}
 
 	async dispose(): Promise<void> {
-		const removed = await runCommand("docker", ["rm", "--force", this.name], 30_000);
-		if (removed.exitCode !== 0 && !/No such container/i.test(removed.stderr)) {
-			throw new Error(dockerError("remove sandbox", removed));
+		const errors: Error[] = [];
+		for (const [name, action] of [[this.name, "remove sandbox"], [this.relayName, "remove command relay"]] as const) {
+			if (!name) continue;
+			const removed = await runCommand("docker", ["rm", "--force", name], 30_000);
+			if (removed.exitCode !== 0 && !/No such container/i.test(removed.stderr)) {
+				errors.push(new Error(dockerError(action, removed)));
+			}
 		}
+		if (this.networkName) {
+			const removed = await runCommand("docker", ["network", "rm", this.networkName], 30_000);
+			if (removed.exitCode !== 0 && !/No such network/i.test(removed.stderr)) {
+				errors.push(new Error(dockerError("remove isolated network", removed)));
+			}
+		}
+		if (errors[0]) throw errors[0];
 	}
+}
+
+function requireIsolatedGateway(version: string): void {
+	const major = Number(version.trim().split(".")[0]);
+	if (!Number.isInteger(major) || major < 28) {
+		throw new Error("Docker Engine 28 or newer is required for an isolated container network.");
+	}
+}
+
+async function retry(run: () => Promise<CommandResult>): Promise<CommandResult> {
+	let result = await run();
+	for (let attempt = 1; attempt < 20 && result.exitCode !== 0; attempt++) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 100));
+		result = await run();
+	}
+	return result;
+}
+
+function containerEndpoint(endpoint: string): string {
+	const url = new URL(endpoint);
+	url.hostname = "host.docker.internal";
+	return url.toString();
 }
 
 async function ensureDefaultImage(): Promise<void> {

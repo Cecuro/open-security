@@ -765,6 +765,14 @@ export class Scanner {
 		return reportScan(this.ledger, this.scanId);
 	}
 
+	private completeAndReport(): ScanResult {
+		this.ledger.setPhase(this.scanId, "report");
+		// Finalize first so both artifacts contain the durable terminal state.
+		// If rendering fails, run() catches it and changes the scan to failed.
+		this.ledger.finishScan(this.scanId, "completed");
+		return reportScan(this.ledger, this.scanId);
+	}
+
 	async run(): Promise<ScanResult> {
 		// A resumed scan re-enters at startPhase; everything before it is already
 		// in the ledger. Validate and assess always run — they skip individual
@@ -786,9 +794,7 @@ export class Scanner {
 			}
 			if (this.ledger.coverage(this.scanId).files_in_scope === 0) {
 				this.say("inventory: no source files in scope — writing an empty report without calling agents");
-				const result = this.report();
-				this.ledger.finishScan(this.scanId, "completed");
-				return result;
+				return this.completeAndReport();
 			}
 			let tm: string | undefined;
 			if (!skip("threat_model")) tm = await this.threatModel();
@@ -796,9 +802,7 @@ export class Scanner {
 			if (!skip("reduce")) await this.reduce();
 			await this.validate();
 			await this.assess();
-			const result = this.report();
-			this.ledger.finishScan(this.scanId, "completed");
-			return result;
+			return this.completeAndReport();
 		} catch (err) {
 			this.ledger.finishScan(this.scanId, "failed");
 			this.say(

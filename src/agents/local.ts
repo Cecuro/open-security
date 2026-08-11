@@ -30,7 +30,7 @@ export class LocalSandbox implements BashSandbox {
 			env: {
 				...process.env,
 				PATH: `${this.bridge.mountDir}${delimiter}${process.env.PATH ?? ""}`,
-				OPENSEC_SOCKET: join(this.bridge.mountDir, "opensec.sock"),
+				OPENSEC_ENDPOINT: this.bridge.endpoint,
 				OPENSEC_TOKEN: this.bridge.token,
 				OPENSEC_VERBS: this.bridge.verbs,
 			},
