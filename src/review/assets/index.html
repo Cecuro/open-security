@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="opensec-token" content="__OPENSEC_TOKEN__">
+  <title>OpenSec review</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body data-view="runs">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="topbar">
+    <button class="brand" data-action="view-runs">OpenSec</button>
+    <nav class="primary-nav" aria-label="Views">
+      <button data-action="view-runs">Runs</button>
+      <button data-action="view-findings">Findings</button>
+    </nav>
+    <div class="top-actions">
+      <div class="export-wrap" hidden>
+        <button class="button" data-action="toggle-export" aria-expanded="false" aria-controls="export-menu">Export run <span aria-hidden="true">⌄</span></button>
+        <div id="export-menu" class="export-menu" hidden>
+          <button data-export="html">HTML snapshot <small>Includes findings and comments</small></button>
+          <button data-export="json">JSON <small>Full ledger data</small></button>
+          <button data-export="csv">CSV <small>Confirmed findings</small></button>
+          <button data-export="sarif">SARIF <small>Code scanning tools</small></button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div id="workspace" class="workspace">
+    <aside id="sidebar" class="sidebar"></aside>
+
+    <main id="main" class="main" tabindex="-1">
+      <div class="loading"><span></span><span></span><span></span></div>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

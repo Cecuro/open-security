@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22.19.0, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install scan tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep fd-find
+          sudo ln --symbolic "$(command -v fdfind)" /usr/local/bin/fd
+      - name: Install scan tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep fd
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install scan tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep fd-find
+          sudo ln --symbolic "$(command -v fdfind)" /usr/local/bin/fd
+      - run: npm ci
+      - run: npm run release:check

@@ -1,8 +1,22 @@
 {
   "name": "opensec",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Point it at a repository, get real security findings with file:line, evidence, and a severity you can defend — using any model you want, on your own machine.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cecuro/open-security.git"
+  },
+  "homepage": "https://github.com/Cecuro/open-security#readme",
+  "bugs": {
+    "url": "https://github.com/Cecuro/open-security/issues"
+  },
+  "keywords": [
+    "security",
+    "code-review",
+    "cli",
+    "static-analysis"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,18 +31,29 @@
   },
   "files": [
     "dist",
+    "docs/screenshots",
     "prompts",
-    "NOTICE"
+    "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22.19.0"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs && node scripts/check-agent-cli.mjs",
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/copy-assets.mjs && node scripts/check-agent-cli.mjs",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest --run",
-    "opensec": "node dist/cli/index.js"
+    "opensec": "node dist/cli/index.js",
+    "preversion": "npm run release:check",
+    "prepublishOnly": "npm run release:check",
+    "prepack": "npm run build",
+    "package:smoke": "node scripts/smoke-package.mjs",
+    "release:check": "npm run typecheck && npm test && npm run build && node scripts/check-package.mjs && npm run package:smoke"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.0",

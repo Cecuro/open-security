@@ -2,6 +2,7 @@
 
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { spawn } from "node:child_process";
 
 import { isAgentCliCommand, runAgentCli } from "./agent.js";
 import { Ledger } from "../db/db.js";
@@ -12,6 +13,7 @@ import { stripControlChars } from "../text.js";
 import { policyExitCode } from "../scan/policy.js";
 import { renderMatrix } from "../scan/severity.js";
 import type { Profile, ScanScope, Severity } from "../types.js";
+import { startReviewServer } from "../review/server.js";
 
 const USAGE = `opensec — point it at a repository, get findings you can defend.
 
@@ -28,6 +30,7 @@ const USAGE = `opensec — point it at a repository, get findings you can defend
 
   opensec export <scanId> --format <format> --output <path>
                                       write sarif, csv, or json from the ledger
+  opensec review [scanId] [options]    open the local review UI for runs and findings
   opensec models                      models with a price, so budgets are enforceable
   opensec env                         which credentials are configured, by name
   opensec help severity               how severity is computed
@@ -64,6 +67,10 @@ Options
                        1 / 2 / 3 / 4, so a fixed setup is close to spent by 4.
   --refresh-threat-model     rewrite the stored threat model instead of reusing it
   --json               print the findings JSON path only
+
+Review options
+  --port <n>           local port (default: choose an available port)
+  --no-open            print the URL without opening a browser
 
 The threat model for each repository is kept at
 ~/.opensec/repos/<repo>/threat-model.md. Edit it — the next scan reads yours as
@@ -208,6 +215,44 @@ async function main(argv: string[]): Promise<number> {
 		} finally {
 			ledger.close();
 		}
+	}
+
+	if (command === "review") {
+		const opts = parseFlags(rest);
+		const bad = rejectMissingValues(opts);
+		if (bad) return fail(bad);
+		const unknownValue = unknownValueFlag(opts, ["db", "port"]);
+		if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
+		const unknown = unknownBool(opts, ["no-open"]);
+		if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
+		let port: number | undefined;
+		if (opts.flags.port !== undefined) {
+			port = Number(opts.flags.port);
+			if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+				return fail("--port needs an integer from 1 to 65535");
+			}
+		}
+		const scanId = opts.positional[0];
+		const ledger = Ledger.open(opts.flags.db);
+		try {
+			if (scanId && !ledger.getScan(scanId)) return fail(`no scan '${scanId}' in this ledger`);
+		} finally {
+			ledger.close();
+		}
+		const reviewer = await startReviewServer({ db: opts.flags.db, port, scanId });
+		process.stdout.write(`OpenSec review: ${reviewer.url}\n`);
+		process.stdout.write("Press Ctrl-C to stop.\n");
+		if (!opts.bools["no-open"]) openBrowser(reviewer.url);
+		await new Promise<void>((resolve) => {
+			const stop = () => {
+				process.off("SIGINT", stop);
+				process.off("SIGTERM", stop);
+				reviewer.close().then(resolve, resolve);
+			};
+			process.on("SIGINT", stop);
+			process.on("SIGTERM", stop);
+		});
+		return 0;
 	}
 
 	if (command === "resume") {
@@ -393,7 +438,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "diff", "fail-on-severity", "format", "output"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "diff", "fail-on-severity", "format", "output", "port"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
@@ -409,6 +454,16 @@ function parseFlags(argv: string[]): Parsed {
 		}
 	}
 	return { flags, bools, positional };
+}
+
+function openBrowser(url: string): void {
+	const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+	const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+	const child = spawn(command, args, { detached: true, stdio: "ignore" });
+	child.on("error", () => {
+		process.stderr.write("opensec: could not open a browser; use the URL printed above\n");
+	});
+	child.unref();
 }
 
 function parseScope(opts: Parsed): ScanScope | string {

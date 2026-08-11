@@ -110,7 +110,8 @@ export class Ledger {
 			if (m.version <= at) continue;
 			try {
 				this.db.transaction(() => {
-					this.db.exec(m.sql);
+					if (m.version === 16) this.migrateNormalizedConfig();
+					else this.db.exec(m.sql);
 					stamp.run(m.version, now());
 				})();
 			} catch (err) {
@@ -119,6 +120,20 @@ export class Ledger {
 				);
 			}
 		}
+	}
+
+	private migrateNormalizedConfig(): void {
+		const columns = new Set(
+			(this.db.prepare("PRAGMA table_info(scans)").all() as Array<{ name: string }>).map((row) => row.name),
+		);
+		if (!columns.has("passes")) {
+			if (columns.has("probes")) this.db.exec("ALTER TABLE scans RENAME COLUMN probes TO passes");
+			else this.db.exec("ALTER TABLE scans ADD COLUMN passes INTEGER");
+		}
+		if (!columns.has("config_json")) {
+			this.db.exec("ALTER TABLE scans ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'");
+		}
+		this.db.exec("UPDATE scans SET phase = 'assessment' WHERE phase = 'attack_path'");
 	}
 
 	close(): void {
@@ -682,6 +697,14 @@ export class Ledger {
 		const update = this.db.prepare(
 			"UPDATE candidates SET status = ?, duplicate_of = ? WHERE scan_id = ? AND id = ?",
 		);
+		const updateUnlessReviewed = this.db.prepare(
+			`UPDATE candidates SET status = ?, duplicate_of = ?
+			 WHERE scan_id = ? AND id = ?
+			 AND NOT EXISTS (
+				 SELECT 1 FROM candidate_activity
+				 WHERE scan_id = ? AND candidate_id = ? AND kind = 'review'
+			 )`,
+		);
 		this.db.transaction(() => {
 			for (const args of items) {
 				insert.run(
@@ -693,7 +716,18 @@ export class Ledger {
 					args.data ? JSON.stringify(args.data) : null,
 					now(),
 				);
-				update.run(args.status, args.duplicateOf ?? null, args.scanId, args.candidateId);
+				if (args.kind === "review") {
+					update.run(args.status, args.duplicateOf ?? null, args.scanId, args.candidateId);
+				} else if (args.kind !== "comment") {
+					updateUnlessReviewed.run(
+						args.status,
+						args.duplicateOf ?? null,
+						args.scanId,
+						args.candidateId,
+						args.scanId,
+						args.candidateId,
+					);
+				}
 			}
 		})();
 	}
@@ -716,6 +750,59 @@ export class Ledger {
 
 	listLiveCandidates(scanId: string): Candidate[] {
 		return this.listCandidates(scanId).filter((c) => !c.duplicate_of);
+	}
+
+	reviewCandidate(args: {
+		scanId: string;
+		candidateId: string;
+		status?: CandidateStatus;
+		comment?: string;
+	}): Candidate {
+		const scan = this.getScan(args.scanId);
+		if (!scan) throw new Error(`no scan '${args.scanId}'`);
+		if (scan.status !== "completed") throw new Error("findings can only be reviewed after a scan completes");
+		const candidate = this.getCandidate(args.scanId, args.candidateId);
+		if (!candidate) throw new Error(`no finding '${args.candidateId}' in scan '${args.scanId}'`);
+
+		const status = args.status ?? candidate.status;
+		const comment = args.comment?.trim();
+		if (args.status === undefined && !comment) throw new Error("a review needs a state or comment");
+		if (args.status === "duplicate") {
+			throw new Error("merge duplicates during the scan; the reviewer cannot choose a target yet");
+		}
+
+		const disposition = status === "open" ? undefined : status;
+		const activities: CandidateActivityWrite[] = [];
+		if (args.status !== undefined) {
+			const changed = args.status !== candidate.status;
+			activities.push({
+				scanId: args.scanId,
+				candidateId: args.candidateId,
+				workerId: "reviewer",
+				kind: "review",
+				body: changed
+					? `State changed from ${candidate.status} to ${status}.`
+					: `Reviewed as ${status}.`,
+				status,
+				data: disposition ? { disposition } : undefined,
+				duplicateOf: status === "duplicate" ? candidate.duplicate_of : null,
+			});
+		}
+		if (comment) {
+			activities.push({
+				scanId: args.scanId,
+				candidateId: args.candidateId,
+				workerId: "reviewer",
+				kind: "comment",
+				body: comment,
+				status,
+				data: disposition ? { disposition } : undefined,
+				duplicateOf: status === "duplicate" ? candidate.duplicate_of : null,
+			});
+		}
+		this.addCandidateActivities(activities);
+
+		return this.getCandidate(args.scanId, args.candidateId) as Candidate;
 	}
 
 	hasDuplicateChildren(scanId: string, id: string): boolean {

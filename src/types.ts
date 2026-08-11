@@ -119,7 +119,12 @@ export interface Candidate {
 	identity_hash?: string | null;
 }
 
-export type CandidateActivityKind = "validation" | "assessment" | "duplicate" | "comment";
+export type CandidateActivityKind =
+	| "validation"
+	| "assessment"
+	| "duplicate"
+	| "comment"
+	| "review";
 
 export interface CandidateActivity {
 	id: number;

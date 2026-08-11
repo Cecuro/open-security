@@ -233,6 +233,18 @@ describe("schema migrations", () => {
 		ledger.close();
 	});
 
+	it("repairs a version-15 ledger that has neither historical pass column", () => {
+		const file = tmpFile("v15-no-probes.db");
+		makeVersion(file, 15);
+		const before = new Database(file);
+		before.exec("ALTER TABLE scans DROP COLUMN probes");
+		before.close();
+
+		const ledger = Ledger.open(file);
+		expect(ledger.getScan("old")).toMatchObject({ passes: null, config: null });
+		ledger.close();
+	});
+
 	it("is idempotent — reopening applies nothing and changes nothing", () => {
 		const file = tmpFile("twice.db");
 		makeV1(file);
