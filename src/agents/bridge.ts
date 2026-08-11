@@ -1,18 +1,21 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, type Server, type Socket } from "node:net";
 
 import { runOpensec, type RunContext, type Verb } from "./tool.js";
 
+const COMMAND_PATH = "/v1/command";
 const MAX_REQUEST_BYTES = 1_000_000;
 const CONNECTION_TIMEOUT_MS = 10_000;
 const MAX_CONNECTIONS = 32;
 
 export interface SandboxBridgeMount {
 	mountDir: string;
+	endpoint: string;
 	token: string;
 	verbs: string;
 }
@@ -22,9 +25,9 @@ export interface BridgeOptions {
 	workspace?: string;
 }
 
-type Request = { token?: unknown; verb?: unknown; params?: unknown };
+type Request = { verb?: unknown; params?: unknown };
 
-/** A run-scoped, token-gated socket that exposes ledger commands to one sandbox. */
+/** A run-scoped, token-gated HTTP endpoint that exposes ledger commands to one sandbox. */
 export class OpensecBridge {
 	readonly mount: SandboxBridgeMount;
 	private constructor(
@@ -33,15 +36,16 @@ export class OpensecBridge {
 		private readonly dir: string,
 		token: string,
 		verbs: readonly Verb[],
+		endpoint: string,
 	) {
-		this.mount = { mountDir: dir, token, verbs: verbs.join(",") };
+		this.mount = { mountDir: dir, endpoint, token, verbs: verbs.join(",") };
 	}
 
 	static async create(ctx: RunContext, opts: BridgeOptions = {}): Promise<OpensecBridge> {
 		const dir = mkdtempSync(join(tmpdir(), "opensec-bridge-"));
-		const socket = join(dir, "opensec.sock");
 		const token = randomBytes(32).toString("base64url");
 		const connections = new Set<Socket>();
+		const listenHost = ctx.profile === "container" ? "0.0.0.0" : "127.0.0.1";
 		let server: Server | undefined;
 
 		try {
@@ -53,42 +57,27 @@ export class OpensecBridge {
 			);
 			chmodSync(dir, 0o755);
 
-			server = createServer((connection) => {
-				if (connections.size >= MAX_CONNECTIONS) {
-					connection.destroy();
-					return;
-				}
+			server = createServer((request, response) => {
+				void handleRequest(ctx, token, opts.workspace ?? "/workspace/repo", request, response);
+			});
+			server.on("connection", (connection) => {
 				connections.add(connection);
 				connection.once("close", () => connections.delete(connection));
-				connection.on("error", () => connection.destroy());
-				connection.setTimeout(CONNECTION_TIMEOUT_MS, () => connection.destroy());
-				connection.setEncoding("utf8");
-				let body = "";
-				let answered = false;
-				connection.on("data", (chunk: string) => {
-					if (answered) return;
-					body += chunk;
-					if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) {
-						answered = true;
-						connection.end(JSON.stringify({ ok: false, error: "request exceeds 1 MB" }) + "\n");
-						return;
-					}
-					const newline = body.indexOf("\n");
-					if (newline === -1) return;
-					answered = true;
-					connection.end(reply(ctx, token, opts.workspace ?? "/workspace/repo", body.slice(0, newline)) + "\n");
-				});
 			});
 			server.maxConnections = MAX_CONNECTIONS;
+			server.requestTimeout = CONNECTION_TIMEOUT_MS;
+			server.headersTimeout = CONNECTION_TIMEOUT_MS;
+			server.keepAliveTimeout = CONNECTION_TIMEOUT_MS;
 			await new Promise<void>((resolve, reject) => {
 				server!.once("error", reject);
-				server!.listen(socket, () => {
+				server!.listen(0, listenHost, () => {
 					server!.off("error", reject);
 					resolve();
 				});
 			});
-			chmodSync(socket, 0o666);
-			return new OpensecBridge(server, connections, dir, token, ctx.verbs ?? []);
+			const port = (server.address() as AddressInfo).port;
+			const endpoint = `http://127.0.0.1:${port}${COMMAND_PATH}`;
+			return new OpensecBridge(server, connections, dir, token, ctx.verbs ?? [], endpoint);
 		} catch (err) {
 			for (const connection of connections) connection.destroy();
 			if (server?.listening) {
@@ -115,23 +104,63 @@ function compiledCliPath(): string {
 	return compiled;
 }
 
-function reply(ctx: RunContext, token: string, workspace: string, raw: string): string {
+async function handleRequest(
+	ctx: RunContext,
+	token: string,
+	workspace: string,
+	request: IncomingMessage,
+	response: ServerResponse,
+): Promise<void> {
+	response.setHeader("content-type", "application/json");
+	try {
+		if (request.method !== "POST" || request.url !== COMMAND_PATH) {
+			return send(response, 404, { ok: false, error: "not found" });
+		}
+		if (request.headers.authorization !== `Bearer ${token}`) {
+			return send(response, 401, { ok: false, error: "unauthorized" });
+		}
+		const raw = await readBody(request);
+		send(response, 200, reply(ctx, workspace, raw));
+	} catch (err) {
+		const message = (err as Error).message;
+		send(response, message === "request exceeds 1 MB" ? 413 : 400, { ok: false, error: message });
+	}
+}
+
+async function readBody(request: IncomingMessage): Promise<string> {
+	let bytes = 0;
+	const chunks: Buffer[] = [];
+	for await (const chunk of request) {
+		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		bytes += buffer.length;
+		if (bytes > MAX_REQUEST_BYTES) throw new Error("request exceeds 1 MB");
+		chunks.push(buffer);
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
+
+function send(response: ServerResponse, status: number, body: object): void {
+	if (response.writableEnded) return;
+	response.statusCode = status;
+	response.end(JSON.stringify(body) + "\n");
+}
+
+function reply(ctx: RunContext, workspace: string, raw: string): object {
 	try {
 		const request = JSON.parse(raw) as Request;
-		if (request.token !== token) return JSON.stringify({ ok: false, error: "unauthorized" });
-		if (typeof request.verb !== "string") return JSON.stringify({ ok: false, error: "verb is required" });
+		if (typeof request.verb !== "string") return { ok: false, error: "verb is required" };
 		if (request.verb === "context") {
-			return JSON.stringify({
+			return {
 				ok: true,
 				output: JSON.stringify({ workspace, worker: ctx.workerId, verbs: ctx.verbs ?? [] }, null, 2),
-			});
+			};
 		}
 		if (request.params !== undefined && (typeof request.params !== "object" || request.params === null || Array.isArray(request.params))) {
-			return JSON.stringify({ ok: false, error: "params must be a JSON object" });
+			return { ok: false, error: "params must be a JSON object" };
 		}
 		const output = runOpensec(ctx, { ...(request.params as object | undefined), verb: request.verb as Verb });
-		return JSON.stringify({ ok: true, output });
+		return { ok: true, output };
 	} catch (err) {
-		return JSON.stringify({ ok: false, error: (err as Error).message });
+		return { ok: false, error: (err as Error).message };
 	}
 }

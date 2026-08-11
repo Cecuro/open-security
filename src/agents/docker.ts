@@ -53,7 +53,9 @@ export class DockerSandbox {
 				"--label",
 				"opensec.sandbox=true",
 				"--network",
-				"none",
+				"bridge",
+				"--add-host",
+				"host.docker.internal:host-gateway",
 				"--cpus",
 				"2",
 				"--memory",
@@ -71,7 +73,7 @@ export class DockerSandbox {
 						"--mount",
 						`type=bind,src=${opts.bridge.mountDir},dst=/run/opensec,readonly`,
 						"--env",
-						"OPENSEC_SOCKET=/run/opensec/opensec.sock",
+						`OPENSEC_ENDPOINT=${containerEndpoint(opts.bridge.endpoint)}`,
 						"--env",
 						`OPENSEC_TOKEN=${opts.bridge.token}`,
 						"--env",
@@ -91,9 +93,31 @@ export class DockerSandbox {
 			if (madeWorkspace.exitCode !== 0) throw new Error(dockerError("prepare the workspace", madeWorkspace));
 			const copied = await runCommand("docker", ["cp", repoRoot, `${name}:/workspace/repo`]);
 			if (copied.exitCode !== 0) throw new Error(dockerError("copy the repository", copied));
-			// docker cp creates destination files as root. Leave capabilities dropped and
-			// make the disposable copy writable instead of chowning it for the agent.
-			const permissions = await runCommand("docker", ["exec", "--user", "0", name, "chmod", "-R", "u+rwX,go+rwX", "/workspace/repo"]);
+			// Docker Desktop may preserve the host uid even though docker cp commonly
+			// creates root-owned files. With all capabilities dropped, container root
+			// cannot chmod a file owned by that host uid. Run chmod as the copied tree's
+			// actual owner, then make the disposable copy writable by the agent user.
+			const owner = await runCommand("docker", [
+				"exec",
+				"--user",
+				"0",
+				name,
+				"stat",
+				"-c",
+				"%u:%g",
+				"/workspace/repo",
+			]);
+			if (owner.exitCode !== 0) throw new Error(dockerError("inspect repository ownership", owner));
+			const permissions = await runCommand("docker", [
+				"exec",
+				"--user",
+				owner.stdout.trim(),
+				name,
+				"chmod",
+				"-R",
+				"u+rwX,go+rwX",
+				"/workspace/repo",
+			]);
 			if (permissions.exitCode !== 0) throw new Error(dockerError("prepare repository permissions", permissions));
 			if (opts.bridge) {
 				const installed = await runCommand("docker", [
@@ -103,7 +127,7 @@ export class DockerSandbox {
 					name,
 					"sh",
 					"-c",
-					'printf "#!/bin/sh\\nexec node /run/opensec/opensec-cli.mjs \\\"$@\\\"\\n" > /usr/local/bin/opensec && chmod 755 /usr/local/bin/opensec',
+					'printf "#!/bin/sh\\nexec node /run/opensec/opensec-cli.mjs \\\"\\$@\\\"\\n" > /usr/local/bin/opensec && chmod 755 /usr/local/bin/opensec',
 				]);
 				if (installed.exitCode !== 0) throw new Error(dockerError("install the OpenSec CLI", installed));
 				const checked = await runCommand("docker", [
@@ -180,6 +204,12 @@ export class DockerSandbox {
 			throw new Error(dockerError("remove sandbox", removed));
 		}
 	}
+}
+
+function containerEndpoint(endpoint: string): string {
+	const url = new URL(endpoint);
+	url.hostname = "host.docker.internal";
+	return url.toString();
 }
 
 export type BashSandbox = Pick<DockerSandbox, "exec" | "repoDir" | "writeOutput">;

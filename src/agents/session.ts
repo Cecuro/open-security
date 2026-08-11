@@ -151,7 +151,7 @@ export class AgentRunner {
 				"",
 				...(this.sandbox === "docker"
 					? [
-						"Bash runs with no network in a writable Docker copy at /workspace/repo. Container changes are visible only to bash.",
+						"Bash runs in a writable Docker copy at /workspace/repo. Container changes are visible only to bash.",
 					]
 					: ["Bash runs on the host in the checked-out repository. Any file changes persist in the user's working tree."]),
 				"Use bash for compound searches, builds, tests, and reproductions. Keep read for assigned-file review because read records coverage.",
@@ -180,7 +180,7 @@ export class AgentRunner {
 				createBashTool(
 					sandbox,
 					this.sandbox === "docker"
-						? `Run Bash with no network in the writable Docker copy at ${sandbox.repoDir}. Commands run for at most 10 minutes. Large output is saved in the container for later inspection.`
+						? `Run Bash in the writable Docker copy at ${sandbox.repoDir}. Commands run for at most 10 minutes. Large output is saved in the container for later inspection.`
 						: `Run Bash on the host in ${sandbox.repoDir}. Changes affect the user's working tree. Commands run for at most 10 minutes.`,
 				) as AnyToolDef,
 			];
