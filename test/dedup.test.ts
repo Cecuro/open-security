@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 import { runOpensec, PROBE_VERBS, type RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { testScanConfig } from "./config.js";
-import { collisionGroups, cweFamily, identityOf, mergeProse } from "../src/scan/identity.js";
+import { collisionGroups, cweFamily, identityOf } from "../src/scan/identity.js";
 
 function setup() {
 	const base = mkdtempSync(join(tmpdir(), "opensec-dedup-"));
@@ -74,15 +74,18 @@ describe("identical findings collapse without a model", () => {
 				locations: [{ path: "a.js", start_line: 3, end_line: 3, role: "sink" }],
 			}),
 		);
-		expect(second.id).toBe(first.id);
 		expect(second.status).toBe("merged_into_existing");
+		expect(second.duplicate_of).toBe(first.id);
 
-		// One row, and neither probe's evidence was thrown away.
+		// Both rows remain available for review; the canonical row stays clean.
 		const live = env.ledger.listLiveCandidates("s");
 		expect(live).toHaveLength(1);
-		expect(live[0]?.description).toContain("a.js:2");
-		expect(live[0]?.description).toContain("a.js:3");
-		expect(live[0]?.locations).toHaveLength(2);
+		expect(live[0]?.id).toBe(first.id);
+		expect(live[0]?.description).toBe("the id is interpolated\n\na.js:2");
+		const duplicate = env.ledger.getCandidate("s", second.id);
+		expect(duplicate).toMatchObject({ status: "duplicate", duplicate_of: first.id });
+		expect(duplicate?.description).toBe("user-controlled id reaches the query\n\na.js:3");
+		expect(duplicate?.locations).toHaveLength(1);
 	});
 
 	it("does not resolve the merged row — finding it twice is not a verdict", async () => {
@@ -184,15 +187,5 @@ describe("what reaches the reducer is keyed on the broken control", () => {
 			at("c2", ["CWE-682"], [["x.rs", "root_control"]]),
 		]);
 		expect(groups).toHaveLength(1);
-	});
-});
-
-describe("merging prose keeps both readers", () => {
-	it("unions blocks and drops only exact repeats", () => {
-		expect(mergeProse("one\n\ntwo", "two\n\nthree")).toBe("one\n\ntwo\n\nthree");
-	});
-
-	it("keeps the first text when the second adds nothing", () => {
-		expect(mergeProse("same", "same")).toBe("same");
 	});
 });

@@ -125,7 +125,7 @@ describe("duplicate merging cannot erase findings", () => {
 				duplicate_of: "c1",
 				rationale: "one patch",
 			}),
-		).rejects.toThrow(/itself merged into 'c2'/);
+		).rejects.toThrow(/duplicate chain/);
 		expect(env.ledger.getCandidate("s", "c2")?.status).toBe("open");
 
 		// c2 survives, so the report is not empty.
@@ -368,6 +368,42 @@ describe("parallel workers cannot reach into each other", () => {
 			Promise.resolve().then(() => runOpensec(reducer, { verb: "candidate.validate", id: "c1", disposition: "duplicate", duplicate_of: "c3", rationale: "x" })),
 		).rejects.toThrow(/'c3' is not in your group/);
 		expect(env.ledger.getCandidate("s", "c1")?.status).toBe("open");
+	});
+
+	it("stops the reducer from creating duplicate chains", async () => {
+		const env = setup();
+		await env.call(env.candidate({ title: "one", instance: "a" }));
+		await env.call(env.candidate({ title: "two", instance: "b" }));
+		await env.call(env.candidate({ title: "three", instance: "c" }));
+		const reducer: RunContext = {
+			...env.ctx,
+			workerId: "reduce-global",
+			verbs: REDUCE_VERBS,
+			resolvableIds: ["c1", "c2", "c3"],
+			dispositions: ["duplicate"],
+		};
+		await expect(
+			Promise.resolve().then(() =>
+				runOpensec(reducer, {
+					verb: "candidate.validate",
+					id: "c1",
+					disposition: "duplicate",
+					duplicate_of: "c2",
+					rationale: "same root cause",
+				}),
+			),
+		).resolves.toBeDefined();
+		await expect(
+			Promise.resolve().then(() =>
+				runOpensec(reducer, {
+					verb: "candidate.validate",
+					id: "c2",
+					disposition: "duplicate",
+					duplicate_of: "c3",
+					rationale: "same root cause",
+				}),
+			),
+		).rejects.toThrow(/duplicate chain/);
 	});
 
 	it("validates a reducer batch before recording any duplicate", async () => {

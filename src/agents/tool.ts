@@ -240,7 +240,7 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 			? sanitize(ctx, p.instance).slice(0, 200)
 			: null;
 
-	const { id, merged } = ctx.ledger.upsertCandidate({
+	const { id, merged, duplicateOf } = ctx.ledger.upsertCandidate({
 		scanId: ctx.scanId,
 		workerId: ctx.workerId,
 		// Capped like instance and symbol: a title is one line of a findings table.
@@ -257,10 +257,11 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 		locations: locations.length,
 		...(merged
 			? {
+					duplicate_of: duplicateOf,
 					note:
 						`another worker already filed this exact finding (same class, same files ` +
-						`and roles, same instance). Your evidence was added to ${id}. It has not ` +
-						`been judged yet — finding it twice is search evidence, not proof.`,
+						`and roles, same instance). This filing is linked to ${duplicateOf}; both ` +
+						`rows keep their own evidence. Finding it twice is search evidence, not proof.`,
 				}
 			: {}),
 	});
@@ -280,7 +281,7 @@ type CandidateValidationPlan = {
 };
 
 function prepareCandidateValidation(ctx: RunContext, p: Params): CandidateValidationPlan {
-	const { id } = requireCandidate(ctx, p);
+	const { candidate, id } = requireCandidate(ctx, p);
 	const rationale = sanitize(ctx, requireText(p.rationale, "rationale"));
 
 	const disposition =
@@ -306,6 +307,18 @@ function prepareCandidateValidation(ctx: RunContext, p: Params): CandidateValida
 		if (!dup || dup === id) {
 			throw new Error(
 				`duplicate_of must name another candidate — got '${dup}'. Nothing was recorded.`,
+			);
+		}
+		if (candidate.duplicate_of) {
+			throw new Error(
+				`candidate '${id}' is already merged into '${candidate.duplicate_of}' — do not create a duplicate chain. ` +
+					"Nothing was recorded.",
+			);
+		}
+		if (ctx.ledger.hasDuplicateChildren(ctx.scanId, id)) {
+			throw new Error(
+				`candidate '${id}' already has linked duplicates — do not create a duplicate chain. ` +
+					"Nothing was recorded.",
 			);
 		}
 		if (ctx.resolvableIds && !ctx.resolvableIds.includes(dup)) {
