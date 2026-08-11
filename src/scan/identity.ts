@@ -79,29 +79,3 @@ export function collisionGroups<T extends { cwe_ids: string[]; locations: Locati
 	}
 	return [...groups.values()].filter((g) => g.length > 1);
 }
-
-export function mergeProse(a: string, b: string, limit = 20000): string {
-	const blocks: string[] = [];
-	const seen = new Set<string>();
-	for (const text of [a, b]) {
-		for (const block of text.split(/\n{2,}/)) {
-			const t = block.trim();
-			if (t.length === 0 || seen.has(t)) continue;
-			seen.add(t);
-			blocks.push(t);
-		}
-	}
-	return blocks.join("\n\n").slice(0, limit);
-}
-
-export function mergeLocations(a: Location[], b: Location[]): Location[] {
-	const out: Location[] = [];
-	const seen = new Set<string>();
-	for (const l of [...a, ...b]) {
-		const key = `${l.path}:${l.start_line}-${l.end_line}`;
-		if (seen.has(key)) continue;
-		seen.add(key);
-		out.push(l);
-	}
-	return out.slice(0, 20);
-}

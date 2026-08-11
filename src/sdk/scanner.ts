@@ -649,7 +649,11 @@ export class Scanner {
 				"They have not been validated. Your only question is whether any of them",
 				"are the same reportable finding.",
 				"",
-				wrapUntrusted(this.nonce, "candidates", group.map(describeCandidate).join("\n\n---\n\n")),
+				wrapUntrusted(
+					this.nonce,
+					"candidates",
+					group.map((c) => (workerId === "reduce-global" ? describeCandidateIndex(c) : describeCandidate(c))).join("\n\n---\n\n"),
+				),
 				"",
 				"Link candidates with the same root cause that should appear once in the report.",
 				"If nothing here is a duplicate, say so and record nothing.",
@@ -939,6 +943,29 @@ function describeCandidate(c: Candidate): string {
 		"",
 		"description:",
 		c.description,
+	].join("\n");
+}
+
+/**
+ * The global reducer needs to compare every survivor, not reread every full
+ * filing. It can read any cited source before linking rows. Keep this index
+ * bounded so a long description from one probe cannot crowd out the rest.
+ */
+function describeCandidateIndex(c: Candidate): string {
+	const anchors = c.locations
+		.filter((l) => l.role === "entrypoint" || l.role === "root_control" || l.role === "sink")
+		.slice(0, 3);
+	return [
+		`id: ${c.id}`,
+		`title: ${c.title}`,
+		`cwe: ${c.cwe_ids.join(", ") || "unclassified"}`,
+		...(c.instance ? [`instance: ${c.instance}`] : []),
+		"key locations:",
+		(anchors.length > 0 ? anchors : c.locations.slice(0, 3))
+			.map((l) => `  ${formatLocation(l)}`)
+			.join("\n"),
+		"summary:",
+		c.description.slice(0, 600),
 	].join("\n");
 }
 
