@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { runOpensec, type RunContext, THREAT_MODEL_VERBS } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
+import { testScanConfig } from "./config.js";
 
 const SCAN = "scan-test";
 
@@ -16,7 +17,7 @@ function setup(): { ctx: RunContext; call: (p: Record<string, unknown>) => Promi
 
 	const ledger = Ledger.open(join(root, "ledger.db"));
 	const repoId = ledger.upsertRepo(root, "fixture", null);
-	ledger.createScan({ id: SCAN, repoId, revision: null, profile: "local", configHash: "h" });
+	ledger.createScan({ id: SCAN, repoId, revision: null, config: testScanConfig() });
 	ledger.insertFiles(SCAN, [
 		{ path: "app.js", sha: "x", bytes: 30, excludedReason: null },
 		{ path: "other.js", sha: "y", bytes: 4, excludedReason: null },

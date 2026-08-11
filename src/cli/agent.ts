@@ -7,7 +7,7 @@ const COMMANDS = [
 	{ words: ["work", "complete"], verb: "work.complete", usage: "opensec work complete --input <path|->", note: "Record completed review work from JSON." },
 	{ words: ["candidate", "create"], verb: "candidate.create", usage: "opensec candidate create --input <path|->", note: "Create a suspected finding from JSON: title, description, locations, optional cwe and instance." },
 	{ words: ["candidate", "validate"], verb: "candidate.validate", usage: "opensec candidate validate --input <path|->", note: "Record a validation verdict from JSON." },
-	{ words: ["candidate", "assess"], verb: "candidate.assess", usage: "opensec candidate assess --input <path|->", note: "Record attack-path and severity inputs." },
+	{ words: ["candidate", "assess"], verb: "candidate.assess", usage: "opensec candidate assess --input <path|->", note: "Record assessment and severity inputs." },
 ] as const;
 
 type Command = (typeof COMMANDS)[number];

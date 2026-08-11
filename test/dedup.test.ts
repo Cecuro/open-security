@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 import { runOpensec, PROBE_VERBS, type RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
+import { testScanConfig } from "./config.js";
 import { collisionGroups, cweFamily, identityOf, mergeProse } from "../src/scan/identity.js";
 
 function setup() {
@@ -24,7 +25,7 @@ function setup() {
 
 	const ledger = Ledger.open(join(base, "l.db"));
 	const repoId = ledger.upsertRepo(root, "r", null);
-	ledger.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
+	ledger.createScan({ id: "s", repoId, revision: null, config: testScanConfig() });
 	ledger.insertFiles("s", [
 		{ path: "a.js", sha: "1", bytes: 12, excludedReason: null },
 		{ path: "b.js", sha: "2", bytes: 12, excludedReason: null },

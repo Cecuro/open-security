@@ -20,6 +20,7 @@ import {
 import type { TSchema } from "typebox";
 
 import { opensecDir } from "../db/db.js";
+import { DEFAULT_MAX_TURNS } from "../scan/config.js";
 import { OpensecBridge } from "./bridge.js";
 import { createSubagentTool, type SubagentDeps } from "./subagent.js";
 import { createBashTool, DockerSandbox } from "./docker.js";
@@ -55,7 +56,7 @@ export interface UsageDelta {
 
 // Not redundant with --max-cost: the budget is only checked between agent runs,
 // so nothing else bounds a single agent that loops on grep.
-export const DEFAULT_MAX_TURNS = 80;
+export { DEFAULT_MAX_TURNS };
 
 export interface RunArgs {
 	ctx: RunContext;

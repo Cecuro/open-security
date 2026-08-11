@@ -16,6 +16,7 @@ import {
 } from "../agents/tool.js";
 import { Ledger, opensecDir, scanArtifactDir, shortHash } from "../db/db.js";
 import { loadEnv } from "../env.js";
+import { normalizeScanConfig } from "../scan/config.js";
 import { collisionGroups } from "../scan/identity.js";
 import { ext, inventory, type InventoryResult } from "../scan/inventory.js";
 import { mapConcurrent } from "../scan/concurrency.js";
@@ -33,6 +34,7 @@ import {
 	type Phase,
 	type PassCoverage,
 	type Profile,
+	type ScanConfig,
 	type ScanScope,
 } from "../types.js";
 
@@ -55,7 +57,7 @@ export interface ScannerOptions {
 	 * findings — so this buys independent looks, and costs roughly n times the
 	 * reading. Defaults to one.
 	 */
-	probes?: number;
+	passes?: number;
 	concurrency?: number;
 	maxTurns?: number;
 	refreshThreatModel?: boolean;
@@ -84,7 +86,7 @@ export const PHASE_ORDER: Phase[] = [
 	"discovery",
 	"reduce",
 	"validate",
-	"attack_path",
+	"assessment",
 	"report",
 ];
 
@@ -98,6 +100,7 @@ export class Scanner {
 	private constructor(
 		readonly scanId: string,
 		private readonly opts: ScannerOptions,
+		private readonly config: ScanConfig,
 		private readonly ledger: Ledger,
 		private readonly runner: AgentRunner,
 		private readonly prompts: Prompts,
@@ -133,25 +136,32 @@ export class Scanner {
 		const repoId = ledger.upsertRepo(repoRoot, repoName, git(repoRoot, ["config", "--get", "remote.origin.url"]));
 		const revision = git(repoRoot, ["rev-parse", "HEAD"]);
 		const scanId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${shortHash(repoRoot + Math.random()).slice(0, 6)}`;
-		const configHash = shortHash(
-			JSON.stringify({ prompts: prompts.hash, model: opts.model, profile, scope }),
-		);
+		const config = normalizeScanConfig({
+			modelRef: `${model.provider}/${model.id}`,
+			promptHash: prompts.hash,
+			profile,
+			scope,
+			passes: opts.passes,
+			concurrency: opts.concurrency,
+			maxTurns: opts.maxTurns,
+			maxFiles: opts.maxFiles,
+			exclude: opts.exclude,
+			maxCostUsd: opts.maxCostUsd,
+			partitionMaxFiles: opts.partitionMaxFiles,
+			refreshThreatModel: opts.refreshThreatModel,
+		});
 
 		ledger.createScan({
 			id: scanId,
 			repoId,
 			revision,
-			profile,
-			configHash,
-			modelRef: `${model.provider}/${model.id}`,
-			promptHash: prompts.hash,
-			probes: Math.max(1, opts.probes ?? 1),
-			scope,
+			config,
 		});
 
 		return new Scanner(
 			scanId,
 			opts,
+			config,
 			ledger,
 			runner,
 			prompts,
@@ -167,7 +177,7 @@ export class Scanner {
 
 	/**
 	 * Pick a failed or interrupted scan back up at the phase it stopped in.
-	 * Phases already in the ledger are not redone; validate and attack-path
+	 * Phases already in the ledger are not redone; validate and assessment
 	 * skip individual candidates that already carry a verdict. Spend so far
 	 * still counts against --max-cost, so a scan that died on budget needs a
 	 * higher ceiling to get anywhere.
@@ -193,10 +203,10 @@ export class Scanner {
 			if (String(scan.profile) === "static") {
 				throw new Error(`scan ${scanId} used the removed static profile; start a new local or container scan`);
 			}
-			const storedPasses = Math.max(1, scan.probes ?? 1);
-			if (opts.probes !== undefined && Math.max(1, opts.probes) !== storedPasses) {
+			const storedPasses = scan.passes ?? scan.config?.passes ?? 1;
+			if (opts.passes !== undefined && opts.passes !== storedPasses) {
 				throw new Error(
-					`scan ${scanId} started with ${storedPasses} probe pass(es); resume cannot change it`,
+					`scan ${scanId} started with ${storedPasses} pass(es); resume cannot change it`,
 				);
 			}
 			const repo = ledger.getRepo(scan.repo_id);
@@ -206,12 +216,14 @@ export class Scanner {
 			}
 
 			const prompts = loadPrompts(opts.promptsDir);
+			const maxCostUsd =
+				opts.maxCostUsd === undefined ? scan.config?.maxCostUsd : opts.maxCostUsd;
 			const runner = await AgentRunner.create({
 				repoRoot: repo.path,
-				modelRef: opts.model,
+				modelRef: opts.model ?? scan.config?.modelRef ?? scan.model_ref ?? undefined,
 				sandbox: scan.profile === "container" ? "docker" : "local",
 			});
-			Scanner.resolveEnforceable(runner, opts.maxCostUsd);
+			const model = Scanner.resolveEnforceable(runner, maxCostUsd);
 
 			const head = git(repo.path, ["rev-parse", "HEAD"]);
 			if (scan.revision && head && head !== scan.revision) {
@@ -230,10 +242,25 @@ export class Scanner {
 					: scan.scope_kind === "working_tree"
 						? { kind: "working_tree" }
 						: { kind: "repository" };
+			const config = normalizeScanConfig({
+				modelRef: `${model.provider}/${model.id}`,
+				promptHash: prompts.hash,
+				profile: scan.profile,
+				scope,
+				passes: storedPasses,
+				concurrency: opts.concurrency ?? scan.config?.concurrency,
+				maxTurns: opts.maxTurns ?? scan.config?.maxTurns,
+				maxFiles: opts.maxFiles ?? scan.config?.maxFiles,
+				exclude: opts.exclude ?? scan.config?.exclude,
+				maxCostUsd,
+				partitionMaxFiles: opts.partitionMaxFiles ?? scan.config?.partitionMaxFiles,
+				refreshThreatModel: opts.refreshThreatModel ?? scan.config?.refreshThreatModel,
+			});
 
 			return new Scanner(
 				scanId,
-				{ ...opts, repo: repo.path, probes: storedPasses },
+				{ ...opts, repo: repo.path, passes: storedPasses },
+				config,
 				ledger,
 				runner,
 				prompts,
@@ -284,7 +311,7 @@ export class Scanner {
 	}
 
 	private get concurrency(): number {
-		return Math.max(1, this.opts.concurrency ?? 4);
+		return this.config.concurrency;
 	}
 
 	/**
@@ -293,7 +320,7 @@ export class Scanner {
 	 * than dividing it, and what it buys is a second opinion.
 	 */
 	private get passes(): number {
-		return Math.max(1, this.opts.probes ?? 1);
+		return this.config.passes;
 	}
 
 	private say(msg: string): void {
@@ -324,14 +351,14 @@ export class Scanner {
 	}
 
 	private budgetAvailable(): boolean {
-		const max = this.opts.maxCostUsd;
+		const max = this.config.maxCostUsd;
 		return typeof max !== "number" || (this.ledger.getScan(this.scanId)?.cost_usd ?? 0) < max;
 	}
 
 	private async runAgent(args: RunArgs): Promise<AgentRunResult> {
 		const result = await this.runner.run({
 			...args,
-			maxTurns: args.maxTurns ?? this.opts.maxTurns,
+			maxTurns: args.maxTurns ?? this.config.maxTurns,
 			onUsage: (usage) => {
 				this.bill(usage);
 				return this.budgetAvailable();
@@ -352,7 +379,7 @@ export class Scanner {
 			run: (a) =>
 				this.runner.run({
 					...a,
-					maxTurns: this.opts.maxTurns,
+					maxTurns: this.config.maxTurns,
 					onUsage: (usage) => {
 						this.bill(usage);
 						return this.budgetAvailable();
@@ -369,7 +396,7 @@ export class Scanner {
 	}
 
 	private checkBudget(): void {
-		const max = this.opts.maxCostUsd;
+		const max = this.config.maxCostUsd;
 		if (typeof max !== "number") return;
 		const scan = this.ledger.getScan(this.scanId);
 		const spent = scan?.cost_usd ?? 0;
@@ -386,8 +413,8 @@ export class Scanner {
 		this.ledger.setPhase(this.scanId, "inventory");
 		const include = await scopedPaths(this.repoRoot, this.scope);
 		const inv = await inventory(this.repoRoot, {
-			maxFiles: this.opts.maxFiles,
-			exclude: this.opts.exclude,
+			maxFiles: this.config.maxFiles ?? undefined,
+			exclude: this.config.exclude,
 			include,
 		});
 		this.ledger.insertFiles(
@@ -401,7 +428,7 @@ export class Scanner {
 		);
 		this.partitions = partition(
 			inv.inScope.map((f) => ({ path: f.path, bytes: f.bytes })),
-			{ maxFiles: this.opts.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
+			{ maxFiles: this.config.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
 		);
 
 		this.inv = inv;
@@ -426,7 +453,7 @@ export class Scanner {
 		this.ledger.setPhase(this.scanId, "threat_model");
 		const path = this.threatModelPath();
 
-		if (existsSync(path) && !this.opts.refreshThreatModel) {
+		if (existsSync(path) && !this.config.refreshThreatModel) {
 			const stored = readFileSync(path, "utf8");
 			const wroteAt = /^<!-- opensec threat model .*revision (\S+)/m.exec(stored)?.[1];
 			this.ledger.setThreatModel(this.scanId, stored, `reused:${path}`);
@@ -675,18 +702,18 @@ export class Scanner {
 	}
 
 	async assess(): Promise<void> {
-		this.ledger.setPhase(this.scanId, "attack_path");
+		this.ledger.setPhase(this.scanId, "assessment");
 		const todo = this.ledger
 			.listLiveCandidates(this.scanId)
 			.filter(
 				(c) => latestActivity(c, "validation")?.data?.disposition === "confirmed" && !candidateComputed(c),
 			);
 		if (todo.length === 0) return;
-		this.say(`attack path: ${todo.length} confirmed finding(s), ${this.concurrency} at a time`);
+		this.say(`assessment: ${todo.length} confirmed finding(s), ${this.concurrency} at a time`);
 
 		await mapConcurrent(todo, this.concurrency, async (c) => {
 			this.checkBudget();
-			const workerId = `attack-path-${c.id}`;
+			const workerId = `assessment-${c.id}`;
 			await this.runAgent({
 				ctx: {
 					...this.ctx(workerId),
@@ -697,7 +724,7 @@ export class Scanner {
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				systemPrompt: [
-					this.prompts.get("attack-path.md"),
+					this.prompts.get("assessment.md"),
 					"",
 					this.prompts.get("refs/counterevidence.md"),
 				].join("\n"),
@@ -719,7 +746,7 @@ export class Scanner {
 					candidateId: c.id,
 					workerId,
 					kind: "assessment",
-					body: "confirmed as real, but the attack-path pass recorded no rating",
+					body: "confirmed as real, but the assessment pass recorded no rating",
 					status: "needs_follow_up",
 					data: { disposition: "needs_follow_up" },
 				});
@@ -748,7 +775,7 @@ export class Scanner {
 			if (skip("inventory")) {
 				this.partitions = partition(
 					this.ledger.listInScopePaths(this.scanId).map((path) => ({ path, bytes: 0 })),
-					{ maxFiles: this.opts.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
+					{ maxFiles: this.config.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
 				);
 				this.say(
 					`inventory: kept from the interrupted run — ` +
@@ -822,7 +849,7 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 	const repo = ledger.getRepo(scan.repo_id);
 	const candidates = ledger.listCandidates(scanId);
 	const coverage = ledger.coverage(scanId);
-	const passCoverage = ledger.passCoverage(scanId, Math.max(1, scan.probes ?? 1));
+	const passCoverage = ledger.passCoverage(scanId, Math.max(1, scan.passes ?? 1));
 	const extensions = [
 		...new Set(ledger.listInScopePaths(scanId).map(ext).filter(Boolean)),
 	].sort();
@@ -838,12 +865,13 @@ export function reportScan(ledger: Ledger, scanId: string): ScanResult {
 		excludedFiles: ledger.excludedCount(scanId),
 		modelRef: scan.model_ref ?? "(not recorded)",
 		promptHash: scan.prompt_hash ?? "(not recorded)",
-		// Part of reading the coverage number: one probe reaching every file
+		// Part of reading the coverage number: one pass reaching every file
 		// and four independently reaching every file are the same 100%, and
 		// only the second means the repository was looked at four ways.
-		ownership: scan.probes
-			? `${scan.probes} probe(s), each over all ${coverage.files_in_scope} files`
+		ownership: scan.passes
+			? `${scan.passes} pass(es), each over all ${coverage.files_in_scope} files`
 			: undefined,
+		passes: scan.passes ?? undefined,
 		threatModel: threatModelNote(scan.threat_model_source),
 	});
 
@@ -910,13 +938,13 @@ function describeCandidate(c: Candidate): string {
 }
 
 /**
- * What a probe is told about the others.
+ * What a discovery agent is told about the others.
  *
  * Probes overlap completely, so they need to hear that filing something a
  * sibling probably also found is the correct move. Left to itself a model
  * reasons that four reviewers on one repository make its own report redundant,
  * and that is the one belief that would make this arrangement worse than the
- * split worklists it replaced. The converse matters too: probes agreeing is a
+ * split worklists it replaced. The converse matters too: agents agreeing is a
  * property of the search, not evidence about the finding, and nothing
  * downstream treats it as such.
  */
@@ -924,17 +952,17 @@ function describeCompany(parts: number, passes: number): string {
 	const bits: string[] = [];
 	if (parts > 1) {
 		bits.push(
-			`There are ${parts} probes on this repository; you are accountable for your own ` +
+			`There are ${parts} discovery agents on this repository; you are accountable for your own ` +
 				`worklist only, but you may read anything.`,
 		);
 	}
 	if (passes > 1) {
-		// Passes overlap completely, so a probe needs to hear that filing what a
+		// Passes overlap completely, so an agent needs to hear that filing what a
 		// sibling probably also found is correct. The converse matters too:
 		// agreement is a property of the search, not evidence about the finding.
 		bits.push(
 			`This repository is being reviewed ${passes} times over, independently. Someone else ` +
-				`may file what you file — do it anyway. Duplicates are merged, and two probes ` +
+				`may file what you file — do it anyway. Duplicates are merged, and two agents ` +
 				`agreeing is not evidence that a finding is real.`,
 		);
 	}

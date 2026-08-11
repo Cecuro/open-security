@@ -12,6 +12,7 @@ import {
 } from "../src/agents/subagent.js";
 import { runOpensec, type RunContext, SUBAGENT_VERBS } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
+import { testScanConfig } from "./config.js";
 import { loadPrompts } from "../src/scan/prompts.js";
 
 function setup(over: Partial<RunContext> = {}) {
@@ -22,7 +23,7 @@ function setup(over: Partial<RunContext> = {}) {
 
 	const ledger = Ledger.open(join(base, "l.db"));
 	const repoId = ledger.upsertRepo(root, "r", null);
-	ledger.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
+	ledger.createScan({ id: "s", repoId, revision: null, config: testScanConfig() });
 	ledger.insertFiles("s", [{ path: "app.js", sha: "1", bytes: 6, excludedReason: null }]);
 
 	const ctx: RunContext = {

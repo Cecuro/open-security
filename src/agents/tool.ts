@@ -313,7 +313,7 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 		disposition,
 		next:
 			disposition === "confirmed"
-				? "a separate attack-path pass will rate this. You do not assess it."
+				? "a separate assessment pass will rate this. You do not assess it."
 				: undefined,
 	});
 }

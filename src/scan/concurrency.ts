@@ -2,7 +2,7 @@
  * Run a bounded number of agents at once.
  *
  * This file used to also cut the repository into partitions, one per probe.
- * That is gone: probes are independent looks at the whole repository now, not
+ * That is gone: passes are independent looks at the whole repository now, not
  * a division of labour, so the only thing left to manage is how many run at
  * once.
  */

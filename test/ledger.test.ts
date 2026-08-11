@@ -4,11 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { Ledger } from "../src/db/db.js";
+import { testScanConfig } from "./config.js";
 
 function ledger(): Ledger {
 	const l = Ledger.open(join(mkdtempSync(join(tmpdir(), "opensec-ledger-")), "l.db"));
 	const repoId = l.upsertRepo("/tmp/fake-repo", "fake", null);
-	l.createScan({ id: "s", repoId, revision: null, profile: "local", configHash: "c" });
+	l.createScan({ id: "s", repoId, revision: null, config: testScanConfig() });
 	return l;
 }
 

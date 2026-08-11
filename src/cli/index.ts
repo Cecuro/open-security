@@ -54,7 +54,7 @@ Options
   --max-turns <n>      turns one agent may take before it is stopped (default 80).
                        --max-cost is only checked between agents, so this is what
                        bounds a single agent that loops.
-  --probes <n>         independent passes over the repository (default 1). Each
+  --passes <n>         independent passes over the repository (default 1). Each
                        pass reviews every file with its own agents and its own
                        read state, so it is a second opinion rather than more
                        hands: n passes cost about n times the reading. Measured
@@ -218,7 +218,7 @@ async function main(argv: string[]): Promise<number> {
 		if (typeof parsed === "string") return fail(parsed);
 		const failSeverity = parseFailSeverity(opts.flags["fail-on-severity"]);
 		if (typeof failSeverity === "string") return fail(failSeverity);
-		const unknownValue = unknownValueFlag(opts, ["model", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns", "exclude", "fail-on-severity"]);
+		const unknownValue = unknownValueFlag(opts, ["model", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "fail-on-severity"]);
 		if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
 		const unknown = unknownBool(opts, ["json", "refresh-threat-model"]);
 		if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
@@ -228,6 +228,9 @@ async function main(argv: string[]): Promise<number> {
 			db: opts.flags.db,
 			promptsDir: opts.flags.prompts,
 			...parsed,
+			...(opts.flags.exclude === undefined
+				? {}
+				: { exclude: opts.flags.exclude.split(",").map((g) => g.trim()).filter(Boolean) }),
 			refreshThreatModel: opts.bools["refresh-threat-model"] === true,
 			onEvent: (m) => process.stderr.write(`${safe(m)}\n`),
 		});
@@ -262,7 +265,7 @@ async function main(argv: string[]): Promise<number> {
 	const failSeverity = parseFailSeverity(opts.flags["fail-on-severity"]);
 	if (typeof failSeverity === "string") return fail(failSeverity);
 
-	const unknownValue = unknownValueFlag(opts, ["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns", "exclude", "diff", "fail-on-severity"]);
+	const unknownValue = unknownValueFlag(opts, ["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "diff", "fail-on-severity"]);
 	if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
 	const unknown = unknownBool(opts, ["estimate", "json", "refresh-threat-model", "working-tree"]);
 	if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
@@ -335,22 +338,24 @@ interface ScanNumbers {
 	maxFiles?: number;
 	concurrency?: number;
 	maxTurns?: number;
-	probes?: number;
-	maxCostUsd: number | null;
+	passes?: number;
+	maxCostUsd?: number | null;
 }
 
 function parseScanNumbers(opts: Parsed): ScanNumbers | string {
-	const out: ScanNumbers = { maxCostUsd: null };
+	const out: ScanNumbers = {};
 	try {
 		out.maxFiles = intFlag("max-files", opts.flags["max-files"]);
 		out.concurrency = intFlag("concurrency", opts.flags.concurrency);
 		out.maxTurns = intFlag("max-turns", opts.flags["max-turns"]);
-		out.probes = intFlag("probes", opts.flags.probes);
+		out.passes = intFlag("passes", opts.flags.passes);
 	} catch (err) {
 		return (err as Error).message;
 	}
 	const costFlag = opts.flags["max-cost"];
-	if (costFlag !== undefined && costFlag !== "none") {
+	if (costFlag === "none") {
+		out.maxCostUsd = null;
+	} else if (costFlag !== undefined) {
 		out.maxCostUsd = Number(costFlag);
 		if (!Number.isFinite(out.maxCostUsd) || out.maxCostUsd <= 0) {
 			return "--max-cost needs a positive number, or 'none'";
@@ -386,7 +391,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "probes", "max-turns", "exclude", "diff", "fail-on-severity", "format", "output"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "diff", "fail-on-severity", "format", "output"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";

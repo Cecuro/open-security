@@ -10,7 +10,7 @@
  *
  * So a partition is not an accountability device. It is the unit that fits.
  * Independence is a separate axis and is bought separately, by running more
- * probes — not by widening the one each probe carries.
+ * passes — not by widening the one each discovery agent carries.
  */
 export interface Partition {
 	id: number;
@@ -23,7 +23,7 @@ export interface PartitionOptions {
 	maxPartitions?: number;
 }
 
-const DEFAULT_PARTITION_MAX_FILES = 15;
+export const DEFAULT_PARTITION_MAX_FILES = 15;
 const DEFAULT_MAX_PARTITIONS = 8;
 
 export function partition(
