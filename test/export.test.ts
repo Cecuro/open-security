@@ -75,6 +75,15 @@ describe("scan exports", () => {
 		expect(csv).not.toContain("Merged copy");
 	});
 
+	it("neutralizes spreadsheet formulas in CSV cells", () => {
+		const hostile = structuredClone(input);
+		hostile.candidates[0]!.title = "=HYPERLINK(\"https://example.invalid\")";
+		hostile.candidates[0]!.locations[0]!.path = " +cmd|' /C calc'!A0";
+		const csv = renderExport(hostile, "csv");
+		expect(csv).toContain("\"'=HYPERLINK");
+		expect(csv).toContain("' +cmd|' /C calc'!A0");
+	});
+
 	it("writes standard SARIF locations and severity levels", () => {
 		const sarif = JSON.parse(renderExport(input, "sarif"));
 		expect(sarif.version).toBe("2.1.0");

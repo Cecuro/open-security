@@ -35,7 +35,7 @@
       state.scans = await api("/api/scans");
       if (!state.scans.length) return renderNoScans();
       const requested = params.get("scan");
-      const defaultScan = state.scans.find(scan => (scan.reviewable_count ?? scan.finding_count ?? 0) > 0) || state.scans[0];
+      const defaultScan = state.scans[0];
       const scanId = state.scans.some(scan => scan.id === requested) ? requested : defaultScan.id;
       await openRun(scanId, initialView, false);
       replaceUrl();
@@ -86,7 +86,7 @@
         renderFindingResults();
         renderMain();
       } else if (target.id === "comment" && state.findingId) {
-        state.drafts[state.findingId] = target.value;
+        state.drafts[draftKey(state.scanId, state.findingId)] = target.value;
       }
     });
 
@@ -274,19 +274,20 @@
     const severity = severityOf(candidate);
     const computed = candidate.computed;
     const locations = candidate.locations || [];
-    const canChangeState = !snapshot && candidate.status !== "duplicate";
-    const canComment = !snapshot;
+    const completed = state.detail.scan.status === "completed";
+    const canChangeState = !snapshot && completed && candidate.status !== "duplicate";
+    const canComment = !snapshot && completed;
     const activity = [...candidate.activities].reverse();
     return `<article class="main-inner" style="--severity:${severityColor(severity)}">
       <button class="back-button" data-action="mobile-back">← Findings</button>
       <header class="detail-head"><div class="eyebrow">Finding ${esc(candidate.id)}</div><h1 tabindex="-1">${esc(candidate.title)}</h1><div class="head-meta"><span class="severity-label"><span></span>${label(severity)}</span>${(candidate.cwe_ids || []).map(cwe => `<span class="chip">${esc(cwe)}</span>`).join("")}<div class="state-control"><span>State</span>${canChangeState ? stateSelect(candidate.status) : `<span class="chip">${findingStateLabel(candidate.status)}</span>`}</div></div></header>
-      ${snapshot ? `<p class="status-note">This shared snapshot is read-only.</p>` : ""}
+      ${snapshot ? `<p class="status-note">This shared snapshot is read-only.</p>` : !completed ? `<p class="status-note">Review is available after this run completes.</p>` : ""}
       <div class="reading"><div>
         <section class="prose-section"><div class="section-title"><h2>Summary</h2><button class="copy-button" data-action="copy-finding-description" aria-label="Copy finding description" title="Copy finding description">${copyIcon()}</button></div><div class="description">${paragraphs(candidate.description)}</div></section>
         <section class="prose-section"><h2>Locations</h2><div class="location-list">${locations.length ? locations.map(location => `<div class="location"><code>${esc(location.path)}:${location.start_line}${location.end_line !== location.start_line ? `–${location.end_line}` : ""}</code><span>${esc(label(location.role || "evidence"))}</span></div>`).join("") : `<span>No code locations recorded.</span>`}</div></section>
         ${computed?.rationale?.length ? `<section class="prose-section"><h2>Severity basis</h2><ul class="basis">${computed.rationale.map(item => `<li>${esc(item)}</li>`).join("")}</ul></section>` : ""}
         <section class="prose-section"><h2>Review history</h2><div class="activity">${activity.length ? activity.map(activityItem).join("") : `<div>No activity recorded.</div>`}</div></section>
-        ${canComment ? `<div class="comment-form"><textarea id="comment" maxlength="10000" placeholder="Add review context…" aria-label="Review comment">${esc(state.drafts[candidate.id] || "")}</textarea><div class="comment-actions"><button class="primary-button" data-action="add-comment">Add comment</button></div></div>` : ""}
+        ${canComment ? `<div class="comment-form"><textarea id="comment" maxlength="10000" placeholder="Add review context…" aria-label="Review comment">${esc(state.drafts[draftKey(state.scanId, candidate.id)] || "")}</textarea><div class="comment-actions"><button class="primary-button" data-action="add-comment">Add comment</button></div></div>` : ""}
       </div><aside class="reading-aside">
         <section class="aside-section"><h2>Assessment</h2><dl class="fact-list"><div><dt>Confidence</dt><dd>${computed ? `${Math.round(computed.confidence * 100)}%` : "Not rated"}</dd></div><div><dt>Likelihood</dt><dd>${computed ? label(computed.likelihood) : "Not rated"}</dd></div>${computed?.proof_gap ? `<div><dt>Proof gap</dt><dd>${label(computed.proof_gap)}</dd></div>` : ""}${candidate.duplicate_of ? `<div><dt>Merged into</dt><dd><code>${esc(candidate.duplicate_of)}</code></dd></div>` : ""}</dl></section>
         <section class="aside-section"><h2>Source</h2><dl class="fact-list"><div><dt>Revision</dt><dd><code>${esc(shortHash(state.detail.scan.revision))}</code></dd></div><div><dt>Filed by</dt><dd><code>${esc(candidate.worker_id)}</code></dd></div><div><dt>Created</dt><dd>${longDate(candidate.created_at)}</dd></div></dl></section>
@@ -331,8 +332,11 @@
   async function saveReview(body, message) {
     const candidate = currentFinding();
     if (!candidate) return;
+    const scanId = state.scanId;
+    const candidateId = candidate.id;
     try {
-      const updated = await api(`/api/scans/${encodeURIComponent(state.scanId)}/candidates/${encodeURIComponent(candidate.id)}/review`, { method: "POST", body: JSON.stringify(body) });
+      const updated = await api(`/api/scans/${encodeURIComponent(scanId)}/candidates/${encodeURIComponent(candidateId)}/review`, { method: "POST", body: JSON.stringify(body) });
+      if (state.scanId !== scanId) return;
       replaceCandidate(updated);
       ensureVisibleSelection();
       toast(message);
@@ -344,12 +348,16 @@
 
   async function addComment() {
     const candidate = currentFinding();
-    const comment = state.drafts[candidate?.id] || document.getElementById("comment")?.value || "";
+    const scanId = state.scanId;
+    const candidateId = candidate?.id;
+    const key = draftKey(scanId, candidateId);
+    const comment = state.drafts[key] || document.getElementById("comment")?.value || "";
     if (!candidate || !comment.trim()) return;
     try {
-      const updated = await api(`/api/scans/${encodeURIComponent(state.scanId)}/candidates/${encodeURIComponent(candidate.id)}/review`, { method: "POST", body: JSON.stringify({ comment: comment.trim() }) });
+      const updated = await api(`/api/scans/${encodeURIComponent(scanId)}/candidates/${encodeURIComponent(candidate.id)}/review`, { method: "POST", body: JSON.stringify({ comment: comment.trim() }) });
+      if (state.scanId !== scanId) return;
       replaceCandidate(updated);
-      delete state.drafts[candidate.id];
+      delete state.drafts[key];
       toast("Comment added");
       renderAll();
     } catch (error) {
@@ -377,7 +385,7 @@
 
   function replaceCandidate(updated) {
     const index = state.detail.candidates.findIndex(candidate => candidate.id === updated.id);
-    updated.computed = state.detail.candidates[index]?.computed || null;
+    if (index < 0) return;
     state.detail.candidates[index] = updated;
     const summaryIndex = state.scans.findIndex(scan => scan.id === state.scanId);
     if (summaryIndex >= 0) state.scans[summaryIndex] = summaryFromDetail(state.detail);
@@ -404,30 +412,27 @@
   }
 
   function reviewStats(candidates) {
-    const reviewable = candidates.filter(isReviewable);
-    const reviewed = reviewable.filter(isHumanReviewed).length;
-    const counts = Object.fromEntries(["critical", "high", "medium", "low", "info"].map(severity => [severity, reviewable.filter(candidate => severityOf(candidate) === severity).length]));
+    const reviewable = candidates.filter(candidate => candidate.reviewable);
+    const active = reviewable.filter(candidate => candidate.status !== "suppressed" && candidate.status !== "not_applicable");
+    const remaining = reviewable.filter(candidate => candidate.needs_review).length;
+    const counts = Object.fromEntries(["critical", "high", "medium", "low", "info"].map(severity => [severity, active.filter(candidate => severityOf(candidate) === severity).length]));
     return {
-      reviewable: reviewable.length,
-      reviewed,
-      remaining: reviewable.length - reviewed,
+      reviewable: active.length,
+      reviewed: reviewable.length - remaining,
+      remaining,
       duplicates: candidates.filter(candidate => candidate.status === "duplicate").length,
-      dismissed: candidates.filter(candidate => !candidate.duplicate_of && !isReviewable(candidate)).length,
+      dismissed: reviewable.filter(candidate => candidate.status === "suppressed" || candidate.status === "not_applicable").length,
       counts,
     };
   }
 
-  function isReviewable(candidate) {
-    const assessed = [...candidate.activities].reverse().find(activity => (activity.kind === "assessment" || activity.kind === "validation") && activity.data?.disposition !== undefined)?.data?.disposition;
-    return !candidate.duplicate_of && (assessed || candidate.status) === "confirmed" && candidate.computed?.reportable !== false;
-  }
-  function isHumanReviewed(candidate) { return candidate.activities.some(activity => activity.kind === "review"); }
   function severityOf(candidate) { return candidate.computed?.severity || "info"; }
   function currentFinding() { return state.detail?.candidates.find(candidate => candidate.id === state.findingId) || null; }
   function firstVisibleFinding() { return visibleFindings()[0] || null; }
   function ensureVisibleSelection() { if (!visibleFindings().some(candidate => candidate.id === state.findingId)) state.findingId = firstVisibleFinding()?.id || null; }
   function severityRank(value) { return ["critical", "high", "medium", "low", "info"].indexOf(value); }
   function numericId(value) { return Number(value.replace(/\D/g, "")) || 0; }
+  function draftKey(scanId, candidateId) { return `${scanId || ""}:${candidateId || ""}`; }
 
   function summaryFromDetail(detail) {
     const stats = reviewStats(detail.candidates);

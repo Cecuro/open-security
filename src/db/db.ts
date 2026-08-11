@@ -697,6 +697,14 @@ export class Ledger {
 		const update = this.db.prepare(
 			"UPDATE candidates SET status = ?, duplicate_of = ? WHERE scan_id = ? AND id = ?",
 		);
+		const updateUnlessReviewed = this.db.prepare(
+			`UPDATE candidates SET status = ?, duplicate_of = ?
+			 WHERE scan_id = ? AND id = ?
+			 AND NOT EXISTS (
+				 SELECT 1 FROM candidate_activity
+				 WHERE scan_id = ? AND candidate_id = ? AND kind = 'review'
+			 )`,
+		);
 		this.db.transaction(() => {
 			for (const args of items) {
 				insert.run(
@@ -708,7 +716,18 @@ export class Ledger {
 					args.data ? JSON.stringify(args.data) : null,
 					now(),
 				);
-				update.run(args.status, args.duplicateOf ?? null, args.scanId, args.candidateId);
+				if (args.kind === "review") {
+					update.run(args.status, args.duplicateOf ?? null, args.scanId, args.candidateId);
+				} else if (args.kind !== "comment") {
+					updateUnlessReviewed.run(
+						args.status,
+						args.duplicateOf ?? null,
+						args.scanId,
+						args.candidateId,
+						args.scanId,
+						args.candidateId,
+					);
+				}
 			}
 		})();
 	}
@@ -739,6 +758,9 @@ export class Ledger {
 		status?: CandidateStatus;
 		comment?: string;
 	}): Candidate {
+		const scan = this.getScan(args.scanId);
+		if (!scan) throw new Error(`no scan '${args.scanId}'`);
+		if (scan.status !== "completed") throw new Error("findings can only be reviewed after a scan completes");
 		const candidate = this.getCandidate(args.scanId, args.candidateId);
 		if (!candidate) throw new Error(`no finding '${args.candidateId}' in scan '${args.scanId}'`);
 

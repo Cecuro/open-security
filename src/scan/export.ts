@@ -118,7 +118,8 @@ function renderSarif(input: ExportInput) {
 }
 
 function csv(value: unknown): string {
-	const text = String(value ?? "");
+	const raw = String(value ?? "");
+	const text = /^[\t\r ]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
 	return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
