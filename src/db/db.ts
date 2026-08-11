@@ -366,16 +366,8 @@ export class Ledger {
 	listWork(
 		scanId: string,
 		limit: number,
-		worklist?: readonly string[],
 		readGroup?: string,
 	): { files: ScanFile[]; unread: number } {
-		// The partition arrives as the paths themselves rather than a column on
-		// files. It is derived per run and never read back, so persisting it would
-		// be a second bookkeeping path that only exists to drift.
-		if (worklist && worklist.length === 0) return { files: [], unread: 0 };
-		const scope = worklist ? ` AND f.path IN (${worklist.map(() => "?").join(",")})` : "";
-		const paths = worklist ? [...worklist] : [];
-
 		if (readGroup === undefined) {
 			const progress = `LEFT JOIN (
 				SELECT path, MAX(bytes_read) AS bytes_read, MIN(first_touched_at) AS first_touched_at
@@ -386,9 +378,9 @@ export class Ledger {
 					.prepare(
 						`SELECT COUNT(*) AS n FROM files f ${progress}
 						 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
-						 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}`,
+						 AND COALESCE(r.bytes_read, 0) < f.bytes_total`,
 					)
-					.get(scanId, scanId, ...paths) as { n: number }
+					.get(scanId, scanId) as { n: number }
 			).n;
 			const files = this.db
 				.prepare(
@@ -396,10 +388,10 @@ export class Ledger {
 					        f.excluded_reason, r.first_touched_at
 					 FROM files f ${progress}
 					 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
-					 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}
+					 AND COALESCE(r.bytes_read, 0) < f.bytes_total
 					 ORDER BY f.path LIMIT ?`,
 				)
-				.all(scanId, scanId, ...paths, limit) as ScanFile[];
+				.all(scanId, scanId, limit) as ScanFile[];
 			return { files, unread };
 		}
 
@@ -412,9 +404,9 @@ export class Ledger {
 				.prepare(
 					`SELECT COUNT(*) AS n FROM files f ${join}
 					 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
-					 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}`,
+					 AND COALESCE(r.bytes_read, 0) < f.bytes_total`,
 				)
-				.get(readGroup, scanId, ...paths) as { n: number }
+				.get(readGroup, scanId) as { n: number }
 		).n;
 		const files = this.db
 			.prepare(
@@ -422,10 +414,10 @@ export class Ledger {
 				        f.excluded_reason, r.first_touched_at
 				 FROM files f ${join}
 				 WHERE f.scan_id = ? AND f.excluded_reason IS NULL
-				 AND COALESCE(r.bytes_read, 0) < f.bytes_total${scope}
+				 AND COALESCE(r.bytes_read, 0) < f.bytes_total
 				 ORDER BY f.path LIMIT ?`,
 			)
-			.all(readGroup, scanId, ...paths, limit) as ScanFile[];
+			.all(readGroup, scanId, limit) as ScanFile[];
 		return { files, unread };
 	}
 
@@ -446,12 +438,8 @@ export class Ledger {
 		return rows.map((r) => r.path);
 	}
 
-	/**
-	 * In scope, and — when the caller owns a slice — inside it. Ownership is what
-	 * ties a finding to the probe that filed it.
-	 */
-	fileInScope(scanId: string, path: string, worklist?: readonly string[]): boolean {
-		if (worklist && !worklist.includes(path)) return false;
+	/** Whether a path belongs to the inventory scope used for coverage. */
+	fileInScope(scanId: string, path: string): boolean {
 		const row = this.db
 			.prepare(
 				"SELECT 1 AS ok FROM files WHERE scan_id = ? AND path = ? AND excluded_reason IS NULL",
@@ -503,10 +491,9 @@ export class Ledger {
 
 	completeWorkerWork(
 		scanId: string,
-		worklist: readonly string[],
 		readGroup: string | undefined,
 	): void {
-		const { unread } = this.listWork(scanId, 1, worklist, readGroup);
+		const { unread } = this.listWork(scanId, 1, readGroup);
 		if (unread !== 0) throw new Error(`work is not complete: ${unread} file(s) still need reading`);
 	}
 

@@ -42,7 +42,7 @@ function setup() {
     execute: (i: string, p: unknown, s?: unknown, u?: unknown, c?: unknown) => Promise<unknown>;
   };
   const touched = () =>
-    ledger.listWork("s", 50, 0).files.filter((f) => f.first_touched_at !== null).map((f) => f.path);
+    ledger.listWork("s", 50).files.filter((f) => f.first_touched_at !== null).map((f) => f.path);
 
   return { tool, touched, ledger };
 }
@@ -69,12 +69,12 @@ describe("grep coverage is attributed to the repo-relative path", () => {
   it("marks a searched file with zero bytes read — searched is not reviewed", async () => {
     const env = setup();
     await env.tool.execute("g", { pattern: "token", path: "src" });
-    const f = env.ledger.listWork("s", 50, 0).files.find((x) => x.path === "src/handlers/upload.ts");
+    const f = env.ledger.listWork("s", 50).files.find((x) => x.path === "src/handlers/upload.ts");
     expect(f?.first_touched_at).not.toBeNull();
     expect(f?.bytes_read).toBe(0);
   });
 
-  it("does not invent coverage for a path outside the worklist", async () => {
+  it("does not invent coverage for a path outside the scan inventory", async () => {
     const env = setup();
     await env.tool.execute("g", { pattern: "nothing-matches-this-anywhere" });
     expect(env.touched()).toEqual([]);

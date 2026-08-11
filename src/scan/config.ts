@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 
 import type { Profile, ScanConfig, ScanScope } from "../types.js";
-import { DEFAULT_PARTITION_MAX_FILES } from "./partition.js";
 
 export const DEFAULT_CONCURRENCY = 4;
 export const DEFAULT_PASSES = 1;
@@ -18,7 +17,6 @@ export interface ScanConfigInput {
 	maxFiles?: number | null;
 	exclude?: readonly string[];
 	maxCostUsd?: number | null;
-	partitionMaxFiles?: number;
 	refreshThreatModel?: boolean;
 }
 
@@ -35,10 +33,6 @@ export function normalizeScanConfig(input: ScanConfigInput): ScanConfig {
 		maxFiles: optionalPositiveInteger(input.maxFiles, "maxFiles"),
 		exclude: [...new Set((input.exclude ?? []).map((value) => value.trim()).filter(Boolean))].sort(),
 		maxCostUsd: optionalPositiveNumber(input.maxCostUsd, "maxCostUsd"),
-		partitionMaxFiles: positiveInteger(
-			input.partitionMaxFiles ?? DEFAULT_PARTITION_MAX_FILES,
-			"partitionMaxFiles",
-		),
 		refreshThreatModel: input.refreshThreatModel ?? false,
 	};
 }

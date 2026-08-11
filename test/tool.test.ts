@@ -97,7 +97,6 @@ describe("work.next is the worklist, and excluded files are not in it", () => {
 	});
 
 	it("requires work.complete after the final page", async () => {
-		env.ctx.worklist = ["app.js", "other.js"];
 		env.ctx.readGroup = "pass-1";
 		env.ctx.ledger.recordEvent(SCAN, "work_started", { read_group: "pass-1" }, "probe-1");
 		await expect(
@@ -184,10 +183,10 @@ describe("structural checks at the write boundary", () => {
 		).rejects.toThrow(/symlink/);
 	});
 
-	it("requires at least one location in the worker's own worklist", async () => {
+	it("rejects a finding with no anchor in the configured scan scope", async () => {
 		await expect(
 			env.call({ ...good, locations: [{ path: "secret.txt", start_line: 1, end_line: 1 }] }),
-		).rejects.toThrow(/no location is in your worklist/);
+		).rejects.toThrow(/no finding anchor is inside the requested scan scope/);
 	});
 
 	it("drops an invented CWE rather than recording it", async () => {
@@ -484,7 +483,7 @@ describe("the threat-model phase is a map, not a findings list", () => {
 	});
 });
 
-describe("what ties a finding to your worklist", () => {
+describe("candidate findings respect the requested scan scope", () => {
 	const base = {
 		verb: "candidate.create",
 		title: "t",
@@ -492,10 +491,7 @@ describe("what ties a finding to your worklist", () => {
 		description: "s\n\ne",
 	};
 
-	it("refuses a finding anchored only by an evidence mention", async () => {
-		// The real case: README.md is in scope and merely mentions a route; the
-		// entrypoint, broken control and sink are all in files the user excluded.
-		// Allowing it lets a passing mention pull out-of-scope code into a report.
+	it("rejects evidence inside scope when every substantive location is outside", async () => {
 		await expect(
 			env.call({
 				...base,
@@ -504,39 +500,23 @@ describe("what ties a finding to your worklist", () => {
 					{ path: "secret.txt", start_line: 1, end_line: 1, role: "root_control" },
 				],
 			}),
-		).rejects.toThrow(/evidence location does not tie a finding to you/);
+		).rejects.toThrow(/no finding anchor is inside the requested scan scope/);
 	});
 
-	it("tells a refused agent where to put the finding instead", async () => {
-		// A refusal with nowhere to go loses what the agent found. If the flaw
-		// really is outside its list, the lead is the record that survives.
-		await expect(
-			env.call({
-				...base,
-				locations: [
-					{ path: "app.js", start_line: 1, end_line: 1, role: "evidence" },
-					{ path: "secret.txt", start_line: 1, end_line: 1, role: "root_control" },
-				],
-			}),
-			).rejects.toThrow(/completion summary/);
-	});
-
-	it("accepts it when a substantive location is in scope", async () => {
+	it("accepts supporting evidence outside scope when the finding is anchored inside", async () => {
 		const out = JSON.parse(
 			await env.call({
 				...base,
 				locations: [
-					{ path: "other.js", start_line: 1, end_line: 1, role: "evidence" },
-					{ path: "app.js", start_line: 1, end_line: 1, role: "sink" },
+					{ path: "secret.txt", start_line: 1, end_line: 1, role: "evidence" },
+					{ path: "app.js", start_line: 1, end_line: 1, role: "root_control" },
 				],
 			}),
 		);
 		expect(out.status).toMatch(/recorded|merged_into_existing/);
 	});
 
-	it("falls back to any location when no roles were given at all", async () => {
-		// Nothing to discriminate on, so the older rule stands rather than
-		// refusing every finding from an agent that omits roles.
+	it("does not require roles to establish scope", async () => {
 		const out = JSON.parse(
 			await env.call({
 				...base,
