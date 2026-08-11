@@ -37,6 +37,10 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
     "build": "npm run clean && tsc -p tsconfig.json && node scripts/copy-assets.mjs && node scripts/check-agent-cli.mjs",

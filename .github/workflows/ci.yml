@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         node: [22.19.0, 24]
     runs-on: ${{ matrix.os }}
     steps:
@@ -31,9 +31,6 @@ jobs:
       - name: Install scan tools (macOS)
         if: runner.os == 'macOS'
         run: brew install ripgrep fd
-      - name: Install scan tools (Windows)
-        if: runner.os == 'Windows'
-        run: choco install ripgrep fd --yes
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

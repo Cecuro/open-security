@@ -8,6 +8,7 @@ The bundled reviewer is local-only. OpenSec does not upload runs, host a dashboa
 
 - Node.js 22.19 or newer
 - Docker Engine 28 or newer for the default isolated scan profile
+- macOS or Linux. On Windows, use WSL2; the native Windows CLI is not supported yet.
 
 ## Install
 
