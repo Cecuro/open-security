@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { identityHash, mergeLocations, mergeProse } from "../scan/identity.js";
+import { identityHash } from "../scan/identity.js";
 import { normalizeScanConfig, parseScanConfig, scanConfigHash } from "../scan/config.js";
 import type {
 	Candidate,
@@ -590,7 +590,7 @@ export class Ledger {
 		locations: Location[];
 		description: string;
 		instance?: string | null;
-	}): { id: string; merged: boolean } {
+	}): { id: string; merged: boolean; duplicateOf?: string } {
 		const hash = identityHash({
 			cweIds: c.cweIds,
 			locations: c.locations,
@@ -605,28 +605,44 @@ export class Ledger {
 
 		if (existing) {
 			const prev = rowToCandidate(existing, this.listCandidateActivities(c.scanId, existing.id as string));
+			const id = this.nextCandidateId(c.scanId);
 			this.db.transaction(() => {
 				this.db
 					.prepare(
-						`UPDATE candidates SET cwe_ids = ?, locations_json = ?, description = ?
-						 WHERE scan_id = ? AND id = ?`,
+						`INSERT INTO candidates
+						 (id, scan_id, worker_id, title, cwe_ids, locations_json, description,
+						  status, duplicate_of, instance, identity_hash, created_at)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, 'duplicate', ?, ?, ?, ?)`,
 					)
 					.run(
-						JSON.stringify([...new Set([...prev.cwe_ids, ...c.cweIds])]),
-						JSON.stringify(mergeLocations(prev.locations, c.locations)),
-						mergeProse(prev.description, c.description),
+						id,
 						c.scanId,
+						c.workerId,
+						c.title,
+						JSON.stringify(c.cweIds),
+						JSON.stringify(c.locations),
+						c.description,
 						prev.id,
+						c.instance ?? null,
+						hash,
+						now(),
 					);
 				this.db
 					.prepare(
 						`INSERT INTO candidate_activity
-						 (scan_id, candidate_id, worker_id, kind, body, created_at)
-						 VALUES (?, ?, ?, 'comment', ?, ?)`,
+						 (scan_id, candidate_id, worker_id, kind, body, data_json, created_at)
+						 VALUES (?, ?, ?, 'duplicate', ?, ?, ?)`,
 					)
-					.run(c.scanId, prev.id, c.workerId, "matching filing merged into this candidate", now());
+					.run(
+						c.scanId,
+						id,
+						c.workerId,
+						`exact identity match with ${prev.id}`,
+						JSON.stringify({ disposition: "duplicate", duplicate_of: prev.id }),
+						now(),
+					);
 			})();
-			return { id: prev.id, merged: true };
+			return { id, merged: true, duplicateOf: prev.id };
 		}
 
 		const id = this.nextCandidateId(c.scanId);
@@ -700,6 +716,14 @@ export class Ledger {
 
 	listLiveCandidates(scanId: string): Candidate[] {
 		return this.listCandidates(scanId).filter((c) => !c.duplicate_of);
+	}
+
+	hasDuplicateChildren(scanId: string, id: string): boolean {
+		return Boolean(
+			this.db
+				.prepare("SELECT 1 FROM candidates WHERE scan_id = ? AND duplicate_of = ? LIMIT 1")
+				.get(scanId, id),
+		);
 	}
 
 	private listCandidateActivities(scanId: string, candidateId: string): CandidateActivity[] {
