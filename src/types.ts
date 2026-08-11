@@ -28,7 +28,6 @@ export interface ScanConfig {
 	maxFiles: number | null;
 	exclude: string[];
 	maxCostUsd: number | null;
-	partitionMaxFiles: number;
 	refreshThreatModel: boolean;
 }
 

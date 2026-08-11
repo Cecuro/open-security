@@ -57,7 +57,7 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 			`Typical briefs: follow one input from a specific entry point to a specific sink ` +
 			`and report every check on the way; take one claim and try to refute it; map every ` +
 			`caller of one function and say which ones pass attacker-controlled data.\n\n` +
-			`The subagent shares your worklist and reads the same repository, but it cannot ` +
+			`The subagent reads the same repository, but it cannot ` +
 			`record findings — it reports back to you, and you decide what to file. Its task ` +
 			`must be self-contained: it cannot see your conversation.`,
 		parameters: ParamsSchema,

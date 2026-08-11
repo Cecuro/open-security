@@ -178,50 +178,6 @@ describe("a truncated read does not finish a large file", () => {
 	});
 });
 
-describe("a worklist scoped to a partition", () => {
-	function withFiles(): Ledger {
-		const l = ledger();
-		l.insertFiles("s", [
-			{ path: "a.js", sha: "1", bytes: 100, excludedReason: null },
-			{ path: "b.js", sha: "2", bytes: 100, excludedReason: null },
-			{ path: "c.js", sha: "3", bytes: 100, excludedReason: null },
-		]);
-		return l;
-	}
-
-	it("returns only the owned files", () => {
-		const l = withFiles();
-		const { files, unread } = l.listWork("s", 100, ["a.js", "b.js"]);
-		expect(unread).toBe(2);
-		expect(files.map((f) => f.path)).toEqual(["a.js", "b.js"]);
-		l.close();
-	});
-
-	it("is unaffected by reads outside it", () => {
-		const l = withFiles();
-		l.recordTouch("s", "c.js", 100);
-		expect(l.listWork("s", 100, ["a.js", "b.js"]).unread).toBe(2);
-		l.close();
-	});
-
-	it("ties a finding to the probe that owns the file", () => {
-		const l = withFiles();
-		expect(l.fileInScope("s", "a.js", ["a.js", "b.js"])).toBe(true);
-		expect(l.fileInScope("s", "c.js", ["a.js", "b.js"])).toBe(false);
-		expect(l.fileInScope("s", "c.js")).toBe(true);
-		l.close();
-	});
-
-	it("treats an empty partition as no work, not as the whole repository", () => {
-		// `IN ()` is not valid SQL, and falling through to an unscoped query would
-		// hand one probe everything.
-		const l = withFiles();
-		expect(l.listWork("s", 100, []).unread).toBe(0);
-		expect(l.listWork("s", 100, []).files).toEqual([]);
-		l.close();
-	});
-});
-
 describe("passes read independently", () => {
 	function withFiles(): Ledger {
 		const l = ledger();
@@ -243,11 +199,11 @@ describe("passes read independently", () => {
 		// checked `unread` alone; the two queries had different parameter orders,
 		// so the count was right while every probe got an empty list and the scan
 		// reported itself clean.
-		const p1 = l.listWork("s", 10, undefined, "pass-1");
+		const p1 = l.listWork("s", 10, "pass-1");
 		expect(p1.unread).toBe(0);
 		expect(p1.files).toEqual([]);
 
-		const p2 = l.listWork("s", 10, undefined, "pass-2");
+		const p2 = l.listWork("s", 10, "pass-2");
 		expect(p2.unread).toBe(2);
 		expect(p2.files.map((f) => f.path)).toEqual(["a.js", "b.js"]);
 		l.close();
@@ -274,17 +230,15 @@ describe("passes read independently", () => {
 		l.close();
 	});
 
-	it("returns rows and count consistently when a partition is also scoped", () => {
-		// The combination is where the parameter order actually broke: a read
-		// group, a partition and a limit, all in one statement.
+	it("returns rows and count consistently for each pass", () => {
 		const l = withFiles();
 		l.recordTouch("s", "a.js", 100, false, "pass-1");
-		const scoped = l.listWork("s", 10, ["a.js", "b.js"], "pass-1");
-		expect(scoped.unread).toBe(1);
-		expect(scoped.files.map((f) => f.path)).toEqual(["b.js"]);
-		expect(scoped.files.length).toBe(scoped.unread);
+		const first = l.listWork("s", 10, "pass-1");
+		expect(first.unread).toBe(1);
+		expect(first.files.map((f) => f.path)).toEqual(["b.js"]);
+		expect(first.files.length).toBe(first.unread);
 
-		const fresh = l.listWork("s", 10, ["a.js", "b.js"], "pass-2");
+		const fresh = l.listWork("s", 10, "pass-2");
 		expect(fresh.unread).toBe(2);
 		expect(fresh.files.map((f) => f.path)).toEqual(["a.js", "b.js"]);
 	});

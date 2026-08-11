@@ -25,7 +25,6 @@ describe("normalized scan configuration", () => {
 			maxFiles: null,
 			exclude: ["src/generated/**", "vendor/**"],
 			maxCostUsd: null,
-			partitionMaxFiles: 15,
 			refreshThreatModel: false,
 		});
 	});
@@ -44,7 +43,6 @@ describe("normalized scan configuration", () => {
 			maxFiles: 500,
 			exclude: ["vendor/**"],
 			maxCostUsd: 12.5,
-			partitionMaxFiles: 20,
 			refreshThreatModel: true,
 		});
 

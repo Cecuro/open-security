@@ -20,7 +20,6 @@ import { normalizeScanConfig } from "../scan/config.js";
 import { collisionGroups } from "../scan/identity.js";
 import { ext, inventory, type InventoryResult } from "../scan/inventory.js";
 import { mapConcurrent } from "../scan/concurrency.js";
-import { describeDistribution, partition, type Partition } from "../scan/partition.js";
 import { loadPrompts, type Prompts, wrapUntrusted } from "../scan/prompts.js";
 import { renderMarkdown } from "../scan/render.js";
 import { scopedPaths } from "../scan/target.js";
@@ -50,7 +49,6 @@ export interface ScannerOptions {
 	/** Repo-relative globs the user does not want reviewed. */
 	exclude?: readonly string[];
 	maxCostUsd?: number | null;
-	partitionMaxFiles?: number;
 	/**
 	 * How many independent passes run over the repository. Each pass reviews
 	 * every file, by a fresh set of agents that never see the other passes'
@@ -96,7 +94,6 @@ export function phaseBefore(a: Phase, b: Phase): boolean {
 
 export class Scanner {
 	private inv?: InventoryResult;
-	private partitions?: Partition[];
 	private constructor(
 		readonly scanId: string,
 		private readonly opts: ScannerOptions,
@@ -147,7 +144,6 @@ export class Scanner {
 			maxFiles: opts.maxFiles,
 			exclude: opts.exclude,
 			maxCostUsd: opts.maxCostUsd,
-			partitionMaxFiles: opts.partitionMaxFiles,
 			refreshThreatModel: opts.refreshThreatModel,
 		});
 
@@ -253,7 +249,6 @@ export class Scanner {
 				maxFiles: opts.maxFiles ?? scan.config?.maxFiles,
 				exclude: opts.exclude ?? scan.config?.exclude,
 				maxCostUsd,
-				partitionMaxFiles: opts.partitionMaxFiles ?? scan.config?.partitionMaxFiles,
 				refreshThreatModel: opts.refreshThreatModel ?? scan.config?.refreshThreatModel,
 			});
 
@@ -426,11 +421,6 @@ export class Scanner {
 				excludedReason: e.excludedReason,
 			})),
 		);
-		this.partitions = partition(
-			inv.inScope.map((f) => ({ path: f.path, bytes: f.bytes })),
-			{ maxFiles: this.config.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
-		);
-
 		this.inv = inv;
 		this.say(
 			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded` +
@@ -552,52 +542,47 @@ export class Scanner {
 			throw new Error("discover() before inventory(): nothing is in scope yet. run() orders the phases.");
 		}
 
-		const parts = this.partitions ?? [];
 		const passes = this.passes;
 		this.say(
-			`discovery: ${describeDistribution(parts)}` +
-				(passes > 1 ? ` × ${passes} independent pass(es)` : "") +
-				`, ${this.concurrency} at a time`,
+			`discovery: ${passes} probe(s), each over all ` +
+				`${this.ledger.coverage(this.scanId).files_in_scope} files, ${this.concurrency} at a time`,
 		);
 
-		// One agent per partition. The partition is the unit that fits in a
-		// context; that is the whole reason it exists.
-		const plan = parts.flatMap((part) =>
-			Array.from({ length: passes }, (_, pass) => ({
-				workerId: passes > 1 ? `probe-${part.id + 1}-p${pass + 1}` : `probe-${part.id + 1}`,
-				paths: part.paths,
-				readGroup: `pass-${pass + 1}`,
-			})),
-		);
+		// Each probe is one independent pass over the same complete scan scope.
+		const plan = Array.from({ length: passes }, (_, pass) => ({
+			workerId: `probe-${pass + 1}`,
+			readGroup: `pass-${pass + 1}`,
+		}));
 
-		await mapConcurrent(plan, this.concurrency, async ({ workerId, paths, readGroup }) => {
+		await mapConcurrent(plan, this.concurrency, async ({ workerId, readGroup }) => {
 			this.checkBudget();
 			this.ledger.recordEvent(this.scanId, "work_started", { read_group: readGroup }, workerId);
 			await this.runAgent({
-				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS, worklist: paths, readGroup },
+				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS, readGroup },
 				onEvent: (m) => this.say(m),
 				tracePath: this.tracePath(workerId),
 				subagents: this.subagentDeps(),
 				systemPrompt: this.prompts.get("probe.md"),
 				prompt: [
-					`You are ${workerId}. ${describeCompany(parts.length, passes)}`,
+					`You are ${workerId}. ${describeCompany(passes)}`,
 					"",
 					"A threat model for this repository was written first. It was derived from",
 					"the code under review, so treat it as orientation, not as fact:",
 					"",
 					wrapUntrusted(this.nonce, "threat-model", tm),
 					"",
-					"Begin with `opensec work next` to get your worklist.",
+					"Begin with `opensec work next` to get the scan scope.",
 					"Page through it until remaining is 0. That covers the list; it is not",
 					"where you stop. Keep going until a pass turns up nothing you had not",
 					"already recorded, then report.",
 				].join("\n"),
 			});
-			const remaining = this.ledger.listWork(this.scanId, 1, paths, readGroup).unread;
+			const remaining = this.ledger.listWork(this.scanId, 1, readGroup).unread;
 			const completed = this.ledger.workerCompleted(this.scanId, workerId, readGroup);
+			const total = this.ledger.coverage(this.scanId).files_in_scope;
 			this.say(
 				`  ${workerId} ${completed ? "completed" : "stopped incomplete"} ` +
-					`(${paths.length - remaining}/${paths.length} files read)`,
+					`(${total - remaining}/${total} files read)`,
 			);
 		});
 
@@ -781,10 +766,6 @@ export class Scanner {
 		const skip = (p: Phase) => phaseBefore(p, this.startPhase);
 		try {
 			if (skip("inventory")) {
-				this.partitions = partition(
-					this.ledger.listInScopePaths(this.scanId).map((path) => ({ path, bytes: 0 })),
-					{ maxFiles: this.config.partitionMaxFiles, maxPartitions: this.concurrency * 2 },
-				);
 				this.say(
 					`inventory: kept from the interrupted run — ` +
 						`${this.ledger.coverage(this.scanId).files_in_scope} files in scope`,
@@ -947,30 +928,17 @@ function describeCandidate(c: Candidate): string {
  * Probes overlap completely, so they need to hear that filing something a
  * sibling probably also found is the correct move. Left to itself a model
  * reasons that four reviewers on one repository make its own report redundant,
- * and that is the one belief that would make this arrangement worse than the
- * split worklists it replaced. The converse matters too: agents agreeing is a
- * property of the search, not evidence about the finding, and nothing
- * downstream treats it as such.
+ * and that belief would make independent passes fail. The converse matters too:
+ * agents agreeing is a property of the search, not evidence about the finding,
+ * and nothing downstream treats it as such.
  */
-function describeCompany(parts: number, passes: number): string {
-	const bits: string[] = [];
-	if (parts > 1) {
-		bits.push(
-			`There are ${parts} discovery agents on this repository; you are accountable for your own ` +
-				`worklist only, but you may read anything.`,
-		);
-	}
-	if (passes > 1) {
-		// Passes overlap completely, so an agent needs to hear that filing what a
-		// sibling probably also found is correct. The converse matters too:
-		// agreement is a property of the search, not evidence about the finding.
-		bits.push(
-			`This repository is being reviewed ${passes} times over, independently. Someone else ` +
-				`may file what you file — do it anyway. Duplicates are merged, and two agents ` +
-				`agreeing is not evidence that a finding is real.`,
-		);
-	}
-	return bits.join(" ");
+function describeCompany(passes: number): string {
+	if (passes <= 1) return "";
+	return (
+		`There are ${passes} probe agents on this repository. Each of you has the same complete ` +
+		`scan scope and works independently. Someone else may file what you file — do it anyway. ` +
+		`Duplicates are merged, and two agents agreeing is not evidence that a finding is real.`
+	);
 }
 
 function git(root: string, args: string[]): string | null {

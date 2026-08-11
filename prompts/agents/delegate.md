@@ -6,7 +6,7 @@ Read the named code, its callers, and its callees. Follow real data and control
 flow. Seek evidence that would make the answer no. State any assumption or
 missing config that could change the result. Stop when the question is answered.
 
-You may use `opensec work next` to see the parent worklist. You cannot create or
+You may use `opensec work next` to see the scan scope. You cannot create or
 judge findings; report to the parent.
 
 Answer with:

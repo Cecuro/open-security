@@ -27,8 +27,6 @@ export interface RunContext {
 	verbs?: Verb[];
 	depth?: number;
 	overflowDir?: string;
-	/** The files this worker owns. Undefined means the whole repository. */
-	worklist?: readonly string[];
 	/** Which pass this worker belongs to. Reads are counted per group. */
 	readGroup?: string;
 	resolvableIds?: string[];
@@ -171,7 +169,7 @@ function workNext(ctx: RunContext, p: Params): string {
 	const asked = (p.limit as number | undefined) ?? 25;
 	const limit = Math.min(Math.max(1, asked), WORK_BATCH_MAX);
 	const capped = asked > WORK_BATCH_MAX;
-	const { files, unread } = ctx.ledger.listWork(ctx.scanId, limit, ctx.worklist, ctx.readGroup);
+	const { files, unread } = ctx.ledger.listWork(ctx.scanId, limit, ctx.readGroup);
 	// A partially-read file says so, with what is left. pi truncates a read at
 	// 50KB, so on a large file the agent has to come back with an offset, and it
 	// can only know that if the worklist tells it.
@@ -206,7 +204,7 @@ function workNext(ctx: RunContext, p: Params): string {
 
 function workComplete(ctx: RunContext, p: Params): string {
 	const summary = sanitize(ctx, requireText(p.summary, "summary")).slice(0, 2000);
-	ctx.ledger.completeWorkerWork(ctx.scanId, ctx.worklist ?? [], ctx.readGroup);
+	ctx.ledger.completeWorkerWork(ctx.scanId, ctx.readGroup);
 	ctx.ledger.recordEvent(
 		ctx.scanId,
 		"work_complete",
@@ -225,28 +223,6 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 	}
 
 	const locations = rawLocations.map((l) => validateLocation(ctx, l as Location));
-
-	// What ties a finding to you has to be the finding, not a mention of it.
-	//
-	// A probe once cited README.md:30 as `evidence`, with the entrypoint, the
-	// broken control and the sink all in files the user had excluded, and filed
-	// four findings about code nobody asked it to review. Evidence is supporting
-	// material by definition; the finding *is* its entrypoint, control and sink.
-	// So when roles are given, one of those has to be in scope. When none are
-	// given there is nothing to discriminate on, and any location will do.
-	const substantive = locations.filter((l) => l.role !== undefined && l.role !== "evidence");
-	const anchors = substantive.length > 0 ? substantive : locations;
-	if (!anchors.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path, ctx.worklist))) {
-		throw new Error(
-			(substantive.length > 0
-				? `no entrypoint, source, root_control or sink is in your worklist — an evidence ` +
-					`location does not tie a finding to you. Cite a file from work.next, or include ` +
-						`the issue in your completion summary. `
-				: `no location is in your worklist — cite at least one file from work.next, or ` +
-						`include the issue in your completion summary. `) +
-				`Got: ${anchors.map((l) => `${l.path}${l.role ? ` (${l.role})` : ""}`).join(", ")}`,
-		);
-	}
 
 	const instance =
 		typeof p.instance === "string" && p.instance.trim().length > 0
