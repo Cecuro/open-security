@@ -183,14 +183,10 @@ describe("structural checks at the write boundary", () => {
 		).rejects.toThrow(/symlink/);
 	});
 
-	it("accepts a supported finding outside the configured scan scope", async () => {
-		const out = JSON.parse(
-			await env.call({
-				...good,
-				locations: [{ path: "secret.txt", start_line: 1, end_line: 1 }],
-			}),
-		);
-		expect(out.status).toMatch(/recorded|merged_into_existing/);
+	it("rejects a finding with no anchor in the configured scan scope", async () => {
+		await expect(
+			env.call({ ...good, locations: [{ path: "secret.txt", start_line: 1, end_line: 1 }] }),
+		).rejects.toThrow(/no finding anchor is inside the requested scan scope/);
 	});
 
 	it("drops an invented CWE rather than recording it", async () => {
@@ -487,7 +483,7 @@ describe("the threat-model phase is a map, not a findings list", () => {
 	});
 });
 
-describe("candidate locations are not limited by scan scope", () => {
+describe("candidate findings respect the requested scan scope", () => {
 	const base = {
 		verb: "candidate.create",
 		title: "t",
@@ -495,26 +491,25 @@ describe("candidate locations are not limited by scan scope", () => {
 		description: "s\n\ne",
 	};
 
-	it("accepts substantive locations outside scope when the agent supports them", async () => {
-		const out = JSON.parse(
-			await env.call({
+	it("rejects evidence inside scope when every substantive location is outside", async () => {
+		await expect(
+			env.call({
 				...base,
 				locations: [
 					{ path: "app.js", start_line: 1, end_line: 1, role: "evidence" },
 					{ path: "secret.txt", start_line: 1, end_line: 1, role: "root_control" },
 				],
 			}),
-		);
-		expect(out.status).toMatch(/recorded|merged_into_existing/);
+		).rejects.toThrow(/no finding anchor is inside the requested scan scope/);
 	});
 
-	it("also accepts substantive locations inside scope", async () => {
+	it("accepts supporting evidence outside scope when the finding is anchored inside", async () => {
 		const out = JSON.parse(
 			await env.call({
 				...base,
 				locations: [
-					{ path: "other.js", start_line: 1, end_line: 1, role: "evidence" },
-					{ path: "app.js", start_line: 1, end_line: 1, role: "sink" },
+					{ path: "secret.txt", start_line: 1, end_line: 1, role: "evidence" },
+					{ path: "app.js", start_line: 1, end_line: 1, role: "root_control" },
 				],
 			}),
 		);

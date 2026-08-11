@@ -223,6 +223,17 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 	}
 
 	const locations = rawLocations.map((l) => validateLocation(ctx, l as Location));
+	// Supporting evidence may sit anywhere in the repository, but the finding
+	// itself must touch the scope the user asked to scan. When the agent omitted
+	// roles, any in-scope location can anchor it.
+	const substantive = locations.filter((l) => l.role !== undefined && l.role !== "evidence");
+	const anchors = substantive.length > 0 ? substantive : locations;
+	if (!anchors.some((l) => ctx.ledger.fileInScope(ctx.scanId, l.path))) {
+		throw new Error(
+			`no finding anchor is inside the requested scan scope — got: ` +
+				anchors.map((l) => `${l.path}${l.role ? ` (${l.role})` : ""}`).join(", "),
+		);
+	}
 
 	const instance =
 		typeof p.instance === "string" && p.instance.trim().length > 0
