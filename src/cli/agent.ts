@@ -9,6 +9,8 @@ const COMMANDS = [
 	{ words: ["candidate", "assess"], verb: "candidate.assess", usage: "opensec candidate assess --input <path|->", note: "Record assessment and severity inputs." },
 ] as const;
 
+const GROUPS = ["work", "candidate"] as const;
+
 type Command = (typeof COMMANDS)[number];
 type AgentResponse = { ok: boolean; output?: string; error?: string };
 
@@ -21,10 +23,16 @@ export async function runAgentCli(args: string[]): Promise<number> {
 	try {
 		if (args.length === 0 || args[0] === "--help" || args[0] === "-h") return output(help());
 		if (args[0] === "help") {
-			const command = findCommand(args.slice(1));
-			return output(command ? commandHelp(command) : help());
+			const rest = args.slice(1);
+			const command = findCommand(rest);
+			if (command) return output(commandHelp(command));
+			if (isGroup(rest[0])) return output(groupHelp(rest[0]));
+			return output(help());
 		}
 		if (args[0] === "context") return output(await context());
+		if (isGroup(args[0]) && (args.length === 1 || args[1] === "--help" || args[1] === "-h")) {
+			return output(groupHelp(args[0]));
+		}
 		const command = findCommand(args);
 		if (!command) throw new Error(`unknown command '${args.slice(0, 2).join(" ")}'. Run 'opensec help'.`);
 		const rest = args.slice(command.words.length);
@@ -48,6 +56,10 @@ export async function runAgentCli(args: string[]): Promise<number> {
 
 function findCommand(args: string[]): Command | undefined {
 	return COMMANDS.find((entry) => entry.words.every((word, i) => args[i] === word));
+}
+
+function isGroup(value: string | undefined): value is (typeof GROUPS)[number] {
+	return GROUPS.some((group) => group === value);
 }
 
 function params(command: Command, args: string[]): Record<string, unknown> {
@@ -141,8 +153,25 @@ function help(): string {
 	].join("\n");
 }
 
+function groupHelp(group: (typeof GROUPS)[number]): string {
+	return [
+		`${group.toUpperCase()} COMMANDS`,
+		"",
+		...COMMANDS.filter((command) => command.words[0] === group).map(
+			(command) => `  ${command.usage}\n      ${command.note}`,
+		),
+		"",
+		`Use 'opensec ${group} <command> --help' for fields and a valid example.`,
+	].join("\n");
+}
+
 const COMMAND_DETAILS: Partial<Record<Command["verb"], string>> = {
-	"work.complete": "JSON fields: summary.",
+	"work.complete": [
+		"JSON fields: summary.",
+		"",
+		"Example:",
+		'{"summary":"Reviewed all assigned files; no new finding."}',
+	].join("\n"),
 	"candidate.create": [
 		"JSON fields:",
 		"  title        short finding title",
@@ -150,11 +179,18 @@ const COMMAND_DETAILS: Partial<Record<Command["verb"], string>> = {
 		"  locations    [{ path, start_line, end_line, role?, symbol? }]",
 		"  cwe          optional CWE id array",
 		"  instance     optional sibling identifier",
+		"",
+		"Example:",
+		'{"title":"Missing authorization","description":"src/app.ts:12 permits the call without checking the user.","locations":[{"path":"src/app.ts","start_line":12,"end_line":12,"role":"sink"}],"cwe":["CWE-862"]}',
 	].join("\n"),
 	"candidate.validate": [
 		"JSON fields: id, disposition, rationale, and optional duplicate_of.",
 		"Disposition: confirmed | not_applicable | needs_follow_up | duplicate.",
 		"Duplicate also requires duplicate_of.",
+		"",
+		"Examples:",
+		'{"id":"c1","disposition":"confirmed","rationale":"The public path reaches the sink without the claimed control."}',
+		'{"id":"c2","disposition":"duplicate","duplicate_of":"c1","rationale":"Both candidates describe the same path and impact."}',
 	].join("\n"),
 	"candidate.assess": [
 		"JSON fields: id, entry_point, path[], controls[], rationale, and:",
@@ -167,6 +203,9 @@ const COMMAND_DETAILS: Partial<Record<Command["verb"], string>> = {
 		"  boolean keys: self_only, requires_preexisting_privilege,",
 		"    privilege_delta_is_the_bug, precondition_unreachable",
 		"  evidence: string; source: code_evidence | repo_claim",
+		"",
+		"Example:",
+		'{"id":"c1","entry_point":"src/app.ts:8","path":["src/app.ts:8 accepts input","src/app.ts:12 executes it"],"controls":["src/app.ts:9 checks only presence"],"rationale":"Remote input reaches execution without escaping.","impact":"high","vector":"remote","auth_required":"none","method":"code_reading","network_reachable":true,"cross_tenant":true,"code_execution_proven":false,"traced_path_no_control":true}',
 	].join("\n"),
 };
 
