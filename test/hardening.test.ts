@@ -12,6 +12,7 @@ import {
 	PROBE_VERBS,
 	REDUCE_VERBS,
 	runOpensec,
+	runOpensecBatch,
 	type RunContext,
 	VALIDATE_VERBS,
 } from "../src/agents/tool.js";
@@ -367,5 +368,37 @@ describe("parallel workers cannot reach into each other", () => {
 			Promise.resolve().then(() => runOpensec(reducer, { verb: "candidate.validate", id: "c1", disposition: "duplicate", duplicate_of: "c3", rationale: "x" })),
 		).rejects.toThrow(/'c3' is not in your group/);
 		expect(env.ledger.getCandidate("s", "c1")?.status).toBe("open");
+	});
+
+	it("validates a reducer batch before recording any duplicate", async () => {
+		const env = setup();
+		await env.call(env.candidate({ title: "one", instance: "a" }));
+		await env.call(env.candidate({ title: "two", instance: "b" }));
+		await env.call(env.candidate({ title: "survivor", instance: "c" }));
+		const reducer: RunContext = {
+			...env.ctx,
+			workerId: "reduce-1",
+			verbs: REDUCE_VERBS,
+			resolvableIds: ["c1", "c2", "c3"],
+			dispositions: ["duplicate"],
+		};
+		const valid = { id: "c1", disposition: "duplicate", duplicate_of: "c3", rationale: "same root cause" };
+
+		await expect(
+			Promise.resolve().then(() => runOpensecBatch(reducer, "candidate.validate", [
+				valid,
+				{ id: "c2", disposition: "duplicate", duplicate_of: "missing", rationale: "invalid target" },
+			])),
+		).rejects.toThrow(/not in your group/);
+		expect(env.ledger.getCandidate("s", "c1")).toMatchObject({ status: "open", activities: [] });
+		expect(env.ledger.getCandidate("s", "c2")).toMatchObject({ status: "open", activities: [] });
+
+		const output = JSON.parse(runOpensecBatch(reducer, "candidate.validate", [
+			valid,
+			{ id: "c2", disposition: "duplicate", duplicate_of: "c3", rationale: "same root cause" },
+		])) as Array<Record<string, unknown>>;
+		expect(output).toHaveLength(2);
+		expect(env.ledger.getCandidate("s", "c1")).toMatchObject({ status: "duplicate", duplicate_of: "c3" });
+		expect(env.ledger.getCandidate("s", "c2")).toMatchObject({ status: "duplicate", duplicate_of: "c3" });
 	});
 });

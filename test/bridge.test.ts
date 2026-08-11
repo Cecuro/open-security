@@ -63,6 +63,9 @@ describe("OpenSec sandbox bridge", () => {
 			expect(await runAgentCli(["candidate", "assess", "--help"])).toBe(0);
 			expect(output.join("")).toContain('"auth_required":"none"');
 			expect(output.join("")).toContain('"path":[');
+			output.length = 0;
+			expect(await runAgentCli(["candidate", "validate", "--help"])).toBe(0);
+			expect(output.join("")).toContain("arrays commit atomically");
 		} finally {
 			write.mockRestore();
 		}
@@ -175,6 +178,54 @@ describe("OpenSec sandbox bridge", () => {
 				]),
 			).toBe(0);
 			expect(ctx.ledger.getCandidate("scan", "c1")?.activities[0]?.body).toBe(rationale);
+		} finally {
+			write.mockRestore();
+			restoreEnv("OPENSEC_ENDPOINT", oldEndpoint);
+			restoreEnv("OPENSEC_TOKEN", oldToken);
+			restoreEnv("OPENSEC_VERBS", oldVerbs);
+		}
+	});
+
+	it("accepts an atomic validation array through the CLI", async () => {
+		const ctx = setup();
+		ctx.verbs = ["candidate.validate"];
+		ctx.resolvableIds = ["c1", "c2", "c3"];
+		ctx.dispositions = ["duplicate"];
+		for (const instance of ["a", "b", "c"]) {
+			ctx.ledger.upsertCandidate({
+				scanId: "scan",
+				workerId: "probe",
+				title: `finding ${instance}`,
+				cweIds: [],
+				locations: [{ path: "app.js", start_line: 1, end_line: 1 }],
+				description: "description",
+				instance,
+			});
+		}
+		const bridge = await OpensecBridge.create(ctx, { ...bridgeFiles(), workspace: ctx.repoRoot });
+		bridges.push(bridge);
+		const oldEndpoint = process.env.OPENSEC_ENDPOINT;
+		const oldToken = process.env.OPENSEC_TOKEN;
+		const oldVerbs = process.env.OPENSEC_VERBS;
+		process.env.OPENSEC_ENDPOINT = bridge.mount.endpoint;
+		process.env.OPENSEC_TOKEN = bridge.mount.token;
+		process.env.OPENSEC_VERBS = bridge.mount.verbs;
+		const input = join(ctx.repoRoot, "duplicates.json");
+		writeFileSync(input, JSON.stringify([
+			{ id: "c1", disposition: "duplicate", duplicate_of: "c3", rationale: "same root cause" },
+			{ id: "c2", disposition: "duplicate", duplicate_of: "c3", rationale: "same root cause" },
+		]));
+		const output: string[] = [];
+		const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+			output.push(String(chunk));
+			return true;
+		});
+
+		try {
+			expect(await runAgentCli(["candidate", "validate", "--input", input])).toBe(0);
+			expect(JSON.parse(output.join(""))).toHaveLength(2);
+			expect(ctx.ledger.getCandidate("scan", "c1")).toMatchObject({ status: "duplicate", duplicate_of: "c3" });
+			expect(ctx.ledger.getCandidate("scan", "c2")).toMatchObject({ status: "duplicate", duplicate_of: "c3" });
 		} finally {
 			write.mockRestore();
 			restoreEnv("OPENSEC_ENDPOINT", oldEndpoint);

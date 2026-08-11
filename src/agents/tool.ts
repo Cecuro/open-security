@@ -1,7 +1,7 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import type { Ledger } from "../db/db.js";
+import type { CandidateActivityWrite, Ledger } from "../db/db.js";
 import { computeSeverity } from "../scan/severity.js";
 import { redactSecrets, stripControlChars } from "../text.js";
 import type {
@@ -69,14 +69,7 @@ type Params = {
 
 /** Execute one command received from the sandbox CLI bridge. */
 export function runOpensec(ctx: RunContext, p: Params): string {
-	validateCommandFields(p);
-	const allowed = ctx.verbs ?? ALL_VERBS;
-	if (!allowed.includes(p.verb)) {
-		throw new Error(
-			`'${p.verb}' is not available to ${ctx.workerId}. You may call: ${allowed.join(", ")}. ` +
-				`Report what you found in your final message instead — whoever delegated to you records it.`,
-		);
-	}
+	assertCommandAllowed(ctx, p);
 	switch (p.verb) {
 		case "work.next":
 			return workNext(ctx, p);
@@ -90,6 +83,52 @@ export function runOpensec(ctx: RunContext, p: Params): string {
 			return candidateAssess(ctx, p);
 		default:
 			throw new Error(`unknown verb: ${String(p.verb)}`);
+	}
+}
+
+/** Validate every item before atomically recording a candidate-validation batch. */
+export function runOpensecBatch(ctx: RunContext, verb: Verb, values: readonly unknown[]): string {
+	if (verb !== "candidate.validate") throw new Error(`${verb} does not accept an input array`);
+	if (values.length === 0) throw new Error("candidate.validate input array must not be empty");
+	if (values.length > 50) throw new Error("candidate.validate accepts at most 50 items per batch");
+
+	const seen = new Set<string>();
+	const plans = values.map((value, index) => {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) {
+			throw new Error(`candidate.validate input[${index}] must be a JSON object`);
+		}
+		try {
+			const p = { ...(value as Record<string, unknown>), verb } as Params;
+			assertCommandAllowed(ctx, p);
+			const plan = prepareCandidateValidation(ctx, p);
+			if (seen.has(plan.id)) throw new Error(`repeats '${plan.id}'`);
+			seen.add(plan.id);
+			return plan;
+		} catch (err) {
+			throw new Error(`candidate.validate input[${index}]: ${(err as Error).message}`);
+		}
+	});
+
+	const merged = new Set(plans.filter((plan) => plan.duplicateOf).map((plan) => plan.id));
+	for (const plan of plans) {
+		if (plan.duplicateOf && merged.has(plan.duplicateOf)) {
+			throw new Error(
+				`duplicate_of '${plan.duplicateOf}' is also merged in this batch — point every duplicate at the surviving row`,
+			);
+		}
+	}
+	ctx.ledger.addCandidateActivities(plans.map((plan) => plan.activity));
+	return JSON.stringify(plans.map((plan) => plan.output));
+}
+
+function assertCommandAllowed(ctx: RunContext, p: Params): void {
+	validateCommandFields(p);
+	const allowed = ctx.verbs ?? ALL_VERBS;
+	if (!allowed.includes(p.verb)) {
+		throw new Error(
+			`'${p.verb}' is not available to ${ctx.workerId}. You may call: ${allowed.join(", ")}. ` +
+			`Report what you found in your final message instead — whoever delegated to you records it.`,
+		);
 	}
 }
 
@@ -241,6 +280,19 @@ function candidateCreate(ctx: RunContext, p: Params): string {
 }
 
 function candidateValidate(ctx: RunContext, p: Params): string {
+	const plan = prepareCandidateValidation(ctx, p);
+	ctx.ledger.addCandidateActivity(plan.activity);
+	return JSON.stringify(plan.output);
+}
+
+type CandidateValidationPlan = {
+	id: string;
+	duplicateOf?: string;
+	activity: CandidateActivityWrite;
+	output: Record<string, unknown>;
+};
+
+function prepareCandidateValidation(ctx: RunContext, p: Params): CandidateValidationPlan {
 	const { id } = requireCandidate(ctx, p);
 	const rationale = sanitize(ctx, requireText(p.rationale, "rationale"));
 
@@ -285,37 +337,43 @@ function candidateValidate(ctx: RunContext, p: Params): string {
 					`every duplicate at the surviving row. Nothing was recorded.`,
 			);
 		}
-		ctx.ledger.addCandidateActivity({
+		return {
+			id,
+			duplicateOf: dup,
+			activity: {
+				scanId: ctx.scanId,
+				candidateId: id,
+				workerId: ctx.workerId,
+				kind: "duplicate",
+				body: rationale,
+				status: "duplicate",
+				duplicateOf: dup,
+				data: { disposition: "duplicate", duplicate_of: dup },
+			},
+			output: { id, disposition: "duplicate", duplicate_of: dup },
+		};
+	}
+
+	return {
+		id,
+		activity: {
 			scanId: ctx.scanId,
 			candidateId: id,
 			workerId: ctx.workerId,
-			kind: "duplicate",
+			kind: "validation",
 			body: rationale,
-			status: "duplicate",
-			duplicateOf: dup,
-			data: { disposition: "duplicate", duplicate_of: dup },
-		});
-		return JSON.stringify({ id, disposition: "duplicate", duplicate_of: dup });
-	}
-
-	ctx.ledger.addCandidateActivity({
-		scanId: ctx.scanId,
-		candidateId: id,
-		workerId: ctx.workerId,
-		kind: "validation",
-		body: rationale,
-		status: disposition,
-		data: { disposition },
-	});
-
-	return JSON.stringify({
-		id,
-		disposition,
-		next:
-			disposition === "confirmed"
-				? "a separate assessment pass will rate this. You do not assess it."
-				: undefined,
-	});
+			status: disposition,
+			data: { disposition },
+		},
+		output: {
+			id,
+			disposition,
+			next:
+				disposition === "confirmed"
+					? "a separate assessment pass will rate this. You do not assess it."
+					: undefined,
+		},
+	};
 }
 
 function candidateAssess(ctx: RunContext, p: Params): string {
