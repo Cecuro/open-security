@@ -14,7 +14,7 @@ try {
 	mkdirSync(consumer);
 	run(npm, ["install", "--no-audit", "--no-fund", "--prefix", consumer, join(temp, filename)], root);
 
-	const cli = join(consumer, "node_modules", "opensec", "dist", "cli", "index.js");
+	const cli = join(consumer, "node_modules", "@gustavhartz", "opensec", "dist", "cli", "index.js");
 	const help = run(process.execPath, [cli, "--help"], consumer);
 	if (!help.includes("opensec review")) throw new Error("installed CLI help is missing the review command");
 
