@@ -2,7 +2,9 @@
 
 OpenSec runs security-review agents against a repository, checks their findings, and stores the result in a local SQLite ledger. The CLI and review UI run on your machine; there is no hosted service.
 
-## Agent flow
+> OpenSec is in early development. Review its findings before acting on them, and do not treat a clean report as proof that a system is secure.
+
+## How it works
 
 ```text
 Repository
@@ -13,25 +15,25 @@ Repository
   → local review UI and exports
 ```
 
-Each agent gets a focused part of the review. Later stages check reachability, counter-evidence, and severity before a finding reaches the report.
+## Install
 
-## Quick start
-
-Requires Node.js 22.19+, Docker Engine 28+, and macOS or Linux. Use WSL2 on Windows.
+OpenSec needs Node.js 22.19+, Docker Engine 28+, and macOS or Linux. Use WSL2 on Windows.
 
 ```sh
-git clone https://github.com/Cecuro/open-security.git
-cd open-security
-npm ci
-npm run build
-npm link
+npm install --global opensec
+opensec --version
+```
 
+OpenSec uses provider keys already in your environment or the credentials stored by `pi`. It never reads `.env` files from the repository under review.
+
+```sh
 opensec env
+opensec models
 opensec scan /path/to/repository --model provider/model
 opensec review
 ```
 
-Run `opensec --help` for scan limits, cost controls, diff scans, and CI options.
+Run `opensec scan . --estimate` to estimate a scan without calling a model. Run `opensec --help` for scan limits, cost controls, diff scans, exports, and CI options.
 
 ## What you can do
 
@@ -46,3 +48,18 @@ Run `opensec --help` for scan limits, cost controls, diff scans, and CI options.
 ![Finding review](docs/screenshots/findings.jpg)
 
 Review data stays in `~/.opensec/opensec.db`. Exports can contain sensitive code-review data, so inspect them before sharing.
+
+## Develop
+
+```sh
+git clone https://github.com/Cecuro/open-security.git
+cd open-security
+npm ci
+npm run release:check
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report security flaws through [SECURITY.md](SECURITY.md), not a public issue.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
