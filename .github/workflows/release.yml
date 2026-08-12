@@ -21,6 +21,11 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm install --global npm@11.19.0
+      - name: Install scan tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep fd-find
+          sudo ln --symbolic "$(command -v fdfind)" /usr/local/bin/fd
       - run: npm ci
       - name: Check release tag
         env:
