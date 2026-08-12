@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 
@@ -14,6 +15,9 @@ import { policyExitCode } from "../scan/policy.js";
 import { renderMatrix } from "../scan/severity.js";
 import type { Profile, ScanScope, Severity } from "../types.js";
 import { startReviewServer } from "../review/server.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../../package.json") as { version: string };
 
 const USAGE = `opensec — point it at a repository, get findings you can defend.
 
@@ -79,6 +83,10 @@ written, and only --refresh-threat-model overwrites it.
 
 async function main(argv: string[]): Promise<number> {
 	const [command, ...rest] = argv;
+	if (command === "--version" || command === "-v") {
+		process.stdout.write(`${version}\n`);
+		return 0;
+	}
 	if (isAgentCliCommand(command) || (command === "help" && isAgentCliCommand(rest[0]))) {
 		return runAgentCli(argv);
 	}

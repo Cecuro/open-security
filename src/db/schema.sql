@@ -1,5 +1,5 @@
--- The current schema for a new ledger. Existing ledgers reach this shape through
--- migrations.ts; changes to an existing schema still require a migration.
+-- The current schema for a new ledger. Changes after v0.1.0 also need a
+-- migration in migrations.ts.
 
 CREATE TABLE IF NOT EXISTS schema_version (
   version    INTEGER PRIMARY KEY,

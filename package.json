@@ -2,6 +2,14 @@
   "name": "opensec",
   "version": "0.1.0",
   "description": "Point it at a repository, get real security findings with file:line, evidence, and a severity you can defend — using any model you want, on your own machine.",
+  "keywords": [
+    "security",
+    "static-analysis",
+    "code-review",
+    "cli",
+    "ai"
+  ],
+  "author": "Cecuro",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -11,12 +19,6 @@
   "bugs": {
     "url": "https://github.com/Cecuro/open-security/issues"
   },
-  "keywords": [
-    "security",
-    "code-review",
-    "cli",
-    "static-analysis"
-  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,13 +29,12 @@
     }
   },
   "bin": {
-    "opensec": "./dist/cli/index.js"
+    "opensec": "dist/cli/index.js"
   },
   "files": [
     "dist",
     "docs/screenshots",
-    "prompts",
-    "CHANGELOG.md"
+    "prompts"
   ],
   "engines": {
     "node": ">=22.19.0"
@@ -42,6 +43,10 @@
     "darwin",
     "linux"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "npm@11.19.0",
   "scripts": {
     "clean": "node scripts/clean.mjs",
     "build": "npm run clean && tsc -p tsconfig.json && node scripts/copy-assets.mjs && node scripts/check-agent-cli.mjs",
@@ -64,6 +69,6 @@
     "@types/better-sqlite3": "7.6.13",
     "@types/node": "24.10.1",
     "typescript": "5.9.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.7"
   }
 }

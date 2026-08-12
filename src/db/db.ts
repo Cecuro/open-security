@@ -110,8 +110,7 @@ export class Ledger {
 			if (m.version <= at) continue;
 			try {
 				this.db.transaction(() => {
-					if (m.version === 16) this.migrateNormalizedConfig();
-					else this.db.exec(m.sql);
+					this.db.exec(m.sql);
 					stamp.run(m.version, now());
 				})();
 			} catch (err) {
@@ -119,21 +118,15 @@ export class Ledger {
 					`schema migration ${m.version} (${m.note}) failed: ${(err as Error).message}`,
 				);
 			}
+			at = m.version;
 		}
-	}
 
-	private migrateNormalizedConfig(): void {
-		const columns = new Set(
-			(this.db.prepare("PRAGMA table_info(scans)").all() as Array<{ name: string }>).map((row) => row.name),
-		);
-		if (!columns.has("passes")) {
-			if (columns.has("probes")) this.db.exec("ALTER TABLE scans RENAME COLUMN probes TO passes");
-			else this.db.exec("ALTER TABLE scans ADD COLUMN passes INTEGER");
+		if (at < SCHEMA_VERSION) {
+			throw new Error(
+				`this database is at pre-release schema version ${at}, which cannot be upgraded ` +
+					`to the first public schema. Move it aside and start a new scan.`,
+			);
 		}
-		if (!columns.has("config_json")) {
-			this.db.exec("ALTER TABLE scans ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'");
-		}
-		this.db.exec("UPDATE scans SET phase = 'assessment' WHERE phase = 'attack_path'");
 	}
 
 	close(): void {
