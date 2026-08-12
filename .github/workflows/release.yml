@@ -27,6 +27,12 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
       - run: npm run release:check
-      - run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish with npm trusted publishing
+        run: |
+          PACKAGE=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$PACKAGE@$VERSION" version >/dev/null 2>&1; then
+            echo "$PACKAGE@$VERSION is already published"
+          else
+            npm publish --access public
+          fi
