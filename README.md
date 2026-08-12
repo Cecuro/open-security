@@ -20,7 +20,7 @@ Repository
 OpenSec needs Node.js 22.19+, Docker Engine 28+, and macOS or Linux. Use WSL2 on Windows.
 
 ```sh
-npm install --global @gustavhartz/opensec
+npm install --global @cecuro/open-security
 opensec --version
 ```
 
