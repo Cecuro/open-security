@@ -13,6 +13,7 @@ import {
 	type CandidateActivity,
 	type CandidateStatus,
 	type Coverage,
+	type PassCoverage,
 	type ScanRecord,
 } from "../types.js";
 
@@ -77,6 +78,7 @@ interface ReviewDetailV1 {
 	scan: Pick<ScanRecord, "id" | "revision" | "status" | "phase" | "model_ref" | "started_at" | "completed_at" | "cost_usd">;
 	repo: { name: string };
 	coverage: Coverage;
+	passCoverage: PassCoverage[];
 	threatModel: string | null;
 	candidates: ReviewCandidateV1[];
 }
@@ -336,6 +338,7 @@ function scanDetail(ledger: Ledger, scanId: string): ReviewDetailV1 | undefined 
 		},
 		repo: { name: repo.name },
 		coverage: ledger.coverage(scanId),
+		passCoverage: ledger.passCoverage(scanId, Math.max(1, scan.passes ?? 1)),
 		threatModel: ledger.getThreatModel(scanId),
 		candidates,
 	};

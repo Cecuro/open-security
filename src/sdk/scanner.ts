@@ -35,6 +35,7 @@ import {
 	type Profile,
 	type ScanConfig,
 	type ScanScope,
+	type ScanStatus,
 } from "../types.js";
 
 export { citedOutOfScope } from "../scan/threat-model.js";
@@ -90,6 +91,15 @@ export const PHASE_ORDER: Phase[] = [
 
 export function phaseBefore(a: Phase, b: Phase): boolean {
 	return PHASE_ORDER.indexOf(a) < PHASE_ORDER.indexOf(b);
+}
+
+export function terminalScanStatus(
+	coverage: Coverage,
+	passes: readonly PassCoverage[],
+): Extract<ScanStatus, "completed" | "partial"> {
+	return coverage.files_in_scope === 0 || passes.every((pass) => pass.completed)
+		? "completed"
+		: "partial";
 }
 
 export class Scanner {
@@ -191,9 +201,10 @@ export class Scanner {
 					`no scan '${scanId}' in this ledger. 'opensec report' lists the scans it knows.`,
 				);
 			}
-			if (scan.status === "completed") {
+			if (scan.status === "completed" || scan.status === "partial") {
 				throw new Error(
-					`scan ${scanId} already completed. 'opensec report ${scanId}' re-renders it.`,
+					`scan ${scanId} already finished with status '${scan.status}'. ` +
+						`'opensec report ${scanId}' re-renders it.`,
 				);
 			}
 			if (String(scan.profile) === "static") {
@@ -778,7 +789,10 @@ export class Scanner {
 		this.ledger.setPhase(this.scanId, "report");
 		// Finalize first so both artifacts contain the durable terminal state.
 		// If rendering fails, run() catches it and changes the scan to failed.
-		this.ledger.finishScan(this.scanId, "completed");
+		const coverage = this.ledger.coverage(this.scanId);
+		const passes = this.ledger.passCoverage(this.scanId, this.passes);
+		const status = terminalScanStatus(coverage, passes);
+		this.ledger.finishScan(this.scanId, status);
 		return reportScan(this.ledger, this.scanId);
 	}
 

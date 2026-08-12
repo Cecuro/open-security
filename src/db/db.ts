@@ -261,7 +261,7 @@ export class Ledger {
 	}
 
 	finishScan(scanId: string, status: ScanStatus): void {
-		if (status === "completed") {
+		if (status === "completed" || status === "partial") {
 			this.db
 				.prepare("UPDATE scans SET status = ?, phase = 'report', completed_at = ? WHERE id = ?")
 				.run(status, now(), scanId);
@@ -753,7 +753,9 @@ export class Ledger {
 	}): Candidate {
 		const scan = this.getScan(args.scanId);
 		if (!scan) throw new Error(`no scan '${args.scanId}'`);
-		if (scan.status !== "completed") throw new Error("findings can only be reviewed after a scan completes");
+		if (scan.status !== "completed" && scan.status !== "partial") {
+			throw new Error("findings can only be reviewed after a scan finishes");
+		}
 		const candidate = this.getCandidate(args.scanId, args.candidateId);
 		if (!candidate) throw new Error(`no finding '${args.candidateId}' in scan '${args.scanId}'`);
 

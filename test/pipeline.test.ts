@@ -14,6 +14,7 @@ import { runOpensec, type RunContext } from "../src/agents/tool.js";
 import { Ledger } from "../src/db/db.js";
 import { inventory } from "../src/scan/inventory.js";
 import { renderMarkdown } from "../src/scan/render.js";
+import { terminalScanStatus } from "../src/sdk/scanner.js";
 import { testScanConfig } from "./config.js";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "vuln-app");
@@ -214,7 +215,7 @@ describe("the M0 loop, without a model", () => {
 	it("shows each pass's own coverage and completion state", () => {
 		const md = renderMarkdown({
 			scan: {
-				id: "s3", repo_id: "r", revision: null, profile: "local", status: "completed", phase: "report",
+				id: "s3", repo_id: "r", revision: null, profile: "local", status: "partial", phase: "report",
 				config_hash: "c", config: null, model_ref: null, prompt_hash: null, passes: 2, threat_model_source: null,
 				started_at: "then", completed_at: "now", tokens_in: 0, tokens_out: 0, cost_usd: 0,
 			},
@@ -231,5 +232,18 @@ describe("the M0 loop, without a model", () => {
 		expect(md).toContain("1 / 2 pass(es) completed");
 		expect(md).toContain("| 1 | 2 / 2 | 100% | complete |");
 		expect(md).toContain("| 2 | 0 / 2 | 0% | incomplete |");
+		expect(md).toContain("**Partial result:**");
+	});
+
+	it("marks a scan partial when any probe pass is incomplete", () => {
+		const coverage = { files_in_scope: 2, files_touched: 2, bytes_in_scope: 300, bytes_read: 300 };
+		expect(terminalScanStatus(coverage, [
+			{ pass: 1, ...coverage, completed: true },
+			{ pass: 2, ...coverage, completed: false },
+		])).toBe("partial");
+		expect(terminalScanStatus(coverage, [
+			{ pass: 1, ...coverage, completed: true },
+		])).toBe("completed");
+		expect(terminalScanStatus({ ...coverage, files_in_scope: 0 }, [])).toBe("completed");
 	});
 });
