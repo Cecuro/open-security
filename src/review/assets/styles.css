@@ -60,6 +60,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .status-label { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--secondary); white-space: nowrap; }
 .status-label::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--tertiary); }
 .status-label.completed::before { background: var(--success); }
+.status-label.partial::before { background: #b7791f; }
 .status-label.running::before { background: var(--focus); }
 .status-label.failed::before, .status-label.interrupted::before { background: var(--critical); }
 .overview-page { max-width: 1000px; }
@@ -68,6 +69,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .overview-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin: 0 0 34px; }
 .overview-sub { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; color: var(--secondary); }
 .run-result, .run-facts, .threat-model-section { padding: 22px 0 26px; border-top: 1px solid var(--line); }
+.partial-warning { margin: 0 0 28px; padding: 14px 16px; border: 1px solid #e3c78f; border-radius: 8px; background: #fff8e8; color: #654b18; }
+.partial-warning strong { display: block; margin-bottom: 4px; }
+.partial-warning p { margin: 0; line-height: 1.5; }
 .run-result h2, .run-facts h2, .threat-model-section h2 { margin: 0 0 14px; font-size: 15px; letter-spacing: -.01em; }
 .run-result p { margin: 0; color: var(--secondary); }
 .run-result .severity-line { max-width: 420px; }

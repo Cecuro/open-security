@@ -8,7 +8,7 @@ import { Ledger } from "../src/db/db.js";
 import { startReviewServer, type RunningReviewServer } from "../src/review/server.js";
 import { testScanConfig } from "./config.js";
 
-function fixture(options: { completed?: boolean; title?: string; description?: string } = {}): { db: string; scanId: string } {
+function fixture(options: { completed?: boolean; partial?: boolean; title?: string; description?: string } = {}): { db: string; scanId: string } {
 	const db = join(mkdtempSync(join(tmpdir(), "opensec-review-")), "ledger.db");
 	const ledger = Ledger.open(db);
 	const repoId = ledger.upsertRepo("/tmp/review-repo", "review-repo", null);
@@ -17,6 +17,10 @@ function fixture(options: { completed?: boolean; title?: string; description?: s
 		{ path: "src/server.ts", sha: "sha", bytes: 100, excludedReason: null },
 	]);
 	ledger.recordTouch("scan-review", "src/server.ts", 100);
+	ledger.recordEvent("scan-review", "work_started", { read_group: "pass-1" }, "probe-1");
+	if (!options.partial) {
+		ledger.recordEvent("scan-review", "work_complete", { read_group: "pass-1" }, "probe-1");
+	}
 	const candidate = ledger.upsertCandidate({
 		scanId: "scan-review",
 		workerId: "probe-1",
@@ -43,7 +47,9 @@ function fixture(options: { completed?: boolean; title?: string; description?: s
 			},
 		},
 	});
-	if (options.completed !== false) ledger.finishScan("scan-review", "completed");
+	if (options.completed !== false) {
+		ledger.finishScan("scan-review", options.partial ? "partial" : "completed");
+	}
 	ledger.close();
 	return { db, scanId: "scan-review" };
 }
@@ -100,7 +106,7 @@ describe("local review server", () => {
 		expect(detail.repo).not.toHaveProperty("path");
 		expect(detail.scan).not.toHaveProperty("config");
 		expect(detail).not.toHaveProperty("events");
-		expect(detail).not.toHaveProperty("passCoverage");
+		expect(detail.passCoverage).toMatchObject([{ pass: 1, completed: true }]);
 		expect(detail.candidates[0]).toMatchObject({ status: "open", reviewable: true, needs_review: true });
 	});
 
@@ -155,7 +161,25 @@ describe("local review server", () => {
 			body: JSON.stringify({ status: "suppressed" }),
 		});
 		expect(response.status).toBe(400);
-		expect(await response.json()).toMatchObject({ error: "findings can only be reviewed after a scan completes" });
+		expect(await response.json()).toMatchObject({ error: "findings can only be reviewed after a scan finishes" });
+	});
+
+	it("labels partial runs and keeps their recorded findings reviewable", async () => {
+		const { db, scanId } = fixture({ partial: true });
+		running = await startReviewServer({ db });
+		const page = await (await fetch(running.url)).text();
+		const token = page.match(/name="opensec-token" content="([^"]+)"/)?.[1] as string;
+		const headers = { "X-OpenSec-Token": token };
+		const detail = await (await fetch(new URL(`/api/scans/${scanId}`, running.url), { headers })).json();
+		expect(detail.scan.status).toBe("partial");
+		expect(detail.passCoverage).toMatchObject([{ pass: 1, completed: false }]);
+
+		const response = await fetch(new URL(`/api/scans/${scanId}/candidates/c1/review`, running.url), {
+			method: "POST",
+			headers: { ...headers, "Content-Type": "application/json", Origin: new URL(running.url).origin },
+			body: JSON.stringify({ comment: "Useful finding from a partial run." }),
+		});
+		expect(response.status).toBe(200);
 	});
 
 	it("reports follow-up as remaining and a confirmed human decision as reviewed", async () => {

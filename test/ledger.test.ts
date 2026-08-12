@@ -31,6 +31,15 @@ describe("a failed scan keeps the phase it died in", () => {
 		expect(l.getScan("s")?.phase).toBe("report");
 		l.close();
 	});
+
+	it("advances a partial scan to report", () => {
+		const l = ledger();
+		l.setPhase("s", "discovery");
+		l.finishScan("s", "partial");
+		expect(l.getScan("s")).toMatchObject({ status: "partial", phase: "report" });
+		expect(l.getScan("s")?.completed_at).toBeTypeOf("string");
+		l.close();
+	});
 });
 
 describe("the worklist is what nothing has read yet", () => {

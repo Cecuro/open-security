@@ -5,7 +5,7 @@ export type ScanScope =
 	| { kind: "diff"; base: string }
 	| { kind: "working_tree" };
 
-export type ScanStatus = "running" | "completed" | "failed";
+export type ScanStatus = "running" | "completed" | "partial" | "failed";
 
 export type Phase =
 	| "inventory"

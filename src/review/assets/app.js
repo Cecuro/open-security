@@ -190,7 +190,7 @@
       <div id="run-filters" class="filters" ${state.runFiltersOpen ? "" : "hidden"}>
         <div class="filter-field"><span>Repository</span>${selectMenu("run-repo-filter", "Repository", [["all", "All repositories"], ...repos.map(repo => [repo, repo])], state.runRepo)}</div>
         <div class="filter-field"><span>Severity</span>${selectMenu("run-severity-filter", "Severity", [["all", "Any severity"], ...["critical", "high", "medium", "low"].map(value => [value, label(value)])], state.runSeverity)}</div>
-        <div class="filter-field"><span>Status</span>${selectMenu("run-status-filter", "Status", [["all", "Any status"], ["completed", "Completed"], ["running", "Running"], ["failed", "Failed"]], state.runStatus)}</div>
+        <div class="filter-field"><span>Status</span>${selectMenu("run-status-filter", "Status", [["all", "Any status"], ["completed", "Completed"], ["partial", "Partial"], ["running", "Running"], ["failed", "Failed"]], state.runStatus)}</div>
       </div>
       <div class="list-meta"><span id="run-count"></span><button data-action="clear-run-filters">Clear</button></div>
       <nav id="run-sidebar-list" class="run-sidebar-list" aria-label="Recent runs"></nav>`;
@@ -249,9 +249,11 @@
 
   function overviewView() {
     if (!state.detail) return "";
-    const { scan, repo, coverage, threatModel, candidates } = state.detail;
+    const { scan, repo, coverage, passCoverage = [], threatModel, candidates } = state.detail;
     const stats = reviewStats(candidates);
     const status = displayRunStatus(scan);
+    const partial = scan.status === "partial";
+    const completePasses = passCoverage.filter(pass => pass.completed).length;
     const model = scan.model_ref || scan.config?.modelRef || null;
     const duration = scan.completed_at ? formatDuration(new Date(scan.completed_at) - new Date(scan.started_at)) : null;
     const facts = [
@@ -263,7 +265,8 @@
     ].filter(Boolean);
     return `<div class="page overview-page">
       <header class="overview-head"><div><h1>${esc(repo.name)}</h1><div class="overview-sub"><span class="status-label ${status.className}">${status.label}</span><span>·</span><span>${longDate(scan.started_at)}</span><span>·</span><code>${esc(shortHash(scan.revision))}</code></div></div><button class="primary-button" data-action="view-findings">View findings</button></header>
-      <section class="run-result"><h2>Result</h2>${stats.reviewable ? `<div class="severity-line">${severityStrip(stats.counts, stats.reviewable)}</div><div class="severity-summary">${severityLabels(stats.counts)}</div>` : `<p>No reportable findings.</p>`}</section>
+      ${partial ? `<section class="partial-warning" role="status"><strong>Partial result</strong><p>${completePasses} of ${passCoverage.length} probe passes reviewed the full scope. Findings may be useful, but this run cannot support a clean result.</p></section>` : ""}
+      <section class="run-result"><h2>Result</h2>${stats.reviewable ? `<div class="severity-line">${severityStrip(stats.counts, stats.reviewable)}</div><div class="severity-summary">${severityLabels(stats.counts)}</div>` : `<p>${partial ? "No reportable findings in the completed work." : "No reportable findings."}</p>`}</section>
       <section class="run-facts"><h2>Run details</h2><dl>${facts.map(item => `<div><dt>${esc(item[0])}</dt><dd ${item[2] ? 'class="machine-value"' : ""}>${esc(item[1])}</dd></div>`).join("")}</dl></section>
       ${threatModel ? `<section class="threat-model-section"><div class="section-title"><h2>Threat model</h2><button class="copy-button" data-action="copy-threat-model" aria-label="Copy threat model" title="Copy threat model">${copyIcon()}</button></div><div class="markdown">${markdown(threatModel)}</div></section>` : ""}
     </div>`;
@@ -274,14 +277,14 @@
     const severity = severityOf(candidate);
     const computed = candidate.computed;
     const locations = candidate.locations || [];
-    const completed = state.detail.scan.status === "completed";
-    const canChangeState = !snapshot && completed && candidate.status !== "duplicate";
-    const canComment = !snapshot && completed;
+    const finished = ["completed", "partial"].includes(state.detail.scan.status);
+    const canChangeState = !snapshot && finished && candidate.status !== "duplicate";
+    const canComment = !snapshot && finished;
     const activity = [...candidate.activities].reverse();
     return `<article class="main-inner" style="--severity:${severityColor(severity)}">
       <button class="back-button" data-action="mobile-back">← Findings</button>
       <header class="detail-head"><div class="eyebrow">Finding ${esc(candidate.id)}</div><h1 tabindex="-1">${esc(candidate.title)}</h1><div class="head-meta"><span class="severity-label"><span></span>${label(severity)}</span>${(candidate.cwe_ids || []).map(cwe => `<span class="chip">${esc(cwe)}</span>`).join("")}<div class="state-control"><span>State</span>${canChangeState ? stateSelect(candidate.status) : `<span class="chip">${findingStateLabel(candidate.status)}</span>`}</div></div></header>
-      ${snapshot ? `<p class="status-note">This shared snapshot is read-only.</p>` : !completed ? `<p class="status-note">Review is available after this run completes.</p>` : ""}
+      ${snapshot ? `<p class="status-note">This shared snapshot is read-only.</p>` : !finished ? `<p class="status-note">Review is available after this run finishes.</p>` : ""}
       <div class="reading"><div>
         <section class="prose-section"><div class="section-title"><h2>Summary</h2><button class="copy-button" data-action="copy-finding-description" aria-label="Copy finding description" title="Copy finding description">${copyIcon()}</button></div><div class="description">${paragraphs(candidate.description)}</div></section>
         <section class="prose-section"><h2>Locations</h2><div class="location-list">${locations.length ? locations.map(location => `<div class="location"><code>${esc(location.path)}:${location.start_line}${location.end_line !== location.start_line ? `–${location.end_line}` : ""}</code><span>${esc(label(location.role || "evidence"))}</span></div>`).join("") : `<span>No code locations recorded.</span>`}</div></section>

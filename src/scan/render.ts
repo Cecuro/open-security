@@ -84,6 +84,17 @@ export function renderMarkdown(r: ReportInput): string {
 	}
 	out.push(`| cost | ${r.scan.cost_usd > 0 ? `$${r.scan.cost_usd.toFixed(4)}` : "_not priced_"} |`);
 	out.push("");
+	if (
+		r.scan.status === "partial" ||
+		r.passCoverage?.some((pass) => !pass.completed)
+	) {
+		out.push(
+			"> **Partial result:** one or more probe passes stopped before reviewing the full scope.",
+			"> Findings may be useful, but no findings is not a clean result. Run another scan with",
+			"> enough turns and budget to complete every pass.",
+			"",
+		);
+	}
 
 	const pctFiles = pct(r.coverage.files_touched, r.coverage.files_in_scope);
 	const pctBytes = pct(r.coverage.bytes_read, r.coverage.bytes_in_scope);
