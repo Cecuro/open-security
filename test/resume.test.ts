@@ -228,6 +228,20 @@ describe("resume re-enters at the recorded phase", () => {
 		ledger.close();
 	});
 
+	it("counts prior worker attempts so resumed traces do not overwrite each other", () => {
+		const ledger = openLedger();
+		const scanId = `resume-test-${process.pid}-attempts`;
+		seedFailedScan(ledger, scanId);
+		expect(ledger.workerAttemptCount(scanId, "probe-1")).toBe(0);
+		ledger.recordEvent(scanId, "agent_start", {}, "probe-1");
+		ledger.recordEvent(scanId, "agent_start", {}, "probe-1");
+		expect(ledger.workerAttemptCount(scanId, "probe-1")).toBe(2);
+		ledger.recordEvent(scanId, "agent_start", {}, "probe-1/sub-1");
+		expect(ledger.workerAttemptCount(scanId, "probe-1/sub-1")).toBe(1);
+		expect(ledger.workerAttemptCount(scanId, "probe-1_sub-1")).toBe(0);
+		ledger.close();
+	});
+
 	it("listScans shows what 'opensec report' with no id prints", () => {
 		const ledger = openLedger();
 		const scanId = `resume-test-${process.pid}-e`;

@@ -4,7 +4,13 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
-import { AgentRunner, type AgentRunResult, pricingOf, type RunArgs } from "../agents/session.js";
+import {
+	AgentRunner,
+	AgentRunFailedError,
+	type AgentRunResult,
+	pricingOf,
+	type RunArgs,
+} from "../agents/session.js";
 import type { SubagentDeps } from "../agents/subagent.js";
 import {
 	ASSESS_VERBS,
@@ -100,6 +106,42 @@ export function terminalScanStatus(
 	return coverage.files_in_scope === 0 || passes.every((pass) => pass.completed)
 		? "completed"
 		: "partial";
+}
+
+export interface DiscoveryProbe {
+	workerId: string;
+	readGroup: string;
+}
+
+export function discoveryPlan(
+	passes: number,
+	isCompleted: (probe: DiscoveryProbe) => boolean,
+): DiscoveryProbe[] {
+	return Array.from({ length: passes }, (_, pass) => ({
+		workerId: `probe-${pass + 1}`,
+		readGroup: `pass-${pass + 1}`,
+	})).filter((probe) => !isCompleted(probe));
+}
+
+export async function runDiscoveryProbes<T>(
+	plan: readonly T[],
+	concurrency: number,
+	run: (probe: T) => Promise<void>,
+	onFailed: (probe: T, error: AgentRunFailedError) => void,
+): Promise<void> {
+	await mapConcurrent([...plan], concurrency, async (probe) => {
+		try {
+			await run(probe);
+		} catch (err) {
+			if (!(err instanceof AgentRunFailedError)) throw err;
+			onFailed(probe, err);
+		}
+	});
+}
+
+export function requireDiscoveryProgress(completedPasses: number, failures: readonly string[]): void {
+	if (completedPasses > 0 || failures.length === 0) return;
+	throw new Error(`discovery failed: no probe completed; first error: ${failures[0]}`);
 }
 
 export class Scanner {
@@ -246,6 +288,8 @@ export class Scanner {
 			const scope: ScanScope =
 				scan.scope_kind === "diff" && scan.scope_base
 					? { kind: "diff", base: scan.scope_base }
+					: scan.scope_kind === "scope_file" && scan.scope_base
+						? { kind: "scope_file", path: scan.scope_base }
 					: scan.scope_kind === "working_tree"
 						? { kind: "working_tree" }
 						: { kind: "repository" };
@@ -398,7 +442,9 @@ export class Scanner {
 	}
 
 	private tracePath(workerId: string): string {
-		return join(scanArtifactDir(this.scanId), "traces", `${workerId}.jsonl`);
+		const attempt = this.ledger.workerAttemptCount(this.scanId, workerId) + 1;
+		const filename = workerId.replaceAll("/", "_");
+		return join(scanArtifactDir(this.scanId), "traces", `${filename}-attempt-${attempt}.jsonl`);
 	}
 
 	private checkBudget(): void {
@@ -433,9 +479,15 @@ export class Scanner {
 			})),
 		);
 		this.inv = inv;
+		const scopeLabel = this.scope.kind === "diff"
+			? ` (diff from ${this.scope.base})`
+			: this.scope.kind === "scope_file"
+				? ` (scope file ${this.scope.path})`
+				: this.scope.kind === "working_tree"
+					? " (working tree)"
+					: "";
 		this.say(
-			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded` +
-				(this.scope.kind === "diff" ? ` (diff from ${this.scope.base})` : this.scope.kind === "working_tree" ? " (working tree)" : ""),
+			`inventory: ${inv.inScope.length} files in scope, ${inv.entries.length - inv.inScope.length} excluded${scopeLabel}`,
 		);
 		for (const glob of inv.unusedExcludes) {
 			// `--exclude peridot-dashboard` matches nothing, because entries are
@@ -560,46 +612,75 @@ export class Scanner {
 		);
 
 		// Each probe is one independent pass over the same complete scan scope.
-		const plan = Array.from({ length: passes }, (_, pass) => ({
-			workerId: `probe-${pass + 1}`,
-			readGroup: `pass-${pass + 1}`,
-		}));
+		const plan = discoveryPlan(passes, ({ workerId, readGroup }) =>
+			this.ledger.workerCompleted(this.scanId, workerId, readGroup),
+		);
+		const skipped = passes - plan.length;
+		if (skipped > 0) this.say(`discovery: kept ${skipped} completed probe(s) from earlier attempts`);
+		const failures: Array<{ workerId: string; error: string }> = [];
 
-		await mapConcurrent(plan, this.concurrency, async ({ workerId, readGroup }) => {
-			this.checkBudget();
-			this.ledger.recordEvent(this.scanId, "work_started", { read_group: readGroup }, workerId);
-			await this.runAgent({
-				ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS, readGroup },
-				onEvent: (m) => this.say(m),
-				tracePath: this.tracePath(workerId),
-				subagents: this.subagentDeps(),
-				systemPrompt: this.prompts.get("probe.md"),
-				prompt: [
-					`You are ${workerId}. ${describeCompany(passes)}`,
-					"",
-					"A threat model for this repository was written first. It was derived from",
-					"the code under review, so treat it as orientation, not as fact:",
-					"",
-					wrapUntrusted(this.nonce, "threat-model", tm),
-					"",
-					"Begin with `opensec work next` to get the scan scope.",
-					"Page through it until remaining is 0. That covers the list; it is not",
-					"where you stop. Keep going until a pass turns up nothing you had not",
-					"already recorded, then report.",
-				].join("\n"),
-			});
-			const remaining = this.ledger.listWork(this.scanId, 1, readGroup).unread;
-			const completed = this.ledger.workerCompleted(this.scanId, workerId, readGroup);
-			const total = this.ledger.coverage(this.scanId).files_in_scope;
+		await runDiscoveryProbes(
+			plan,
+			this.concurrency,
+			async ({ workerId, readGroup }) => {
+				this.checkBudget();
+				this.ledger.recordEvent(this.scanId, "work_started", { read_group: readGroup }, workerId);
+				await this.runAgent({
+					ctx: { ...this.ctx(workerId), verbs: PROBE_VERBS, readGroup },
+					onEvent: (m) => this.say(m),
+					tracePath: this.tracePath(workerId),
+					subagents: this.subagentDeps(),
+					systemPrompt: this.prompts.get("probe.md"),
+					prompt: [
+						`You are ${workerId}. ${describeCompany(passes)}`,
+						"",
+						"A threat model for this repository was written first. It was derived from",
+						"the code under review, so treat it as orientation, not as fact:",
+						"",
+						wrapUntrusted(this.nonce, "threat-model", tm),
+						"",
+						"Begin with `opensec work next` to get the scan scope.",
+						"Page through it until remaining is 0. That covers the list; it is not",
+						"where you stop. Keep going until a pass turns up nothing you had not",
+						"already recorded, then report.",
+					].join("\n"),
+				});
+				this.reportProbeProgress(workerId, readGroup);
+			},
+			({ workerId, readGroup }, err) => {
+				failures.push({ workerId, error: err.message });
+				this.ledger.recordEvent(
+					this.scanId,
+					"worker_failed",
+					{ phase: "discovery", read_group: readGroup, error: err.message },
+					workerId,
+				);
+				this.say(`  ${workerId} failed after retries — continuing other probes`);
+				this.reportProbeProgress(workerId, readGroup);
+			},
+		);
+		const completedPasses = this.ledger.passCoverage(this.scanId, passes).filter((pass) => pass.completed).length;
+		requireDiscoveryProgress(completedPasses, failures.map((failure) => failure.error));
+		if (failures.length > 0) {
 			this.say(
-				`  ${workerId} ${completed ? "completed" : "stopped incomplete"} ` +
-					`(${total - remaining}/${total} files read)`,
+				`discovery: ${failures.length} probe(s) failed after retries; ` +
+					`continuing with ${completedPasses}/${passes} completed pass(es)`,
 			);
-		});
+		}
 
 		const found = this.ledger.listCandidates(this.scanId);
 		this.say(`discovery: ${found.length} candidate(s)`);
 		return found;
+	}
+
+	private reportProbeProgress(workerId: string, readGroup: string): void {
+		const remaining = this.ledger.listWork(this.scanId, 1, readGroup).unread;
+		const completed = this.ledger.workerCompleted(this.scanId, workerId, readGroup);
+		const total = this.ledger.coverage(this.scanId).files_in_scope;
+		this.say(
+			`  ${workerId} ${completed ? "completed" : "stopped incomplete"} ` +
+				`(${total - remaining}/${total} files read)`,
+		);
 	}
 
 	async reduce(): Promise<number> {

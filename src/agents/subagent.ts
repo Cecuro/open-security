@@ -112,7 +112,7 @@ export function createSubagentTool(parent: RunContext, deps: SubagentDeps) {
 						"Investigate, then answer in your final message. Cite path:line for every",
 						"claim. If you could not settle it, say so and say what is missing.",
 					].join("\n"),
-					tracePath: deps.tracePath(workerId.replaceAll("/", "_")),
+					tracePath: deps.tracePath(workerId),
 				});
 
 				const answer = sanitize(parent, result.text, Number.POSITIVE_INFINITY).trim();

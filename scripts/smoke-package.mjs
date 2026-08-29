@@ -15,6 +15,7 @@ try {
 	run(npm, ["install", "--no-audit", "--no-fund", "--prefix", consumer, join(temp, filename)], root);
 
 	const cli = join(consumer, "node_modules", "@cecuro", "open-security", "dist", "cli", "index.js");
+	run(cli, ["--version"], consumer);
 	const help = run(process.execPath, [cli, "--help"], consumer);
 	if (!help.includes("opensec review")) throw new Error("installed CLI help is missing the review command");
 

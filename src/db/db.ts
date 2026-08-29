@@ -169,7 +169,11 @@ export class Ledger {
 				config.promptHash,
 				config.passes,
 				config.scope.kind,
-				config.scope.kind === "diff" ? config.scope.base : null,
+				config.scope.kind === "diff"
+					? config.scope.base
+					: config.scope.kind === "scope_file"
+						? config.scope.path
+						: null,
 				now(),
 			);
 	}
@@ -515,6 +519,16 @@ export class Ledger {
 				)
 				.get(scanId, workerId, readGroup),
 		);
+	}
+
+	workerAttemptCount(scanId: string, workerId: string): number {
+		const row = this.db
+			.prepare(
+				`SELECT COUNT(*) AS attempts FROM scan_events
+				 WHERE scan_id = ? AND worker_id = ? AND type = 'agent_start'`,
+			)
+			.get(scanId, workerId) as { attempts: number };
+		return row.attempts;
 	}
 
 	passCoverage(scanId: string, passes: number): PassCoverage[] {

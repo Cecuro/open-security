@@ -15,6 +15,7 @@ import {
 	resolveCliModel,
 	SessionManager,
 	SettingsManager,
+	type InlineExtension,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
@@ -25,6 +26,7 @@ import { OpensecBridge } from "./bridge.js";
 import { createSubagentTool, type SubagentDeps } from "./subagent.js";
 import { createBashTool, DockerSandbox } from "./docker.js";
 import { LocalSandbox } from "./local.js";
+import { retryableOpaqueAzureError } from "./azure-retry.js";
 import type { RunContext } from "./tool.js";
 
 export interface AgentRunResult {
@@ -42,6 +44,9 @@ export interface AgentRunResult {
 	cacheSavingsUsd: number;
 	stoppedAtTurnLimit?: boolean;
 }
+
+/** A model/provider error that remained after PI exhausted its retry policy. */
+export class AgentRunFailedError extends Error {}
 
 export interface UsageDelta {
 	tokensIn: number;
@@ -132,11 +137,43 @@ export class AgentRunner {
 		// Load-bearing, and nothing tests it: pi trusts <project>/.pi/settings.json
 		// and spawns its npmCommand, and splices .pi/APPEND_SYSTEM.md above our
 		// system prompt. cwd is a directory we own, never the scanned repo.
-		const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
+		const settingsManager = SettingsManager.inMemory(
+			{
+				retry: {
+					enabled: true,
+					maxRetries: 5,
+					baseDelayMs: 2_000,
+				},
+			},
+			{ projectTrusted: false },
+		);
+		let lastProviderResponse: ProviderResponseSummary | undefined;
+		const providerExtension: InlineExtension = {
+			name: "opensec-provider-policy",
+			hidden: true,
+			factory(pi) {
+				pi.on("before_provider_request", () => {
+					lastProviderResponse = undefined;
+				});
+				pi.on("after_provider_response", (event) => {
+					lastProviderResponse = {
+						status: event.status,
+						headers: safeProviderHeaders(event.headers),
+					};
+				});
+				pi.on("message_end", (event) => {
+					if (event.message.role !== "assistant") return;
+					const errorMessage = retryableOpaqueAzureError(event.message);
+					if (!errorMessage) return;
+					return { message: { ...event.message, errorMessage } };
+				});
+			},
+		};
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: workDir,
 			agentDir: getAgentDir(),
 			settingsManager,
+			extensionFactories: [providerExtension],
 			noContextFiles: true,
 			noExtensions: true,
 			noSkills: true,
@@ -205,9 +242,11 @@ export class AgentRunner {
 				customTools: tools,
 			});
 
-			const failures: string[] = [];
+			let terminalProviderFailure: ProviderFailure | undefined;
 			let reported: UsageDelta = emptyUsage();
 			let stoppedAtBudget = false;
+			let lastProviderFailure: ProviderFailure | undefined;
+			let terminalRetryAttempts = 0;
 			const reportUsage = (usage: UsageDelta): void => {
 				if (usage.tokensIn === 0 && usage.tokensOut === 0 && usage.costUsd === 0) return;
 				reported = {
@@ -242,6 +281,46 @@ export class AgentRunner {
 			let stoppedAtTurnLimit = false;
 
 			const unsubscribe = session.subscribe((event) => {
+				if (event.type === "message_end") {
+					const failure = providerFailure(event.message, lastProviderResponse);
+					if (failure) lastProviderFailure = failure;
+					return;
+				}
+				if (event.type === "auto_retry_start") {
+					ctx.ledger.recordEvent(
+						ctx.scanId,
+						"provider_retry",
+						{
+							attempt: event.attempt,
+							maxAttempts: event.maxAttempts,
+							delayMs: event.delayMs,
+							error: event.errorMessage,
+							model: `${resolved.model.provider}/${resolved.model.id}`,
+							...(lastProviderFailure ? { providerFailure: lastProviderFailure } : {}),
+						},
+						ctx.workerId,
+					);
+					args.onEvent?.(
+						`  ${ctx.workerId}: provider retry ${event.attempt}/${event.maxAttempts} ` +
+							`in ${Math.ceil(event.delayMs / 1_000)}s — ${event.errorMessage}`,
+					);
+					return;
+				}
+				if (event.type === "auto_retry_end") {
+					terminalRetryAttempts = event.success ? 0 : event.attempt;
+					ctx.ledger.recordEvent(
+						ctx.scanId,
+						"provider_retry_end",
+						{
+							success: event.success,
+							attempts: event.attempt,
+							...(event.finalError ? { finalError: event.finalError } : {}),
+						},
+						ctx.workerId,
+					);
+					if (event.success) lastProviderFailure = undefined;
+					return;
+				}
 				if (event.type === "turn_end") {
 					const usage = usageOf(event.message, resolved.model);
 					if (usage) reportUsage(usage);
@@ -269,8 +348,8 @@ export class AgentRunner {
 				// Without this a provider 404 reads as "the probe found nothing" and the
 				// scan completes clean. willRetry excludes blips pi recovers from.
 				if (event.type !== "agent_end" || event.willRetry) return;
-				const err = (event.messages.at(-1) as { errorMessage?: string } | undefined)?.errorMessage;
-				if (err) failures.push(err);
+				terminalProviderFailure = providerFailure(event.messages.at(-1), lastProviderResponse);
+				if (!terminalProviderFailure) lastProviderFailure = undefined;
 			});
 
 			try {
@@ -284,8 +363,11 @@ export class AgentRunner {
 					throw new Error(`budget exhausted during ${ctx.workerId}; usage up to this response is recorded`);
 				}
 
-				if (failures.length > 0 && !stoppedAtTurnLimit) {
-					throw new Error(`agent run failed: ${failures[0]}`);
+				if (terminalProviderFailure && !stoppedAtTurnLimit) {
+					const retries = terminalRetryAttempts > 0 ? ` after ${terminalRetryAttempts} retries` : "";
+					throw new AgentRunFailedError(
+						`agent run failed${retries}: ${terminalProviderFailure.error}`,
+					);
 				}
 
 				const stats = session.getSessionStats();
@@ -323,7 +405,13 @@ export class AgentRunner {
 				ctx.ledger.recordEvent(
 					ctx.scanId,
 					"agent_error",
-					{ error: (err as Error).message, stoppedAtTurnLimit, stoppedAtBudget },
+					{
+						error: (err as Error).message,
+						stoppedAtTurnLimit,
+						stoppedAtBudget,
+						retryAttempts: terminalRetryAttempts,
+						...(lastProviderFailure ? { providerFailure: lastProviderFailure } : {}),
+					},
 					ctx.workerId,
 				);
 				throw err;
@@ -359,6 +447,69 @@ export class AgentRunner {
 			}
 		}
 	}
+}
+
+interface ProviderResponseSummary {
+	status: number;
+	headers: Record<string, string>;
+}
+
+interface ProviderFailure {
+	error: string;
+	provider?: string;
+	api?: string;
+	model?: string;
+	responseId?: string;
+	rawStopReason?: string;
+	response?: ProviderResponseSummary;
+}
+
+const SAFE_PROVIDER_HEADERS = new Set([
+	"apim-request-id",
+	"retry-after",
+	"traceparent",
+	"x-ms-request-id",
+	"x-request-id",
+	"x-ratelimit-limit-requests",
+	"x-ratelimit-limit-tokens",
+	"x-ratelimit-remaining-requests",
+	"x-ratelimit-remaining-tokens",
+	"x-ratelimit-reset-requests",
+	"x-ratelimit-reset-tokens",
+]);
+
+function safeProviderHeaders(headers: Record<string, string>): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(headers)
+			.map(([name, value]) => [name.toLowerCase(), value] as const)
+			.filter(([name]) => SAFE_PROVIDER_HEADERS.has(name)),
+	);
+}
+
+function providerFailure(message: unknown, response?: ProviderResponseSummary): ProviderFailure | undefined {
+	if (typeof message !== "object" || message === null || !("role" in message)) return undefined;
+	const assistant = message as {
+		role?: string;
+		stopReason?: string;
+		errorMessage?: string;
+		provider?: string;
+		api?: string;
+		model?: string;
+		responseId?: string;
+		rawStopReason?: string;
+	};
+	if (assistant.role !== "assistant" || assistant.stopReason !== "error" || !assistant.errorMessage) {
+		return undefined;
+	}
+	return {
+		error: assistant.errorMessage,
+		...(assistant.provider ? { provider: assistant.provider } : {}),
+		...(assistant.api ? { api: assistant.api } : {}),
+		...(assistant.model ? { model: assistant.model } : {}),
+		...(assistant.responseId ? { responseId: assistant.responseId } : {}),
+		...(assistant.rawStopReason ? { rawStopReason: assistant.rawStopReason } : {}),
+		...(response ? { response } : {}),
+	};
 }
 
 interface PiUsage {
