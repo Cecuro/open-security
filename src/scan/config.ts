@@ -53,6 +53,9 @@ export function parseScanConfig(value: unknown): ScanConfig | null {
 
 function normalizeScope(scope: ScanScope): ScanScope {
 	if (scope.kind === "diff") return { kind: "diff", base: requiredText(scope.base, "scope.base") };
+	if (scope.kind === "scope_file") {
+		return { kind: "scope_file", path: requiredText(scope.path, "scope.path") };
+	}
 	if (scope.kind === "working_tree") return { kind: "working_tree" };
 	return { kind: "repository" };
 }

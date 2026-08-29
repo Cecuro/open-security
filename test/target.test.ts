@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -22,7 +22,36 @@ function repository(): string {
 	return root;
 }
 
-describe("Git scan scopes", () => {
+describe("Git scan scopes", { timeout: 10_000 }, () => {
+	it("scope-file scope includes only its repository-relative paths", async () => {
+		const root = repository();
+		const scopeFile = join(root, "scope.txt");
+		writeFileSync(scopeFile, "# selected files\n./changed.ts\r\nsame.ts\nchanged.ts\n");
+		expect(await scopedPaths(root, { kind: "scope_file", path: scopeFile })).toEqual([
+			"changed.ts",
+			"same.ts",
+		]);
+	});
+
+	it("scope-file scope rejects missing repository paths", async () => {
+		const root = repository();
+		const scopeFile = join(root, "scope.txt");
+		writeFileSync(scopeFile, "missing.ts\n");
+		await expect(scopedPaths(root, { kind: "scope_file", path: scopeFile })).rejects.toThrow(
+			"path not found in repository",
+		);
+	});
+
+	it("scope-file scope rejects symlinks that inventory would omit", async () => {
+		const root = repository();
+		const scopeFile = join(root, "scope.txt");
+		symlinkSync(join(root, "same.ts"), join(root, "linked.ts"));
+		writeFileSync(scopeFile, "linked.ts\n");
+		await expect(scopedPaths(root, { kind: "scope_file", path: scopeFile })).rejects.toThrow(
+			"symbolic links are not supported",
+		);
+	});
+
 	it("diff scope includes only files changed since the merge base", async () => {
 		const root = repository();
 		writeFileSync(join(root, "changed.ts"), "export const value = 2;\n");

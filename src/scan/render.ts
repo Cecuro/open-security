@@ -55,6 +55,7 @@ export function renderMarkdown(r: ReportInput): string {
 	out.push(`| repository | ${codeSpan(r.repoPath)} |`);
 	out.push(`| revision | ${r.scan.revision ? codeSpan(r.scan.revision) : "_not a git repo_"} |`);
 	if (r.scan.scope_kind === "diff") out.push(`| scope | diff from ${codeSpan(r.scan.scope_base ?? "(unknown)")} to \`HEAD\` |`);
+	if (r.scan.scope_kind === "scope_file") out.push(`| scope | paths from ${codeSpan(r.scan.scope_base ?? "(unknown)")} |`);
 	if (r.scan.scope_kind === "working_tree") out.push("| scope | staged, unstaged, and untracked files against `HEAD` |");
 	out.push(`| profile | **${r.scan.profile}** |`);
 	out.push(`| model | ${codeSpan(r.modelRef)} |`);

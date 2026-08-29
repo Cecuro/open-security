@@ -1,6 +1,6 @@
 {
   "name": "@cecuro/open-security",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Point it at a repository, get real security findings with file:line, evidence, and a severity you can defend — using any model you want, on your own machine.",
   "keywords": [
     "security",

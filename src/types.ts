@@ -3,6 +3,7 @@ export type Profile = "local" | "container";
 export type ScanScope =
 	| { kind: "repository" }
 	| { kind: "diff"; base: string }
+	| { kind: "scope_file"; path: string }
 	| { kind: "working_tree" };
 
 export type ScanStatus = "running" | "completed" | "partial" | "failed";

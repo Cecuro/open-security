@@ -59,6 +59,12 @@ opensec review
 
 Run `opensec scan . --estimate` to estimate a scan without calling a model. Run `opensec --help` for scan limits, cost controls, diff scans, exports, and CI options.
 
+To scan an explicit file set, put one repository-relative path on each line. Blank lines and lines starting with `#` are ignored.
+
+```sh
+opensec scan . --scope-file scope.txt --model provider/model
+```
+
 ## Use it with your team
 
 The local review UI turns scan output into shared work. A team can:

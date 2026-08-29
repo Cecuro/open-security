@@ -52,6 +52,7 @@ Options
   --exclude <globs>    comma-separated repo-relative globs to leave out, e.g.
                        "vendor/**,**/examples/**". Excluded files are counted
                        and given this reason in the report, not dropped silently.
+  --scope-file <path>  scan newline-separated repository-relative paths from a file
   --diff <base>        scan source files changed from merge-base(base, HEAD)
   --working-tree       scan staged, unstaged, and untracked source files against HEAD
   --fail-on-severity <severity>
@@ -320,7 +321,7 @@ async function main(argv: string[]): Promise<number> {
 	const failSeverity = parseFailSeverity(opts.flags["fail-on-severity"]);
 	if (typeof failSeverity === "string") return fail(failSeverity);
 
-	const unknownValue = unknownValueFlag(opts, ["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "diff", "fail-on-severity"]);
+	const unknownValue = unknownValueFlag(opts, ["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "scope-file", "diff", "fail-on-severity"]);
 	if (unknownValue) return fail(`unknown flag '--${unknownValue}'\n\n${USAGE}`);
 	const unknown = unknownBool(opts, ["estimate", "json", "refresh-threat-model", "working-tree"]);
 	if (unknown) return fail(`unknown flag '--${unknown}'\n\n${USAGE}`);
@@ -446,7 +447,7 @@ function parseFlags(argv: string[]): Parsed {
 	const flags: Record<string, string | undefined> = {};
 	const bools: Record<string, boolean> = {};
 	const positional: string[] = [];
-	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "diff", "fail-on-severity", "format", "output", "port"]);
+	const valueFlags = new Set(["model", "profile", "db", "prompts", "max-files", "max-cost", "concurrency", "passes", "max-turns", "exclude", "scope-file", "diff", "fail-on-severity", "format", "output", "port"]);
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] ?? "";
@@ -475,10 +476,16 @@ function openBrowser(url: string): void {
 }
 
 function parseScope(opts: Parsed): ScanScope | string {
-	if (opts.flags.diff !== undefined && opts.bools["working-tree"]) {
-		return "--diff and --working-tree are mutually exclusive";
-	}
+	const selected = [
+		opts.flags.diff !== undefined,
+		opts.flags["scope-file"] !== undefined,
+		opts.bools["working-tree"] === true,
+	].filter(Boolean).length;
+	if (selected > 1) return "--scope-file, --diff, and --working-tree are mutually exclusive";
 	if (opts.flags.diff !== undefined) return { kind: "diff", base: opts.flags.diff };
+	if (opts.flags["scope-file"] !== undefined) {
+		return { kind: "scope_file", path: resolve(opts.flags["scope-file"]) };
+	}
 	if (opts.bools["working-tree"]) return { kind: "working_tree" };
 	return { kind: "repository" };
 }
