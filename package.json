@@ -61,7 +61,7 @@
     "release:check": "npm run typecheck && npm test && npm run build && node scripts/check-package.mjs && npm run package:smoke"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.0",
+    "@earendil-works/pi-coding-agent": "0.86.0",
     "better-sqlite3": "13.0.3",
     "typebox": "1.3.7"
   },
